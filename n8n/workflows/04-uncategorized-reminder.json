@@ -1,0 +1,129 @@
+{
+  "name": "Finspace 04 - Uncategorized reminder",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "days", "daysInterval": 1, "triggerAtHour": 19}]}},
+      "id": "daily-schedule",
+      "name": "Daily evening",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-760, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/notifications/targets?event_type=uncategorized_reminder",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=uncategorized-targets:{{ $now.toISODate() }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "targets",
+      "name": "Enabled reminder targets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-540, 0],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "items", "options": {}},
+      "id": "split-targets",
+      "name": "Split workspaces",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-320, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/reports/uncategorized",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=uncategorized:{{ $json.workspace_id }}:{{ $now.toISODate() }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { workspace_id: $json.workspace_id } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "report",
+      "name": "Generate uncategorized report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"conditions": {"number": [{"value1": "={{ $json.count }}", "operation": "larger", "value2": 0}]}},
+      "id": "if-items",
+      "name": "Only when items exist",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [150, -60]
+    },
+    {
+      "parameters": {"jsCode": "const out=[]; for(const r of ($json.recipients||[])){for(const text of ($json.messages||[])){out.push({json:{telegram_user_id:r.telegram_user_id,chat_id:r.telegram_chat_id,text}});}} return out;"},
+      "id": "deliveries",
+      "name": "Prepare deliveries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [370, -100]
+    },
+    {
+      "parameters": {"chatId": "={{ $json.chat_id }}", "text": "={{ $json.text }}", "additionalFields": {}},
+      "id": "send",
+      "name": "Send Telegram reminder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [590, -100],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/delivery-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=uncategorized-delivery:{{ $execution.id }}:{{ $json.message_id }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_user_id: $('Prepare deliveries').item.json.telegram_user_id, telegram_chat_id: $json.chat.id, delivery_id: String($json.message_id), status: 'sent' } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "delivery",
+      "name": "Record delivery status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [810, -100],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "error",
+      "name": "Handle error safely",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [810, 160]
+    }
+  ],
+  "connections": {
+    "Daily evening": {"main": [[{"node": "Enabled reminder targets", "type": "main", "index": 0}]]},
+    "Enabled reminder targets": {"main": [[{"node": "Split workspaces", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Split workspaces": {"main": [[{"node": "Generate uncategorized report", "type": "main", "index": 0}]]},
+    "Generate uncategorized report": {"main": [[{"node": "Only when items exist", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Only when items exist": {"main": [[{"node": "Prepare deliveries", "type": "main", "index": 0}], []]},
+    "Prepare deliveries": {"main": [[{"node": "Send Telegram reminder", "type": "main", "index": 0}]]},
+    "Send Telegram reminder": {"main": [[{"node": "Record delivery status", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Record delivery status": {"main": [[], [{"node": "Handle error safely", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "versionId": "00000000-0000-4000-8000-000000000004",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}

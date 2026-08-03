@@ -1,0 +1,118 @@
+{
+  "name": "Finspace 06 - Backup health",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "days", "daysInterval": 1, "triggerAtHour": 8}]}},
+      "id": "backup-schedule",
+      "name": "Daily backup check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-760, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/backup/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=backup-status:{{ $now.toISODate() }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "status",
+      "name": "Backup status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-540, 0],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"conditions": {"string": [{"value1": "={{ $json.status }}", "operation": "notEqual", "value2": "healthy"}]}},
+      "id": "if-problem",
+      "name": "Only stale failed or missing",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-320, -60]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/notifications/targets?event_type=backup_problem",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=backup-problem-targets:{{ $now.toISODate() }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "targets",
+      "name": "Backup alert targets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, -100],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const s=$('Backup status').first().json; const out=[]; for(const t of ($json.items||[])){for(const r of (t.recipients||[])){out.push({json:{telegram_user_id:r.telegram_user_id,chat_id:r.telegram_chat_id,text:`Проблема резервного копирования: ${s.status}. ${s.warning||''}`}});}} return out;"
+      },
+      "id": "deliveries",
+      "name": "Prepare backup alerts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [160, -100]
+    },
+    {
+      "parameters": {"chatId": "={{ $json.chat_id }}", "text": "={{ $json.text }}", "additionalFields": {}},
+      "id": "send",
+      "name": "Send backup alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [400, -100],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/delivery-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=backup-delivery:{{ $execution.id }}:{{ $json.message_id }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_user_id: $('Prepare backup alerts').item.json.telegram_user_id, telegram_chat_id: $json.chat.id, delivery_id: String($json.message_id), status: 'sent' } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "delivery",
+      "name": "Record delivery status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [620, -100],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "error",
+      "name": "Handle error safely",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [620, 160]
+    }
+  ],
+  "connections": {
+    "Daily backup check": {"main": [[{"node": "Backup status", "type": "main", "index": 0}]]},
+    "Backup status": {"main": [[{"node": "Only stale failed or missing", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Only stale failed or missing": {"main": [[{"node": "Backup alert targets", "type": "main", "index": 0}], []]},
+    "Backup alert targets": {"main": [[{"node": "Prepare backup alerts", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Prepare backup alerts": {"main": [[{"node": "Send backup alert", "type": "main", "index": 0}]]},
+    "Send backup alert": {"main": [[{"node": "Record delivery status", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Record delivery status": {"main": [[], [{"node": "Handle error safely", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "versionId": "00000000-0000-4000-8000-000000000006",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}

@@ -1,0 +1,102 @@
+.env
+data/imports/*
+!data/imports/.gitkeep
+data/acceptance/*
+!data/acceptance/.gitkeep
+backups/*
+!backups/.gitkeep
+!backups/database/
+backups/database/*
+!backups/database/.gitkeep
+!backups/restore-tests/
+backups/restore-tests/*
+!backups/restore-tests/.gitkeep
+!backups/acceptance-reports/
+backups/acceptance-reports/*
+!backups/acceptance-reports/.gitkeep
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+npm-debug.log*
+*.tsbuildinfo
+
+# Local Google Apps Script tooling
+.clasp.json
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local artifacts
+*.log
+
+# Finspace security exclusions
+.gitignore.backup-*
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+authorized_keys
+
+# Secret and credential directories
+secrets/
+credentials/
+private/
+
+# Local database and backup artifacts
+*.dump
+*.backup
+*.bak
+*.sql
+*.sql.gz
+*.sqlite
+*.sqlite3
+
+# n8n runtime data — workflow JSON remains tracked
+.n8n/
+n8n_data/
+n8n/data/
+n8n/.n8n/
+
+# Local runtime volumes
+postgres_data/
+redis_data/
+docker-data/
+
+# Temporary and generated artifacts
+tmp/
+temp/
+*.tmp
+*.pid
+
+# IDE assistants and local tooling
+.codex/
+.claude/
+.cursor/
+
+# Generated Python package build
+backend/build/
+backend/*.egg-info/

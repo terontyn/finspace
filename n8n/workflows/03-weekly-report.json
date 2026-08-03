@@ -1,0 +1,120 @@
+{
+  "name": "Finspace 03 - Weekly report",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "weeks", "weeksInterval": 1, "triggerAtDay": [1], "triggerAtHour": 9}]}},
+      "id": "weekly-schedule",
+      "name": "Monday morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-760, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/notifications/targets?event_type=weekly_report",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=weekly-targets:{{ $now.toFormat(\"kkkk-'W'WW\") }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "targets",
+      "name": "Enabled weekly targets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-540, 0],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "items", "options": {}},
+      "id": "split-targets",
+      "name": "Split workspaces",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-320, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/reports/weekly",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=weekly-report:{{ $json.workspace_id }}:{{ $now.startOf('week').toISODate() }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { workspace_id: $json.workspace_id, week_start: $now.startOf('week').toISODate() } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "report",
+      "name": "Generate weekly report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"jsCode": "const out=[]; for(const r of ($json.recipients||[])){for(const text of ($json.messages||[])){out.push({json:{telegram_user_id:r.telegram_user_id,chat_id:r.telegram_chat_id,text}});}} return out;"},
+      "id": "deliveries",
+      "name": "Prepare deliveries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [160, -60]
+    },
+    {
+      "parameters": {"chatId": "={{ $json.chat_id }}", "text": "={{ $json.text }}", "additionalFields": {}},
+      "id": "send",
+      "name": "Send Telegram report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [400, -60],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/delivery-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=weekly-delivery:{{ $execution.id }}:{{ $json.message_id }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_user_id: $('Prepare deliveries').item.json.telegram_user_id, telegram_chat_id: $json.chat.id, delivery_id: String($json.message_id), status: 'sent' } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "delivery",
+      "name": "Record delivery status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [620, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "error",
+      "name": "Handle error safely",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [620, 160]
+    }
+  ],
+  "connections": {
+    "Monday morning": {"main": [[{"node": "Enabled weekly targets", "type": "main", "index": 0}]]},
+    "Enabled weekly targets": {"main": [[{"node": "Split workspaces", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Split workspaces": {"main": [[{"node": "Generate weekly report", "type": "main", "index": 0}]]},
+    "Generate weekly report": {"main": [[{"node": "Prepare deliveries", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Prepare deliveries": {"main": [[{"node": "Send Telegram report", "type": "main", "index": 0}]]},
+    "Send Telegram report": {"main": [[{"node": "Record delivery status", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Record delivery status": {"main": [[], [{"node": "Handle error safely", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "versionId": "00000000-0000-4000-8000-000000000003",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}

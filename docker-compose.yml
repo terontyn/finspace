@@ -1,0 +1,325 @@
+name: finspace
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_TEST_DB: ${POSTGRES_TEST_DB:-finspace_test}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - finspace
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - finspace
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:-Finspace}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      TESTING: ${TESTING:-false}
+      DEBUG: ${DEBUG:-false}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      TEST_DATABASE_URL: ${TEST_DATABASE_URL:?TEST_DATABASE_URL is required}
+      TEST_REDIS_URL: ${TEST_REDIS_URL:-redis://redis:6379/15}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      BACKEND_HOST: ${BACKEND_HOST:-0.0.0.0}
+      BACKEND_PORT: ${BACKEND_PORT:-8000}
+      BACKEND_VERSION: ${BACKEND_VERSION:-0.1.0}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      ACCESS_TOKEN_TTL_MINUTES: ${ACCESS_TOKEN_TTL_MINUTES:-15}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
+      AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-finspace_refresh}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      ALLOW_DEV_AUTH_HEADERS: ${ALLOW_DEV_AUTH_HEADERS:-false}
+      IMPORT_MAX_FILE_SIZE_MB: ${IMPORT_MAX_FILE_SIZE_MB:-20}
+      IMPORT_MAX_ROWS: ${IMPORT_MAX_ROWS:-100000}
+      IMPORT_ALLOWED_EXTENSIONS: ${IMPORT_ALLOWED_EXTENSIONS:-csv,xlsx}
+      IMPORT_STORAGE_PATH: ${IMPORT_STORAGE_PATH:-/app/data/imports}
+      GOOGLE_SYNC_PROVIDER: ${GOOGLE_SYNC_PROVIDER:-apps_script_bridge}
+      GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-false}
+      APPS_SCRIPT_BRIDGE_ENABLED: ${APPS_SCRIPT_BRIDGE_ENABLED:-true}
+      PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-}
+      APPS_SCRIPT_PULL_BATCH_SIZE: ${APPS_SCRIPT_PULL_BATCH_SIZE:-100}
+      APPS_SCRIPT_HEARTBEAT_TTL_MINUTES: ${APPS_SCRIPT_HEARTBEAT_TTL_MINUTES:-15}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/google/callback}
+      GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid,email,profile,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive.file}
+      GOOGLE_TOKEN_ENCRYPTION_KEY: ${GOOGLE_TOKEN_ENCRYPTION_KEY:-}
+      GOOGLE_TOKEN_ENCRYPTION_KEY_VERSION: ${GOOGLE_TOKEN_ENCRYPTION_KEY_VERSION:-1}
+      GOOGLE_SHEETS_SYNC_ENABLED: ${GOOGLE_SHEETS_SYNC_ENABLED:-true}
+      GOOGLE_SHEETS_WORKER_BATCH_SIZE: ${GOOGLE_SHEETS_WORKER_BATCH_SIZE:-100}
+      GOOGLE_SHEETS_WORKER_POLL_SECONDS: ${GOOGLE_SHEETS_WORKER_POLL_SECONDS:-5}
+      GOOGLE_SHEETS_MAX_RETRY_ATTEMPTS: ${GOOGLE_SHEETS_MAX_RETRY_ATTEMPTS:-8}
+      GOOGLE_SHEETS_WEBHOOK_MAX_CLOCK_SKEW_SECONDS: ${GOOGLE_SHEETS_WEBHOOK_MAX_CLOCK_SKEW_SECONDS:-300}
+      GOOGLE_SHEETS_TEMPLATE_VERSION: ${GOOGLE_SHEETS_TEMPLATE_VERSION:-1}
+      PUBLIC_WEBHOOK_BASE_URL: ${PUBLIC_WEBHOOK_BASE_URL:-}
+      N8N_HEARTBEAT_STALE_MINUTES: ${N8N_HEARTBEAT_STALE_MINUTES:-15}
+      BACKUP_METADATA_PATH: /app/backups/database
+      BACKUP_STALE_HOURS: ${BACKUP_STALE_HOURS:-36}
+      BACKUP_REMOTE_PROVIDER: ${BACKUP_REMOTE_PROVIDER:-disabled}
+      BACKUP_SECONDARY_PATH: ${BACKUP_SECONDARY_PATH:-}
+      BACKUP_REMOTE_AFTER_VERIFY: ${BACKUP_REMOTE_AFTER_VERIFY:-true}
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - ${BACKEND_HOST:-0.0.0.0}
+      - --port
+      - ${BACKEND_PORT:-8000}
+      - --reload
+    volumes:
+      - ./backend:/app
+      - ./data/imports:/app/data/imports
+      - ./data/acceptance:/app/data/acceptance
+      - ./backups/acceptance-reports:/app/data/acceptance-reports
+      - ./backups:/app/backups:ro
+      - ./google-apps-script:/app/google-apps-script:ro
+      - ./n8n:/app/n8n:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - finspace
+      - automation
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL is required}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:?INTERNAL_API_URL is required}
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+      - frontend_next_cache:/app/.next
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - finspace
+
+  n8n:
+    image: n8nio/n8n:2.30.5
+    restart: unless-stopped
+    init: true
+    environment:
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      # Keep the rest of the Compose stack usable before n8n is configured.
+      # The startup guard below refuses to run n8n with an empty/example key.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      GENERIC_TIMEZONE: ${N8N_TIMEZONE:-Europe/Amsterdam}
+      TZ: ${N8N_TIMEZONE:-Europe/Amsterdam}
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_SECURE_COOKIE: "false"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      EXECUTIONS_DATA_PRUNE: ${N8N_EXECUTIONS_DATA_PRUNE:-true}
+      EXECUTIONS_DATA_MAX_AGE: ${N8N_EXECUTIONS_DATA_MAX_AGE_HOURS:-336}
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      FINSPACE_BACKEND_URL: ${FINSPACE_N8N_BACKEND_URL:-http://backend:8000}
+      NODES_EXCLUDE: '["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.postgres","n8n-nodes-base.redis"]'
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -z "$${N8N_ENCRYPTION_KEY}" ] || [ "$${N8N_ENCRYPTION_KEY}" = "change_me_with_long_random_value" ]; then
+          echo "N8N_ENCRYPTION_KEY must be set to a private random value" >&2
+          exit 78
+        fi
+        exec n8n
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/workflows
+    ports:
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - automation
+
+  sync-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      TESTING: ${TESTING:-false}
+      GOOGLE_SYNC_PROVIDER: ${GOOGLE_SYNC_PROVIDER:-apps_script_bridge}
+      GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-false}
+      APPS_SCRIPT_BRIDGE_ENABLED: ${APPS_SCRIPT_BRIDGE_ENABLED:-true}
+      PUBLIC_BACKEND_URL: ${PUBLIC_BACKEND_URL:-}
+      APPS_SCRIPT_PULL_BATCH_SIZE: ${APPS_SCRIPT_PULL_BATCH_SIZE:-100}
+      APPS_SCRIPT_HEARTBEAT_TTL_MINUTES: ${APPS_SCRIPT_HEARTBEAT_TTL_MINUTES:-15}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/google/callback}
+      GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid,email,profile,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/drive.file}
+      GOOGLE_TOKEN_ENCRYPTION_KEY: ${GOOGLE_TOKEN_ENCRYPTION_KEY:-}
+      GOOGLE_TOKEN_ENCRYPTION_KEY_VERSION: ${GOOGLE_TOKEN_ENCRYPTION_KEY_VERSION:-1}
+      GOOGLE_SHEETS_SYNC_ENABLED: ${GOOGLE_SHEETS_SYNC_ENABLED:-true}
+      GOOGLE_SHEETS_WORKER_BATCH_SIZE: ${GOOGLE_SHEETS_WORKER_BATCH_SIZE:-100}
+      GOOGLE_SHEETS_WORKER_POLL_SECONDS: ${GOOGLE_SHEETS_WORKER_POLL_SECONDS:-5}
+      GOOGLE_SHEETS_MAX_RETRY_ATTEMPTS: ${GOOGLE_SHEETS_MAX_RETRY_ATTEMPTS:-8}
+      GOOGLE_SHEETS_WEBHOOK_MAX_CLOCK_SKEW_SECONDS: ${GOOGLE_SHEETS_WEBHOOK_MAX_CLOCK_SKEW_SECONDS:-300}
+      GOOGLE_SHEETS_TEMPLATE_VERSION: ${GOOGLE_SHEETS_TEMPLATE_VERSION:-1}
+      PUBLIC_WEBHOOK_BASE_URL: ${PUBLIC_WEBHOOK_BASE_URL:-}
+    command: ["python", "-m", "app.workers.sync_worker"]
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - finspace
+
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - finspace
+
+  backup:
+    image: postgres:17
+    profiles: ["tools"]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      BACKUP_STORAGE_PATH: ${BACKUP_STORAGE_PATH:-/backups/database}
+      BACKUP_RETENTION_DAILY: ${BACKUP_RETENTION_DAILY:-7}
+      BACKUP_RETENTION_WEEKLY: ${BACKUP_RETENTION_WEEKLY:-4}
+      BACKUP_REMOTE_PROVIDER: ${BACKUP_REMOTE_PROVIDER:-disabled}
+      BACKUP_SECONDARY_PATH: /secondary
+      BACKUP_REMOTE_AFTER_VERIFY: ${BACKUP_REMOTE_AFTER_VERIFY:-true}
+    volumes:
+      - ./backups:/backups
+      - ${BACKUP_SECONDARY_PATH:-./backups/secondary}:/secondary
+      - ./scripts:/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - finspace
+
+networks:
+  finspace:
+    name: finspace_network
+    driver: bridge
+  automation:
+    name: finspace_automation_network
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: finspace_postgres_data
+  redis_data:
+    name: finspace_redis_data
+  frontend_node_modules:
+    name: finspace_frontend_node_modules
+  frontend_next_cache:
+    name: finspace_frontend_next_cache
+  n8n_data:
+    name: finspace_n8n_data
