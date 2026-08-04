@@ -147,7 +147,7 @@ export class ApiClient {
   private sessionExpiredHandler: (() => void) | null = null;
 
   constructor(fetcher: typeof fetch = fetch, logger: SafeLogger = console) {
-    this.fetcher = fetcher;
+    this.fetcher = fetcher.bind(globalThis);
     this.logger = logger;
   }
 

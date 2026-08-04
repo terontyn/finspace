@@ -48,6 +48,23 @@ test("API URL builder normalizes relative and absolute bases", () => {
   }
 });
 
+test("API client preserves the browser receiver required by window.fetch", async () => {
+  const fetcher = function (this: typeof globalThis) {
+    if (this !== globalThis) {
+      throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  } as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  assert.deepEqual(await client.get("/api/v1/health"), { ok: true });
+});
+
 test("restoreSession returns null when the refresh session is absent", async () => {
   let receivedUrl = "";
   let receivedInit: RequestInit | undefined;
