@@ -1,6 +1,7 @@
 import type { ApiErrorResponse, ReadinessResponse, SystemStatus } from "@/types/system";
+import { buildApiUrl } from "./api-url";
 
-export const publicApiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export { publicApiUrl } from "./api-url";
 
 export interface StatusResult {
   status: SystemStatus;
@@ -15,7 +16,7 @@ function dependencyStatus(
 
 export async function fetchSystemStatus(signal?: AbortSignal): Promise<StatusResult> {
   try {
-    const response = await fetch(`${publicApiUrl}/api/v1/health/ready`, {
+    const response = await fetch(buildApiUrl("/api/v1/health/ready"), {
       cache: "no-store",
       headers: { Accept: "application/json" },
       signal,

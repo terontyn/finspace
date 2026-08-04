@@ -19,8 +19,9 @@ Script Bridge без Google Cloud OAuth: пользователь вручную
 - `backup` — вызываемый Compose service с `pg_dump`/`pg_restore`.
 - `sync-worker` — optional outbox consumer только для provider `google_oauth`.
 
-Host-порты привязаны к loopback. Браузер обращается к same-origin prefix `/local-api`,
-который Next.js проксирует в backend.
+Host-порты привязаны к loopback. Браузер обращается к same-origin `/api/*`, который
+Next.js проксирует во внутренний `http://backend:8000/api/*`; публичный backend-порт
+браузеру не требуется.
 
 ## Первый запуск
 

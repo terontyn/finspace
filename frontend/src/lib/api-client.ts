@@ -1,4 +1,6 @@
-export const publicApiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { buildApiUrl } from "./api-url.ts";
+
+export { publicApiUrl } from "./api-url.ts";
 
 export interface AuthUser {
   id: string;
@@ -201,16 +203,20 @@ export class ApiClient {
   private async send<T>(path: string, init: RequestInit): Promise<T> {
     let response: Response;
     try {
-      response = await this.fetcher(`${publicApiUrl}${path}`, {
+      response = await this.fetcher(buildApiUrl(path), {
         ...init,
         cache: "no-store",
         credentials: "include",
       });
     } catch (error) {
       if (isAbortError(error)) throw error;
+      this.logger.warn("[api] Browser request failed before receiving an HTTP response.", {
+        reason: "browser_fetch_failed",
+        error_name: error instanceof Error ? error.name : "UnknownError",
+      });
       throw new ApiClientError(
-        "Backend недоступен. Проверьте Docker Compose и адрес API.",
-        "API_UNAVAILABLE",
+        "Браузер не смог выполнить API-запрос. Проверьте TLS и блокировку сетевого запроса.",
+        "API_NETWORK_ERROR",
         0,
       );
     }

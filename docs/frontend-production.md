@@ -18,19 +18,27 @@ HTML и React effects, включая восстановление сессии,
   `app`.
 
 Единственная переменная, которая встраивается в клиентский JavaScript, —
-`NEXT_PUBLIC_API_URL`. Она не является секретом, но должна быть передана именно при build:
+`NEXT_PUBLIC_API_URL`. В production она равна `/`: браузер вызывает same-origin
+`/api/v1/...`, а Next.js route proxy обращается к backend только во внутренней Docker-сети.
+Переменная не является секретом, но должна быть передана именно при build:
 
 ```bash
 docker build \
-  --build-arg NEXT_PUBLIC_API_URL=https://terontyn-pc.tailfcdf00.ts.net:8443 \
+  --build-arg NEXT_PUBLIC_API_URL=/ \
   --target production \
   -t finspace-frontend:production \
   ./frontend
 ```
 
-`INTERNAL_API_URL` используется серверным rewrite. Это не публичная переменная и не build
-secret; production Compose передаёт её только runtime-контейнеру. JWT, пароли, Google,
-n8n и другие секреты нельзя передавать как build args или в frontend environment.
+`INTERNAL_API_URL` используется серверным proxy и по умолчанию равен
+`http://backend:8000`. Это не публичная переменная и не build secret; production Compose
+передаёт её только runtime-контейнеру. Proxy сохраняет HTTP method, query, body, cookies,
+status, response body и end-to-end headers, включая `Set-Cookie`, но удаляет hop-by-hop
+headers. JWT, пароли, Google, n8n и другие секреты нельзя передавать как build args или
+в frontend environment.
+
+Прямой `https://host:8443` не используется frontend: это устраняет зависимость auth от
+браузерной политики доступа к нестандартному порту и делает refresh cookie first-party.
 
 ## Production Compose
 
@@ -54,6 +62,7 @@ Override использует Compose tag `!reset`, поэтому у production
 override, ручное обновление выполняется так:
 
 ```bash
+sudo cp -a /etc/finspace/compose.server.yml "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
 sudo install -o root -g root -m 0644 /opt/finspace/compose.production.yml /etc/finspace/compose.server.yml
 sudo finspace-compose build --no-cache frontend
 sudo finspace-compose up -d --no-deps frontend

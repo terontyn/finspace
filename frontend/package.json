@@ -9,7 +9,7 @@
     "start": "next start --hostname 0.0.0.0",
     "lint": "eslint .",
     "typecheck": "next typegen && tsc --noEmit --incremental false -p tsconfig.typecheck.json",
-    "test": "tsx --test src/components/auth-provider.test.tsx src/lib/api-client.test.ts src/lib/auth-session.test.ts src/lib/money.test.ts src/lib/google-sync.test.ts"
+    "test": "tsx --test src/components/auth-provider.test.tsx src/lib/api-client.test.ts src/lib/auth-session.test.ts src/lib/money.test.ts src/lib/google-sync.test.ts src/lib/server/api-proxy.test.ts"
   },
   "dependencies": {
     "next": "16.2.11",

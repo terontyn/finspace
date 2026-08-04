@@ -53,8 +53,10 @@ tunnel автоматически и выключайте его после smok
 ## Frontend
 
 Вся HTTP-логика проходит через `frontend/src/lib/api-client.ts`. Access token нельзя
-переносить в localStorage/sessionStorage. `NEXT_PUBLIC_API_URL=/local-api` — публичный
-same-origin prefix, не секрет.
+переносить в localStorage/sessionStorage. `NEXT_PUBLIC_API_URL=/` оставляет `/api/*`
+на origin frontend; Next.js проксирует эти запросы к `INTERNAL_API_URL` во внутренней
+Docker-сети. Обе переменные не являются секретами. Старый `/local-api` rewrite оставлен
+только для совместимости существующих локальных `.env`.
 
 ```powershell
 docker compose exec frontend npm test

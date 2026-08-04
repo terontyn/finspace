@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiClient, ApiClientError } from "./api-client.ts";
+import { buildApiUrl, normalizeApiBase } from "./api-url.ts";
 
 const authResponse = {
   access_token: "memory-only-access-token",
@@ -26,16 +27,37 @@ const authResponse = {
   },
 };
 
+test("API URLs default to same-origin paths", () => {
+  assert.equal(normalizeApiBase("/"), "");
+  assert.equal(normalizeApiBase("/local-api/"), "/local-api");
+  assert.equal(buildApiUrl("/api/v1/auth/refresh", "/"), "/api/v1/auth/refresh");
+  assert.equal(
+    buildApiUrl("/api/v1/auth/login", "https://api.example.test/"),
+    "https://api.example.test/api/v1/auth/login",
+  );
+  assert.throws(() => buildApiUrl("api/v1/auth/login"), /must start with a slash/);
+});
+
 test("restoreSession returns null when the refresh session is absent", async () => {
+  let receivedUrl = "";
+  let receivedInit: RequestInit | undefined;
   const fetcher = (async () =>
     new Response(JSON.stringify({ error: { code: "SESSION_EXPIRED" } }), {
       status: 401,
       headers: { "Content-Type": "application/json" },
     })) as typeof fetch;
-  const client = new ApiClient(fetcher);
+  const recordingFetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    receivedUrl = String(input);
+    receivedInit = init;
+    return fetcher(input, init);
+  }) as typeof fetch;
+  const client = new ApiClient(recordingFetcher);
 
   assert.equal(await client.restoreSession(), null);
   assert.equal(client.getSession(), null);
+  assert.equal(receivedUrl, "/api/v1/auth/refresh");
+  assert.equal(receivedInit?.method, "POST");
+  assert.equal(receivedInit?.credentials, "include");
 });
 
 test("restoreSession restores a valid session", async () => {
@@ -143,8 +165,12 @@ test("concurrent restoreSession calls share one refresh request", async () => {
 
 test("login keeps access token in memory and adds bearer/workspace headers", async () => {
   const captured: Headers[] = [];
+  const urls: string[] = [];
+  const bodies: Array<BodyInit | null | undefined> = [];
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
     captured.push(new Headers(init?.headers));
+    urls.push(String(input));
+    bodies.push(init?.body);
     const path = String(input);
     return new Response(JSON.stringify(path.endsWith("/auth/login") ? authResponse : { ok: true }), {
       status: 200,
@@ -159,6 +185,42 @@ test("login keeps access token in memory and adds bearer/workspace headers", asy
   assert.equal(captured[1].get("Authorization"), `Bearer ${authResponse.access_token}`);
   assert.equal(captured[1].get("X-Workspace-ID"), authResponse.workspace.id);
   assert.equal(captured[1].get("X-User-ID"), null);
+  assert.equal(urls[0], "/api/v1/auth/login");
+  assert.equal(captured[0].get("Content-Type"), "application/json");
+  assert.deepEqual(JSON.parse(String(bodies[0])), {
+    email: "person@example.com",
+    password: "long-password",
+  });
+});
+
+test("register sends the FastAPI registration schema to the same origin", async () => {
+  let receivedUrl = "";
+  let receivedInit: RequestInit | undefined;
+  const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    receivedUrl = String(input);
+    receivedInit = init;
+    return new Response(JSON.stringify(authResponse), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  const client = new ApiClient(fetcher);
+  const registration = {
+    email: "person@example.com",
+    display_name: "Person",
+    password: "long-password",
+    workspace_name: "Personal",
+    base_currency: "RUB",
+    timezone: "Europe/Amsterdam",
+  };
+
+  await client.register(registration);
+
+  assert.equal(receivedUrl, "/api/v1/auth/register");
+  assert.equal(receivedInit?.method, "POST");
+  assert.equal(receivedInit?.credentials, "include");
+  assert.equal(new Headers(receivedInit?.headers).get("Content-Type"), "application/json");
+  assert.deepEqual(JSON.parse(String(receivedInit?.body)), registration);
 });
 
 test("one 401 performs one refresh and retries the original request", async () => {
@@ -211,7 +273,43 @@ test("API client converts the common error envelope", async () => {
   });
 });
 
-test("API client reports an unavailable backend", async () => {
-  const fetcher = (async () => { throw new TypeError("connection refused"); }) as typeof fetch;
-  await assert.rejects(new ApiClient(fetcher).request("/api/v1/auth/login", {}, false), { code: "API_UNAVAILABLE", status: 0 });
+test("API client preserves validation status and details", async () => {
+  const fetcher = (async () =>
+    new Response(
+      JSON.stringify({
+        error: { code: "VALIDATION_ERROR", message: "Invalid input", details: { field: "email" } },
+      }),
+      { status: 422, headers: { "Content-Type": "application/json" } },
+    )) as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  await assert.rejects(client.login("bad", "long-password"), (error: unknown) => {
+    assert.ok(error instanceof ApiClientError);
+    assert.equal(error.status, 422);
+    assert.equal(error.code, "VALIDATION_ERROR");
+    assert.deepEqual(error.details, { field: "email" });
+    return true;
+  });
+});
+
+test("API client reports a safe browser-network diagnostic without leaking the cause", async () => {
+  const secretMarker = "private-host-and-token-must-not-leak";
+  const warnings: Array<[string, Record<string, unknown>]> = [];
+  const fetcher = (async () => { throw new TypeError(secretMarker); }) as typeof fetch;
+  const client = new ApiClient(fetcher, {
+    warn: (message, context) => warnings.push([message, context]),
+  });
+
+  await assert.rejects(client.request("/api/v1/auth/login", {}, false), (error: unknown) => {
+    assert.ok(error instanceof ApiClientError);
+    assert.equal(error.code, "API_NETWORK_ERROR");
+    assert.equal(error.status, 0);
+    assert.doesNotMatch(error.message, new RegExp(secretMarker));
+    return true;
+  });
+  assert.deepEqual(warnings, [[
+    "[api] Browser request failed before receiving an HTTP response.",
+    { reason: "browser_fetch_failed", error_name: "TypeError" },
+  ]]);
+  assert.doesNotMatch(JSON.stringify(warnings), new RegExp(secretMarker));
 });

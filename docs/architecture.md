@@ -3,9 +3,9 @@
 ## Контейнеры и потоки
 
 ```text
-Браузер -> Next.js :3000 -> /local-api/* -> FastAPI :8000
-                                           |-> PostgreSQL :5432
-                                           `-> Redis :6379 (login rate limit/readiness)
+Браузер -> Next.js :3000 -> /api/* -> FastAPI :8000 (Docker network)
+                                     |-> PostgreSQL :5432
+                                     `-> Redis :6379 (login rate limit/readiness)
 backup service -> pg_dump/pg_restore -> ./backups -> временная restore-БД
 FastAPI upload -> ./data/imports -> import_batches/import_rows -> transactions
 FastAPI -> PostgreSQL + sync_outbox -> sync-worker -> Google Sheets API
