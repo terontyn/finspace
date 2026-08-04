@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { redirect } from "next/navigation";
+import { useCallback, useState } from "react";
 
 import { useAuth } from "@/components/auth-provider";
 import { AccountsScreen } from "@/components/screens/accounts-screen";
@@ -48,10 +49,6 @@ export function FinanceApp() {
   const [screen, setScreen] = useState<Screen>("today");
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!auth.loading && !auth.session) window.location.replace("/login");
-  }, [auth.loading, auth.session]);
-
   const showError = useCallback((requestError: unknown) => {
     if (requestError instanceof ApiClientError) {
       const requestHint = requestError.requestId ? ` · request ${requestError.requestId}` : "";
@@ -61,8 +58,12 @@ export function FinanceApp() {
     setError("Произошла непредвиденная ошибка.");
   }, []);
 
-  if (auth.loading || !auth.session) {
+  if (auth.loading) {
     return <main className="loading-page">Восстанавливаем защищённую сессию…</main>;
+  }
+
+  if (!auth.session) {
+    redirect("/login");
   }
 
   return (
