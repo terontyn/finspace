@@ -86,6 +86,34 @@ function isAbortError(error: unknown): boolean {
   return isRecord(error) && error.name === "AbortError";
 }
 
+function sessionRestoreTimeoutError(): Error {
+  if (typeof DOMException !== "undefined") {
+    return new DOMException("Session restoration timed out", "AbortError");
+  }
+  const error = new Error("Session restoration timed out");
+  error.name = "AbortError";
+  return error;
+}
+
+async function enforceTimeout<T>(
+  operation: Promise<T>,
+  controller: AbortController,
+  timeoutMs: number,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(sessionRestoreTimeoutError());
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
 export class ApiClientError extends Error {
   readonly code: string;
   readonly status: number;
@@ -217,15 +245,18 @@ export class ApiClient {
     if (this.restorePromise) return this.restorePromise;
     const controller = new AbortController();
     const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_SESSION_RESTORE_TIMEOUT_MS);
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     const restoration = (async () => {
       try {
-        const response = await this.send<AuthResponse>("/api/v1/auth/refresh", {
-          method: "POST",
-          headers: { Accept: "application/json" },
-          signal: controller.signal,
-        });
+        const response = await enforceTimeout(
+          this.send<AuthResponse>("/api/v1/auth/refresh", {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
+          }),
+          controller,
+          timeoutMs,
+        );
         return this.acceptAuth(response);
       } catch (error) {
         this.clearSession();
@@ -235,8 +266,6 @@ export class ApiClient {
           return null;
         }
         throw error;
-      } finally {
-        clearTimeout(timeoutId);
       }
     })();
     this.restorePromise = restoration;

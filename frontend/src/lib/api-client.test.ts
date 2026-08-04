@@ -69,15 +69,42 @@ test("a malformed session response is cleared without logging its contents", asy
   assert.doesNotMatch(JSON.stringify(warnings), new RegExp(secretMarker));
 });
 
-test("restoreSession aborts a refresh request that never settles", async () => {
-  const fetcher = ((_input: RequestInfo | URL, init?: RequestInit) =>
-    new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener(
-        "abort",
-        () => reject(new DOMException("Request aborted", "AbortError")),
-        { once: true },
-      );
-    })) as typeof fetch;
+test("restoreSession times out even when fetch ignores the abort signal", async () => {
+  let calls = 0;
+  const received = { signal: null as AbortSignal | null };
+  const fetcher = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    calls += 1;
+    received.signal = init?.signal ?? null;
+    if (calls === 1) return new Promise<Response>(() => undefined);
+    return Promise.resolve(
+      new Response(JSON.stringify({ error: { code: "SESSION_EXPIRED" } }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  }) as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  await assert.rejects(client.restoreSession({ timeoutMs: 5 }), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.name, "AbortError");
+    return true;
+  });
+  assert.equal(client.getSession(), null);
+  assert.equal(received.signal?.aborted, true);
+  assert.equal(await client.restoreSession({ timeoutMs: 5 }), null);
+  assert.equal(calls, 2, "a timed-out shared restoration must not poison the next attempt");
+});
+
+test("restoreSession timeout also covers response body parsing", async () => {
+  const response = new Response("{}", {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  Object.defineProperty(response, "json", {
+    value: () => new Promise<unknown>(() => undefined),
+  });
+  const fetcher = (async () => response) as typeof fetch;
   const client = new ApiClient(fetcher);
 
   await assert.rejects(client.restoreSession({ timeoutMs: 5 }), (error: unknown) => {

@@ -9,7 +9,7 @@
     "start": "next start --hostname 0.0.0.0",
     "lint": "eslint .",
     "typecheck": "next typegen && tsc --noEmit --incremental false -p tsconfig.typecheck.json",
-    "test": "node --experimental-strip-types --test src/lib/api-client.test.ts src/lib/auth-session.test.ts src/lib/money.test.ts src/lib/google-sync.test.ts"
+    "test": "tsx --test src/components/auth-provider.test.tsx src/lib/api-client.test.ts src/lib/auth-session.test.ts src/lib/money.test.ts src/lib/google-sync.test.ts"
   },
   "dependencies": {
     "next": "16.2.11",
@@ -20,8 +20,11 @@
     "@types/node": "^24.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/react-test-renderer": "^19.1.0",
     "eslint": "^9.39.0",
     "eslint-config-next": "16.2.11",
+    "react-test-renderer": "^19.2.8",
+    "tsx": "^4.20.3",
     "typescript": "^5.9.3"
   },
   "overrides": {
