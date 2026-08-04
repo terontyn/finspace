@@ -139,6 +139,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: development
     restart: unless-stopped
     init: true
     env_file:

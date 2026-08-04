@@ -171,6 +171,7 @@ docker compose exec frontend npm run build
 
 - [Архитектура](docs/architecture.md)
 - [Локальная разработка](docs/local-development.md)
+- [Production deployment frontend](docs/frontend-production.md)
 - [Модель безопасности](docs/security.md)
 - [Локальный n8n](docs/n8n.md)
 - [Безопасность автоматизаций](docs/automation-security.md)

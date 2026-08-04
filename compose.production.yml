@@ -1,0 +1,24 @@
+services:
+  frontend:
+    build:
+      target: production
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL is required}
+    command: ["npm", "run", "start"]
+    env_file: !reset []
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL is required}
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://backend:8000}
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes: !reset []
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
