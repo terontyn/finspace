@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { apiClient, type AuthSession } from "@/lib/api-client";
+import { restoreAuthState } from "@/lib/auth-session";
 
 interface AuthContextValue {
   loading: boolean;
@@ -20,15 +21,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(null);
 
   useEffect(() => {
+    let mounted = true;
+    const redirectToLogin = () => {
+      if (
+        !window.location.pathname.startsWith("/login") &&
+        !window.location.pathname.startsWith("/register")
+      ) {
+        window.location.replace("/login");
+      }
+    };
+
     apiClient.setSessionExpiredHandler(() => {
+      if (!mounted) return;
       setSession(null);
-      if (!window.location.pathname.startsWith("/login")) window.location.assign("/login");
+      redirectToLogin();
     });
-    void apiClient.restoreSession().then((restored) => {
-      setSession(restored);
-      setLoading(false);
+    void restoreAuthState({
+      restoreSession: () => apiClient.restoreSession(),
+      isMounted: () => mounted,
+      setSession,
+      setLoading,
+      redirectToLogin,
     });
-    return () => apiClient.setSessionExpiredHandler(null);
+    return () => {
+      mounted = false;
+      apiClient.setSessionExpiredHandler(null);
+    };
   }, []);
 
   const value = useMemo<AuthContextValue>(

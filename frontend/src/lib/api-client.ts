@@ -26,6 +26,14 @@ export interface AuthSession {
   workspace: AuthWorkspace;
 }
 
+export interface SessionRestoreOptions {
+  timeoutMs?: number;
+}
+
+interface SafeLogger {
+  warn(message: string, context: Record<string, unknown>): void;
+}
+
 interface AuthResponse {
   access_token: string;
   expires_in: number;
@@ -40,6 +48,42 @@ interface ApiErrorPayload {
     details?: unknown;
     request_id?: string;
   };
+}
+
+const DEFAULT_SESSION_RESTORE_TIMEOUT_MS = 10_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isAuthResponse(value: unknown): value is AuthResponse {
+  if (!isRecord(value) || !isRecord(value.user) || !isRecord(value.workspace)) return false;
+  const user = value.user;
+  const workspace = value.workspace;
+  return (
+    typeof value.access_token === "string" &&
+    value.access_token.length > 0 &&
+    typeof value.expires_in === "number" &&
+    Number.isFinite(value.expires_in) &&
+    value.expires_in > 0 &&
+    typeof user.id === "string" &&
+    typeof user.email === "string" &&
+    typeof user.display_name === "string" &&
+    typeof user.locale === "string" &&
+    typeof user.timezone === "string" &&
+    typeof user.is_active === "boolean" &&
+    typeof user.version === "number" &&
+    typeof workspace.id === "string" &&
+    typeof workspace.name === "string" &&
+    typeof workspace.base_currency === "string" &&
+    typeof workspace.timezone === "string" &&
+    typeof workspace.owner_user_id === "string" &&
+    typeof workspace.version === "number"
+  );
+}
+
+function isAbortError(error: unknown): boolean {
+  return isRecord(error) && error.name === "AbortError";
 }
 
 export class ApiClientError extends Error {
@@ -66,12 +110,15 @@ export class ApiClientError extends Error {
 
 export class ApiClient {
   private readonly fetcher: typeof fetch;
+  private readonly logger: SafeLogger;
   private session: AuthSession | null = null;
   private refreshPromise: Promise<boolean> | null = null;
+  private restorePromise: Promise<AuthSession | null> | null = null;
   private sessionExpiredHandler: (() => void) | null = null;
 
-  constructor(fetcher: typeof fetch = fetch) {
+  constructor(fetcher: typeof fetch = fetch, logger: SafeLogger = console) {
     this.fetcher = fetcher;
+    this.logger = logger;
   }
 
   getSession(): AuthSession | null {
@@ -82,7 +129,14 @@ export class ApiClient {
     this.sessionExpiredHandler = handler;
   }
 
-  private acceptAuth(response: AuthResponse): AuthSession {
+  private acceptAuth(response: unknown): AuthSession {
+    if (!isAuthResponse(response)) {
+      throw new ApiClientError(
+        "Ответ восстановления сессии имеет неверный формат.",
+        "AUTH_SESSION_INVALID",
+        0,
+      );
+    }
     this.session = {
       accessToken: response.access_token,
       expiresIn: response.expires_in,
@@ -94,6 +148,12 @@ export class ApiClient {
 
   clearSession(): void {
     this.session = null;
+  }
+
+  private logInvalidSessionResponse(): void {
+    this.logger.warn("[auth] Получен некорректный ответ восстановления сессии.", {
+      reason: "invalid_session_response",
+    });
   }
 
   private async parseResponse<T>(response: Response): Promise<T> {
@@ -119,7 +179,7 @@ export class ApiClient {
         credentials: "include",
       });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      if (isAbortError(error)) throw error;
       throw new ApiClientError(
         "Backend недоступен. Проверьте Docker Compose и адрес API.",
         "API_UNAVAILABLE",
@@ -139,8 +199,11 @@ export class ApiClient {
         });
         this.acceptAuth(response);
         return true;
-      } catch {
+      } catch (error) {
         this.clearSession();
+        if (error instanceof ApiClientError && error.code === "AUTH_SESSION_INVALID") {
+          this.logInvalidSessionResponse();
+        }
         if (notifyOnFailure) this.sessionExpiredHandler?.();
         return false;
       } finally {
@@ -150,9 +213,38 @@ export class ApiClient {
     return this.refreshPromise;
   }
 
-  async restoreSession(): Promise<AuthSession | null> {
-    await this.refreshAccess(false);
-    return this.session;
+  async restoreSession(options: SessionRestoreOptions = {}): Promise<AuthSession | null> {
+    if (this.restorePromise) return this.restorePromise;
+    const controller = new AbortController();
+    const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_SESSION_RESTORE_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const restoration = (async () => {
+      try {
+        const response = await this.send<AuthResponse>("/api/v1/auth/refresh", {
+          method: "POST",
+          headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        return this.acceptAuth(response);
+      } catch (error) {
+        this.clearSession();
+        if (error instanceof ApiClientError && error.status === 401) return null;
+        if (error instanceof ApiClientError && error.code === "AUTH_SESSION_INVALID") {
+          this.logInvalidSessionResponse();
+          return null;
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    })();
+    this.restorePromise = restoration;
+    try {
+      return await restoration;
+    } finally {
+      if (this.restorePromise === restoration) this.restorePromise = null;
+    }
   }
 
   async request<T>(path: string, init: RequestInit = {}, allowRefresh = true): Promise<T> {

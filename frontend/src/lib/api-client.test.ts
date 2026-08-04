@@ -26,6 +26,94 @@ const authResponse = {
   },
 };
 
+test("restoreSession returns null when the refresh session is absent", async () => {
+  const fetcher = (async () =>
+    new Response(JSON.stringify({ error: { code: "SESSION_EXPIRED" } }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  assert.equal(await client.restoreSession(), null);
+  assert.equal(client.getSession(), null);
+});
+
+test("restoreSession restores a valid session", async () => {
+  const fetcher = (async () =>
+    new Response(JSON.stringify(authResponse), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  const restored = await client.restoreSession();
+  assert.equal(restored?.accessToken, authResponse.access_token);
+  assert.equal(restored?.workspace.id, authResponse.workspace.id);
+});
+
+test("a malformed session response is cleared without logging its contents", async () => {
+  const secretMarker = "must-not-appear-in-logs";
+  const warnings: Array<[string, Record<string, unknown>]> = [];
+  const fetcher = (async () =>
+    new Response(JSON.stringify({ access_token: secretMarker, expires_in: 900 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })) as typeof fetch;
+  const client = new ApiClient(fetcher, {
+    warn: (message, context) => warnings.push([message, context]),
+  });
+
+  assert.equal(await client.restoreSession(), null);
+  assert.equal(client.getSession(), null);
+  assert.equal(warnings.length, 1);
+  assert.doesNotMatch(JSON.stringify(warnings), new RegExp(secretMarker));
+});
+
+test("restoreSession aborts a refresh request that never settles", async () => {
+  const fetcher = ((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Request aborted", "AbortError")),
+        { once: true },
+      );
+    })) as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  await assert.rejects(client.restoreSession({ timeoutMs: 5 }), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.name, "AbortError");
+    return true;
+  });
+  assert.equal(client.getSession(), null);
+});
+
+test("concurrent restoreSession calls share one refresh request", async () => {
+  let calls = 0;
+  let resolveRefresh: (response: Response) => void = () => undefined;
+  const fetcher = (() => {
+    calls += 1;
+    return new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+  }) as typeof fetch;
+  const client = new ApiClient(fetcher);
+
+  const first = client.restoreSession();
+  const second = client.restoreSession();
+  assert.equal(calls, 1);
+  resolveRefresh(
+    new Response(JSON.stringify(authResponse), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult?.accessToken, authResponse.access_token);
+  assert.equal(secondResult?.accessToken, authResponse.access_token);
+});
+
 test("login keeps access token in memory and adds bearer/workspace headers", async () => {
   const captured: Headers[] = [];
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
