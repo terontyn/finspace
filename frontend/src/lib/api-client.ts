@@ -1,4 +1,4 @@
-import { buildApiUrl } from "./api-url.ts";
+import { buildApiUrl, publicApiUrl } from "./api-url.ts";
 
 export { publicApiUrl } from "./api-url.ts";
 
@@ -203,7 +203,7 @@ export class ApiClient {
   private async send<T>(path: string, init: RequestInit): Promise<T> {
     let response: Response;
     try {
-      response = await this.fetcher(buildApiUrl(path), {
+      response = await this.fetcher(buildApiUrl(publicApiUrl, path), {
         ...init,
         cache: "no-store",
         credentials: "include",

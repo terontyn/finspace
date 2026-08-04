@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ApiClient, ApiClientError } from "./api-client.ts";
-import { buildApiUrl, normalizeApiBase } from "./api-url.ts";
+import { buildApiUrl } from "./api-url.ts";
 
 const authResponse = {
   access_token: "memory-only-access-token",
@@ -27,15 +27,25 @@ const authResponse = {
   },
 };
 
-test("API URLs default to same-origin paths", () => {
-  assert.equal(normalizeApiBase("/"), "");
-  assert.equal(normalizeApiBase("/local-api/"), "/local-api");
-  assert.equal(buildApiUrl("/api/v1/auth/refresh", "/"), "/api/v1/auth/refresh");
+test("API URL builder normalizes relative and absolute bases", () => {
+  const path = "/api/v1/health";
+  assert.equal(buildApiUrl("", path), path);
+  assert.equal(buildApiUrl("/", path), path);
+  assert.equal(buildApiUrl("/", "api/v1/health"), path);
+  assert.equal(buildApiUrl("///", "///api/v1/health"), path);
   assert.equal(
-    buildApiUrl("/api/v1/auth/login", "https://api.example.test/"),
-    "https://api.example.test/api/v1/auth/login",
+    buildApiUrl("https://example.test:8443", path),
+    "https://example.test:8443/api/v1/health",
   );
-  assert.throws(() => buildApiUrl("api/v1/auth/login"), /must start with a slash/);
+  assert.equal(
+    buildApiUrl("https://example.test:8443/", path),
+    "https://example.test:8443/api/v1/health",
+  );
+  assert.equal(buildApiUrl("/local-api/", path), "/local-api/api/v1/health");
+
+  for (const base of ["", "/", "///"]) {
+    assert.doesNotMatch(buildApiUrl(base, "/api/v1/auth/register"), /^\/\/api/);
+  }
 });
 
 test("restoreSession returns null when the refresh session is absent", async () => {

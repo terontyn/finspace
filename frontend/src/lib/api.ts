@@ -1,5 +1,5 @@
 import type { ApiErrorResponse, ReadinessResponse, SystemStatus } from "@/types/system";
-import { buildApiUrl } from "./api-url";
+import { buildApiUrl, publicApiUrl } from "./api-url";
 
 export { publicApiUrl } from "./api-url";
 
@@ -16,7 +16,7 @@ function dependencyStatus(
 
 export async function fetchSystemStatus(signal?: AbortSignal): Promise<StatusResult> {
   try {
-    const response = await fetch(buildApiUrl("/api/v1/health/ready"), {
+    const response = await fetch(buildApiUrl(publicApiUrl, "/api/v1/health/ready"), {
       cache: "no-store",
       headers: { Accept: "application/json" },
       signal,
