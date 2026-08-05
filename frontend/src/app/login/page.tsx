@@ -26,7 +26,11 @@ export default function LoginPage() {
       await auth.login(email, password);
       window.location.replace("/");
     } catch (requestError) {
-      setError(requestError instanceof ApiClientError ? requestError.message : "Не удалось войти.");
+      setError(
+        requestError instanceof ApiClientError
+          ? requestError.message
+          : "Неверный email или пароль. Попробуйте ещё раз.",
+      );
     } finally {
       setBusy(false);
     }
@@ -43,7 +47,7 @@ export default function LoginPage() {
       setError(
         requestError instanceof ApiClientError
           ? requestError.message
-          : "Development bootstrap недоступен.",
+          : "Не удалось создать тестового пользователя.",
       );
     } finally {
       setBusy(false);
@@ -69,32 +73,73 @@ export default function LoginPage() {
   return (
     <main className="auth-shell">
       <section className="auth-card">
-        <div className="brand-symbol">Ф</div>
-        <span className="kicker">Локальная аутентификация</span>
-        <h1>С возвращением</h1>
-        <p>Access token хранится только в памяти браузера, а сессия безопасно обновляется cookie.</p>
-        {error ? <div className="notice notice--error">{error}</div> : null}
+        {/* Логотип */}
+        <div className="brand-logo">Ф</div>
+
+        <span className="kicker">Личный финансовый трекер</span>
+        <h1>Добро пожаловать</h1>
+        <p>Войдите, чтобы продолжить управлять своими финансами.</p>
+
+        {error ? (
+          <div className="notice notice--error" role="alert">
+            {error}
+          </div>
+        ) : null}
+
         <form className="auth-form" onSubmit={(event) => void submit(event)}>
           <label>
             Email
-            <input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+            <input
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
           </label>
           <label>
             Пароль
-            <input type="password" minLength={10} maxLength={128} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+            <input
+              type="password"
+              minLength={10}
+              maxLength={128}
+              autoComplete="current-password"
+              placeholder="Минимум 10 символов"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
           </label>
-          <button type="submit" disabled={busy}>{busy ? "Проверяем…" : "Войти"}</button>
+          <button type="submit" disabled={busy} style={{ marginTop: 4 }}>
+            {busy ? "Проверяем…" : "Войти в аккаунт →"}
+          </button>
         </form>
+
         {developmentUserId ? (
-          <button className="secondary-button auth-wide-button" type="button" disabled={busy || password.length < 10} onClick={() => void setDevPassword()}>
+          <button
+            className="secondary-button auth-wide-button"
+            type="button"
+            disabled={busy || password.length < 10}
+            onClick={() => void setDevPassword()}
+          >
             Задать этот пароль dev-пользователю
           </button>
         ) : process.env.NODE_ENV === "development" ? (
-          <button className="text-button auth-wide-button" type="button" disabled={busy} onClick={() => void bootstrap()}>
-            Подготовить development-пользователя
+          <button
+            className="text-button auth-wide-button"
+            type="button"
+            disabled={busy}
+            onClick={() => void bootstrap()}
+          >
+            Создать dev-пользователя
           </button>
         ) : null}
-        <small>Нет пространства? <Link href="/register">Создать аккаунт</Link></small>
+
+        <small>
+          Нет аккаунта?{" "}
+          <Link href="/register">Создать пространство</Link>
+        </small>
       </section>
     </main>
   );

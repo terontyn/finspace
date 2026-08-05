@@ -58,7 +58,7 @@ export function AccountsScreen({ onError }: AccountsScreenProps) {
     setIsLoading(true);
     try {
       const [accountResult, balanceResult] = await Promise.all([
-        apiClient.get<Paged<Account>>(`/api/v1/accounts?is_archived=${showArchived}`),
+        apiClient.get<Paged<Account>>(`/api/v1/accounts?is_archived=${showArchived}&limit=200`),
         apiClient.get<AccountBalance[]>("/api/v1/accounts/balances"),
       ]);
       setAccounts(accountResult.items);
@@ -169,7 +169,15 @@ export function AccountsScreen({ onError }: AccountsScreenProps) {
               const balance = balanceById.get(account.id);
               return (
                 <article className="account-card" key={account.id}>
-                  <div className="account-icon">{account.name.slice(0, 1).toUpperCase()}</div>
+                  <div className="account-icon">
+                    {account.account_type === "cash" ? "💵"
+                      : account.account_type === "credit_card" ? "💳"
+                      : account.account_type === "savings" ? "🏦"
+                      : account.account_type === "deposit" ? "📈"
+                      : account.account_type === "brokerage" ? "📊"
+                      : account.account_type === "crypto_wallet" ? "🪙"
+                      : "🏧"}
+                  </div>
                   <div className="account-details">
                     <strong>{account.name}</strong>
                     <span>

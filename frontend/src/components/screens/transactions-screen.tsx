@@ -53,7 +53,7 @@ function initialForm(): TransactionForm {
   return {
     occurredAt: now.toISOString().slice(0, 16),
     transactionType: "expense",
-    amount: "0.0000",
+    amount: "",
     currency: "RUB",
     accountId: "",
     targetAccountId: "",
@@ -230,7 +230,10 @@ export function TransactionsScreen({ onError }: TransactionsScreenProps) {
           </label>
           <label>
             Тип
-            <select value={form.transactionType} onChange={(event) => setForm({ ...form, transactionType: event.target.value as TransactionForm["transactionType"], categoryId: "", targetAccountId: "" })}>
+            <select value={form.transactionType} onChange={(event) => {
+              const account = accounts.find((a) => a.id === form.accountId);
+              setForm({ ...form, transactionType: event.target.value as TransactionForm["transactionType"], categoryId: "", targetAccountId: "", currency: account?.currency ?? form.currency });
+            }}>
               <option value="income">Доход</option><option value="expense">Расход</option><option value="transfer">Перевод</option>
             </select>
           </label>
