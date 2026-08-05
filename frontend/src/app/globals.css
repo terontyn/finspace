@@ -3,8 +3,6 @@
    Тёмная тема · Emerald · Glassmorphism · Layered depth
    ═══════════════════════════════════════════════════════ */
 
-@import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;700;900&family=Inter:ital,opsz,wght@0,14..32,300..700;1,14..32,300..700&display=swap');
-
 /* ─── Токены ─────────────────────────────────────────── */
 :root {
   color-scheme: dark;
@@ -60,8 +58,8 @@
   --radius-xl:  28px;
 
   /* Шрифты */
-  --font-display: 'Unbounded', ui-sans-serif, system-ui, sans-serif;
-  --font-body:    'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: var(--font-unbounded), ui-sans-serif, system-ui, sans-serif;
+  --font-body:    var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
 
   /* Переходы */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
