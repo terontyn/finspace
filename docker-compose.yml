@@ -175,7 +175,7 @@ services:
       N8N_PORT: ${N8N_PORT:-5678}
       N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
       # Keep the rest of the Compose stack usable before n8n is configured.
-      # The startup guard below refuses to run n8n with an empty/example key.
+      # The Node startup guard refuses to run n8n with an empty/example key.
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
       GENERIC_TIMEZONE: ${N8N_TIMEZONE:-Europe/Amsterdam}
       TZ: ${N8N_TIMEZONE:-Europe/Amsterdam}
@@ -192,17 +192,12 @@ services:
       EXECUTIONS_DATA_SAVE_ON_ERROR: all
       FINSPACE_BACKEND_URL: ${FINSPACE_N8N_BACKEND_URL:-http://backend:8000}
       NODES_EXCLUDE: '["n8n-nodes-base.executeCommand","n8n-nodes-base.readWriteFile","n8n-nodes-base.postgres","n8n-nodes-base.redis"]'
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        if [ -z "$${N8N_ENCRYPTION_KEY}" ] || [ "$${N8N_ENCRYPTION_KEY}" = "change_me_with_long_random_value" ]; then
-          echo "N8N_ENCRYPTION_KEY must be set to a private random value" >&2
-          exit 78
-        fi
-        exec n8n
+    entrypoint:
+      - node
+      - /home/node/startup-guard.cjs
     volumes:
       - n8n_data:/home/node/.n8n
+      - ./n8n/startup-guard.cjs:/home/node/startup-guard.cjs:ro
       - ./n8n/workflows:/workflows
     ports:
       - "127.0.0.1:${N8N_PORT:-5678}:5678"
