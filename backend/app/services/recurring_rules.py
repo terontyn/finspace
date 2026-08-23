@@ -234,6 +234,17 @@ async def execute_rule(
         request_id=request_id,
         input_summary={"rule_id": str(rule.id), "scheduled_for": scheduled.isoformat()},
     )
+    if duplicate:
+        existing_by_run = await session.scalar(
+            select(RecurringRuleExecution).where(RecurringRuleExecution.automation_run_id == run.id)
+        )
+        if existing_by_run is not None and existing_by_run.rule_id == rule.id:
+            return existing_by_run, True
+        raise ApiError(
+            status_code=409,
+            code="RECURRING_RULE_ALREADY_EXECUTED",
+            message="The idempotency key does not match this recurring execution",
+        )
     existing = await session.scalar(
         select(RecurringRuleExecution).where(
             RecurringRuleExecution.rule_id == rule.id,
@@ -242,12 +253,6 @@ async def execute_rule(
     )
     if existing is not None:
         return existing, True
-    if duplicate:
-        raise ApiError(
-            status_code=409,
-            code="RECURRING_RULE_ALREADY_EXECUTED",
-            message="The automation run exists without a recurring execution result",
-        )
     if service_account_id is not None:
         expected = (
             rule.next_run_at.astimezone(UTC).replace(microsecond=0)
