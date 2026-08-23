@@ -295,7 +295,7 @@ def test_webhook_hmac_idempotency_transaction_and_conflict(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _configure_google(monkeypatch)
-    _, headers = _register(client)
+    identity, headers = _register(client)
     fake = FakeGoogleClient()
     _connect_google(client, headers, fake)
     binding = _create_sheet(client, headers)
@@ -454,14 +454,109 @@ def test_webhook_hmac_idempotency_transaction_and_conflict(
     assert any(
         item["id"] == conflict.json()["conflict_id"] for item in conflict_list.json()["items"]
     )
-    resolved = client.post(
+    changed_after_conflict = client.patch(
+        f"/api/v1/transactions/{transaction_id}",
+        headers=headers,
+        json={"version": 2, "amount": "131.00"},
+    )
+    assert changed_after_conflict.status_code == 200, changed_after_conflict.text
+    stale = client.post(
         f"/api/v1/google-sheets/conflicts/{conflict.json()['conflict_id']}/resolve",
+        headers=headers,
+        json={"resolution": "keep_database"},
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["error"]["code"] == "GOOGLE_SYNC_CONFLICT_STALE"
+
+    open_conflicts = client.get(
+        "/api/v1/google-sheets/conflicts?status=open",
+        headers=headers,
+    )
+    assert open_conflicts.status_code == 200
+    assert any(
+        item["id"] == conflict.json()["conflict_id"] for item in open_conflicts.json()["items"]
+    )
+    other_identity, other_headers = _register(client)
+    assert (
+        client.get(
+            f"/api/v1/google-sheets/conflicts/{conflict.json()['conflict_id']}",
+            headers=other_headers,
+        ).status_code
+        == 404
+    )
+
+    async def add_viewer() -> None:
+        async with AsyncSessionFactory() as session:
+            session.add(
+                WorkspaceMember(
+                    workspace_id=uuid.UUID(str(identity["workspace"]["id"])),
+                    user_id=uuid.UUID(str(other_identity["user"]["id"])),
+                    role="viewer",
+                )
+            )
+            await session.commit()
+
+    asyncio.run(add_viewer())
+    viewer_headers = {
+        **other_headers,
+        "X-Workspace-ID": str(identity["workspace"]["id"]),
+    }
+    assert (
+        client.get(
+            "/api/v1/google-sheets/conflicts?status=open",
+            headers=viewer_headers,
+        ).status_code
+        == 200
+    )
+
+    payload["event_id"] = str(uuid.uuid4())
+    payload["expected_version"] = 2
+    payload["changed_fields"] = {"amount": "141.00"}
+    second_conflict_body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+    second_conflict = client.post(
+        "/api/v1/google-sheets/webhook/changes",
+        content=second_conflict_body,
+        headers=_signed_headers(
+            binding["id"],
+            secret["secret"],
+            second_conflict_body,
+            "nonce-conflict-second",
+        ),
+    )
+    assert second_conflict.status_code == 200, second_conflict.text
+    assert second_conflict.json()["status"] == "conflict"
+    denied_resolution = client.post(
+        f"/api/v1/google-sheets/conflicts/{second_conflict.json()['conflict_id']}/resolve",
+        headers=viewer_headers,
+        json={"resolution": "keep_database"},
+    )
+    assert denied_resolution.status_code == 403
+    resolved = client.post(
+        f"/api/v1/google-sheets/conflicts/{second_conflict.json()['conflict_id']}/resolve",
         headers=headers,
         json={"resolution": "keep_database"},
     )
     assert resolved.status_code == 200, resolved.text
     assert resolved.json()["status"] == "resolved"
     assert resolved.json()["resolution"] == "keep_database"
+    repeated_resolution = client.post(
+        f"/api/v1/google-sheets/conflicts/{second_conflict.json()['conflict_id']}/resolve",
+        headers=headers,
+        json={"resolution": "keep_database"},
+    )
+    assert repeated_resolution.status_code == 409
+    resolved_conflicts = client.get(
+        "/api/v1/google-sheets/conflicts?status=resolved",
+        headers=headers,
+    )
+    assert any(
+        item["id"] == second_conflict.json()["conflict_id"]
+        for item in resolved_conflicts.json()["items"]
+    )
 
     payload["event_id"] = str(uuid.uuid4())
     payload["changed_fields"] = {"_version": 99}

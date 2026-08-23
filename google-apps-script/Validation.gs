@@ -91,6 +91,21 @@ function applyNormalizedRow_(sheet, rowNumber, normalized) {
   });
 }
 
+function applyNormalizedTechnicalRow_(sheet, rowNumber, normalized) {
+  if (!normalized) return;
+  const layout = sheetLayout_(sheet.getName());
+  if (!layout) return;
+  const values = sheet.getRange(rowNumber, 1, 1, layout.width).getValues()[0];
+  Object.keys(normalized).map(Number).forEach(function(index) {
+    if (index + 1 >= layout.technicalStart && index < values.length) {
+      values[index] = normalized[String(index)];
+    }
+  });
+  withSyncGuard_(function() {
+    sheet.getRange(rowNumber, 1, 1, layout.width).setValues([values]);
+  });
+}
+
 function withSyncGuard_(callback) {
   const properties = finspaceProperties_();
   properties.setProperty(FINSPACE.SYNC_GUARD_KEY, '1');

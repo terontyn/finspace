@@ -19,33 +19,52 @@ function signedRequest_(path, payload) {
     messageBytes,
     signingKey
   ));
-  const response = UrlFetchApp.fetch(
-    config.backendUrl + FINSPACE.API_ROOT + path,
-    {
-      method: 'post',
-      contentType: 'application/json',
-      payload: body,
-      muteHttpExceptions: true,
-      headers: {
-        'X-Finspace-Binding-ID': config.bindingId,
-        'X-Finspace-Timestamp': timestamp,
-        'X-Finspace-Nonce': nonce,
-        'X-Finspace-Body-SHA256': bodyHash,
-        'X-Finspace-Signature': signature
+  let response;
+  try {
+    response = UrlFetchApp.fetch(
+      config.backendUrl + FINSPACE.API_ROOT + path,
+      {
+        method: 'post',
+        contentType: 'application/json',
+        payload: body,
+        muteHttpExceptions: true,
+        headers: {
+          'X-Finspace-Binding-ID': config.bindingId,
+          'X-Finspace-Timestamp': timestamp,
+          'X-Finspace-Nonce': nonce,
+          'X-Finspace-Body-SHA256': bodyHash,
+          'X-Finspace-Signature': signature
+        }
       }
-    }
-  );
+    );
+  } catch (error) {
+    throw finspaceRequestError_(
+      'BRIDGE_NETWORK_ERROR',
+      'Сетевой запрос к backend не выполнен: ' + safeFinspaceErrorMessage_(error),
+      null,
+      true
+    );
+  }
+  const responseCode = response.getResponseCode();
   let parsed = {};
   try {
     parsed = JSON.parse(response.getContentText() || '{}');
   } catch (error) {
-    throw new Error('Backend вернул ответ не в JSON. HTTP ' + response.getResponseCode());
+    throw finspaceRequestError_(
+      'BRIDGE_RESPONSE_INVALID',
+      'Backend вернул ответ не в JSON. HTTP ' + responseCode,
+      responseCode,
+      isRetryableBridgeHttpStatus_(responseCode)
+    );
   }
-  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) {
+  if (responseCode < 200 || responseCode >= 300) {
     const apiError = parsed.error || {};
-    throw new Error(
-      (apiError.code || 'BRIDGE_HTTP_ERROR') + ': ' +
-      (apiError.message || ('HTTP ' + response.getResponseCode()))
+    throw finspaceRequestError_(
+      apiError.code || 'BRIDGE_HTTP_ERROR',
+      apiError.message || ('HTTP ' + responseCode),
+      responseCode,
+      isRetryableBridgeHttpStatus_(responseCode) ||
+        (apiError.code === 'APPS_SCRIPT_REPLAY_DETECTED')
     );
   }
   return parsed;
@@ -56,62 +75,237 @@ function pushPendingChanges() {
 }
 
 function pushPendingChanges_(notify) {
+  const syncLock = LockService.getScriptLock();
+  if (notify) {
+    syncLock.waitLock(FINSPACE.QUEUE_LOCK_TIMEOUT_MS);
+  } else if (!syncLock.tryLock(1000)) {
+    return { sent: 0, remaining: queuedFinspaceEdits_().length, skipped: true };
+  }
+  try {
+    return pushPendingChangesUnlocked_(notify);
+  } finally {
+    syncLock.releaseLock();
+  }
+}
+
+function pushPendingChangesUnlocked_(notify) {
+  recoverPendingFinspaceEdits_();
   const queue = queuedFinspaceEdits_().slice(0, FINSPACE.PUSH_BATCH_SIZE);
   if (!queue.length) {
     if (notify) SpreadsheetApp.getActive().toast('Локальная очередь пуста.', 'Финпространство');
     return { sent: 0, remaining: 0 };
   }
-  const validItems = [];
-  const payloads = [];
+  const prepared = [];
   queue.forEach(function(item) {
     try {
       const payload = payloadForEdit_(item);
-      const layout = sheetLayout_(item.sheetName);
-      const sheet = SpreadsheetApp.getActive().getSheetByName(item.sheetName);
-      sheet.getRange(item.rowNumber, layout.statusColumn).setValue('PENDING');
-      payloads.push(payload);
-      validItems.push(item);
+      prepared.push({
+        item: item,
+        payload: payload,
+        identity: finspacePayloadIdentity_(payload)
+      });
     } catch (error) {
+      setQueuedRowState_(item, 'ERROR', 'LOCAL_VALIDATION_ERROR: ' + safeFinspaceErrorMessage_(error));
       recordSheetError_(item, 'LOCAL_VALIDATION_ERROR', String(error));
     }
   });
-  if (!payloads.length) return { sent: 0, remaining: queuedFinspaceEdits_().length };
+  const reserved = reserveFinspacePushItems_(prepared);
+  if (!reserved.length) return { sent: 0, remaining: queuedFinspaceEdits_().length };
 
-  const response = signedRequest_('/push', { events: payloads });
-  const itemByEvent = {};
-  validItems.forEach(function(item) { itemByEvent[item.eventId] = item; });
-  const completedKeys = [];
-  response.results.forEach(function(wrapper) {
-    const item = itemByEvent[wrapper.event_id];
-    if (!item) return;
-    const sheet = SpreadsheetApp.getActive().getSheetByName(item.sheetName);
-    const layout = sheetLayout_(item.sheetName);
-    const result = wrapper.result || {};
-    if (wrapper.status === 'applied' || wrapper.status === 'duplicate') {
-      applyNormalizedRow_(sheet, item.rowNumber, result.normalized_row || null);
-      sheet.getRange(item.rowNumber, layout.statusColumn).setValue('SYNCED');
-      sheet.getRange(item.rowNumber, layout.errorColumn).clearContent();
-      completedKeys.push(item.key);
-    } else if (wrapper.status === 'conflict') {
-      sheet.getRange(item.rowNumber, layout.statusColumn).setValue('CONFLICT');
-      sheet.getRange(item.rowNumber, layout.errorColumn).setValue('Конфликт версий');
-      completedKeys.push(item.key);
-    } else {
-      const code = wrapper.error_code || 'BRIDGE_PUSH_ERROR';
-      const message = wrapper.error_message || 'Изменение не принято backend.';
-      sheet.getRange(item.rowNumber, layout.statusColumn).setValue('ERROR');
-      sheet.getRange(item.rowNumber, layout.errorColumn).setValue((code + ': ' + message).slice(0, 500));
-      recordSheetError_(item, code, message);
-    }
-  });
-  removeQueuedFinspaceEdits_(completedKeys);
+  let response;
+  try {
+    response = signedRequest_('/push', {
+      events: reserved.map(function(item) { return item.payload; })
+    });
+  } catch (error) {
+    markFinspacePushFailure_(reserved, error);
+    throw error;
+  }
+  if (!response || !Array.isArray(response.results)) {
+    const invalid = finspaceRequestError_(
+      'BRIDGE_RESPONSE_INVALID',
+      'Backend не подтвердил результаты push.',
+      200,
+      true
+    );
+    markFinspacePushFailure_(reserved, invalid);
+    throw invalid;
+  }
+  const completed = commitFinspacePushResults_(reserved, response.results);
   refreshReferenceLists_();
-  const summary = { sent: completedKeys.length, remaining: queuedFinspaceEdits_().length };
+  const summary = { sent: completed, remaining: queuedFinspaceEdits_().length };
   if (notify) SpreadsheetApp.getActive().toast(
     'Обработано: ' + summary.sent + ', осталось: ' + summary.remaining,
     'Финпространство'
   );
   return summary;
+}
+
+function reserveFinspacePushItems_(prepared) {
+  return withFinspaceQueueLock_(function() {
+    const queue = readFinspaceQueueOrRecoverUnsafe_();
+    const currentByKey = {};
+    queue.forEach(function(item) { currentByKey[item.key] = item; });
+    const now = new Date().toISOString();
+    const reserved = [];
+    prepared.forEach(function(candidate) {
+      const current = currentByKey[candidate.item.key];
+      if (!current || current.eventId !== candidate.item.eventId) return;
+      current.attemptCount = Number(current.attemptCount || 0) + 1;
+      current.lastAttemptAt = now;
+      writeQueueEventNote_(current.sheetName, current.rowNumber, current.eventId);
+      setQueuedRowState_(current, 'PENDING', '');
+      reserved.push({
+        item: Object.assign({}, current),
+        payload: candidate.payload,
+        identity: candidate.identity
+      });
+    });
+    writeFinspaceQueueUnsafe_(queue);
+    return reserved;
+  });
+}
+
+function commitFinspacePushResults_(reserved, results) {
+  return withFinspaceQueueLock_(function() {
+    const queue = readFinspaceQueueOrRecoverUnsafe_();
+    const resultByEvent = {};
+    results.forEach(function(wrapper) {
+      if (wrapper && typeof wrapper.event_id === 'string' && !resultByEvent[wrapper.event_id]) {
+        resultByEvent[wrapper.event_id] = wrapper;
+      }
+    });
+    let completed = 0;
+    reserved.forEach(function(candidate) {
+      const index = queue.findIndex(function(item) {
+        return item.key === candidate.item.key && item.eventId === candidate.item.eventId;
+      });
+      if (index < 0) return;
+      const item = queue[index];
+      const wrapper = resultByEvent[item.eventId];
+      if (!wrapper) {
+        setQueuedRowState_(item, 'PENDING', 'Backend не подтвердил это событие; будет повторено.');
+        return;
+      }
+      const result = wrapper.result || null;
+      if (wrapper.status === 'applied' || wrapper.status === 'duplicate') {
+        if (!isConfirmedFinspaceSuccess_(item, wrapper)) {
+          setQueuedRowState_(item, 'PENDING', 'Некорректное подтверждение backend; будет повторено.');
+          return;
+        }
+        const sheet = SpreadsheetApp.getActive().getSheetByName(item.sheetName);
+        let currentIdentity = '';
+        try {
+          currentIdentity = finspacePayloadIdentity_(payloadForEdit_(item));
+        } catch (error) {
+          currentIdentity = '__changed__';
+        }
+        if (currentIdentity !== candidate.identity) {
+          applyNormalizedTechnicalRow_(sheet, item.rowNumber, result.normalized_row);
+          const replacement = Object.assign({}, item, {
+            eventId: Utilities.getUuid(),
+            queuedAt: new Date().toISOString(),
+            attemptCount: 0,
+            lastAttemptAt: null
+          });
+          queue[index] = replacement;
+          writeQueueEventNote_(replacement.sheetName, replacement.rowNumber, replacement.eventId);
+          setQueuedRowState_(replacement, 'DIRTY', 'Изменение во время отправки поставлено повторно.');
+          return;
+        }
+        applyNormalizedRow_(sheet, item.rowNumber, result.normalized_row);
+        setQueuedRowState_(item, 'SYNCED', '');
+        clearQueueEventNote_(item.sheetName, item.rowNumber, item.eventId);
+        queue.splice(index, 1);
+        completed += 1;
+        return;
+      }
+      if (wrapper.status === 'conflict') {
+        setQueuedRowState_(item, 'CONFLICT', 'Конфликт версий');
+        clearQueueEventNote_(item.sheetName, item.rowNumber, item.eventId);
+        queue.splice(index, 1);
+        completed += 1;
+        return;
+      }
+      if (wrapper.status === 'rejected') {
+        const code = wrapper.error_code || 'BRIDGE_PUSH_REJECTED';
+        const message = wrapper.error_message || 'Изменение окончательно отклонено backend.';
+        setQueuedRowState_(item, 'ERROR', code + ': ' + message);
+        recordSheetError_(item, code, message);
+        clearQueueEventNote_(item.sheetName, item.rowNumber, item.eventId);
+        queue.splice(index, 1);
+        completed += 1;
+        return;
+      }
+      setQueuedRowState_(item, 'PENDING', 'Неизвестный результат backend; будет повторено.');
+    });
+    writeFinspaceQueueUnsafe_(queue);
+    return completed;
+  });
+}
+
+function markFinspacePushFailure_(reserved, error) {
+  const retryable = !error || error.retryable !== false;
+  const status = retryable ? 'PENDING' : 'ERROR';
+  const message = (error && error.code ? error.code + ': ' : '') + safeFinspaceErrorMessage_(error);
+  withFinspaceQueueLock_(function() {
+    const queue = readFinspaceQueueOrRecoverUnsafe_();
+    reserved.forEach(function(candidate) {
+      const current = queue.filter(function(item) {
+        return item.key === candidate.item.key && item.eventId === candidate.item.eventId;
+      })[0];
+      if (current) setQueuedRowState_(current, status, message);
+    });
+  });
+}
+
+function setQueuedRowState_(item, status, message) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(item.sheetName);
+  const layout = sheetLayout_(item.sheetName);
+  if (!sheet || !layout) return;
+  sheet.getRange(item.rowNumber, layout.statusColumn).setValue(status);
+  const errorRange = sheet.getRange(item.rowNumber, layout.errorColumn);
+  if (message) {
+    errorRange.setValue(String(message).slice(0, 500));
+  } else {
+    errorRange.clearContent();
+  }
+}
+
+function finspacePayloadIdentity_(payload) {
+  return JSON.stringify({
+    sheet_name: payload.sheet_name,
+    row_number: payload.row_number,
+    entity_type: payload.entity_type,
+    entity_id: payload.entity_id,
+    expected_version: payload.expected_version,
+    changed_fields: payload.changed_fields,
+    visible_row: payload.visible_row
+  });
+}
+
+function isConfirmedFinspaceSuccess_(item, wrapper) {
+  const result = wrapper.result;
+  return Boolean(
+    result &&
+    result.event_id === item.eventId &&
+    result.normalized_row &&
+    typeof result.normalized_row === 'object' &&
+    !Array.isArray(result.normalized_row)
+  );
+}
+
+function isRetryableBridgeHttpStatus_(status) {
+  return status === 408 || status === 425 || status === 429 ||
+    status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function finspaceRequestError_(code, message, httpStatus, retryable) {
+  const error = new Error(code + ': ' + message);
+  error.code = code;
+  error.httpStatus = httpStatus;
+  error.retryable = retryable;
+  return error;
 }
 
 function pullChanges() {

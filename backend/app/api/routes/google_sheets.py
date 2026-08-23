@@ -1,4 +1,5 @@
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Header, Query, Request
 from pydantic import ValidationError
@@ -158,12 +159,14 @@ async def sync_runs(
 async def conflicts(
     context: CurrentContext,
     session: DbSession,
+    status: Literal["open", "resolved"] | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> ConflictPage:
     items, total = await sync_conflicts.list_conflicts(
         session,
         context.workspace.id,
+        status=status,
         limit=limit,
         offset=offset,
     )

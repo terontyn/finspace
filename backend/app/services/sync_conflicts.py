@@ -23,10 +23,13 @@ async def list_conflicts(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     *,
+    status: str | None = None,
     limit: int,
     offset: int,
 ) -> tuple[list[SyncConflict], int]:
     filters = [SyncConflict.workspace_id == workspace_id]
+    if status is not None:
+        filters.append(SyncConflict.status == status)
     total = int(
         await session.scalar(select(func.count()).select_from(SyncConflict).where(*filters)) or 0
     )
@@ -45,14 +48,19 @@ async def list_conflicts(
 
 
 async def get_conflict(
-    session: AsyncSession, workspace_id: uuid.UUID, conflict_id: uuid.UUID
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    conflict_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> SyncConflict:
-    conflict = await session.scalar(
-        select(SyncConflict).where(
-            SyncConflict.id == conflict_id,
-            SyncConflict.workspace_id == workspace_id,
-        )
+    query = select(SyncConflict).where(
+        SyncConflict.id == conflict_id,
+        SyncConflict.workspace_id == workspace_id,
     )
+    if for_update:
+        query = query.with_for_update()
+    conflict = await session.scalar(query)
     if conflict is None:
         raise ApiError(
             status_code=404, code="GOOGLE_SYNC_CONFLICT", message="Conflict was not found"
@@ -64,24 +72,30 @@ async def _entity(session: AsyncSession, conflict: SyncConflict) -> SyncEntity:
     entity: SyncEntity | None
     if conflict.entity_type == "transaction":
         entity = await session.scalar(
-            select(FinancialTransaction).where(
+            select(FinancialTransaction)
+            .where(
                 FinancialTransaction.id == conflict.entity_id,
                 FinancialTransaction.workspace_id == conflict.workspace_id,
             )
+            .with_for_update()
         )
     elif conflict.entity_type == "account":
         entity = await session.scalar(
-            select(Account).where(
+            select(Account)
+            .where(
                 Account.id == conflict.entity_id,
                 Account.workspace_id == conflict.workspace_id,
             )
+            .with_for_update()
         )
     elif conflict.entity_type == "category":
         entity = await session.scalar(
-            select(Category).where(
+            select(Category)
+            .where(
                 Category.id == conflict.entity_id,
                 Category.workspace_id == conflict.workspace_id,
             )
+            .with_for_update()
         )
     else:
         raise ApiError(
@@ -100,12 +114,24 @@ async def resolve_conflict(
     conflict_id: uuid.UUID,
     data: ConflictResolveRequest,
 ) -> SyncConflict:
-    conflict = await get_conflict(session, context.workspace.id, conflict_id)
+    conflict = await get_conflict(
+        session,
+        context.workspace.id,
+        conflict_id,
+        for_update=True,
+    )
     if conflict.status != "open":
         raise ApiError(
             status_code=409, code="GOOGLE_SYNC_CONFLICT", message="Conflict is already resolved"
         )
     entity = await _entity(session, conflict)
+    if int(entity.version) != conflict.database_version:
+        raise ApiError(
+            status_code=409,
+            code="GOOGLE_SYNC_CONFLICT_STALE",
+            message="The entity changed after this conflict was created",
+            details={"current_version": int(entity.version)},
+        )
     resolved_payload = data.merged_payload
     if data.resolution == "keep_database":
         await enqueue_entity(

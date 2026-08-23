@@ -3,7 +3,7 @@
 	google-live-cleanup google-live-report sync-worker apps-script-package lint format \
 	frontend-check backup backup-verify restore-test backup-cleanup n8n-up n8n-status \
 	n8n-export n8n-import automation-test telegram-test recurring-test month-close-test \
-	backup-secondary-test reset
+	backup-secondary-test apps-script-test reset
 
 up:
 	docker compose up -d --build
@@ -65,6 +65,9 @@ sync-worker:
 apps-script-package:
 	mkdir -p dist
 	tar -czf dist/finspace-google-apps-script-v1.tar.gz google-apps-script
+
+apps-script-test:
+	node --test google-apps-script/tests/queue-reliability.test.cjs
 
 n8n-up:
 	docker compose up -d n8n

@@ -373,6 +373,95 @@ async def _normalized_row(
     return {str(index): value for index, value in enumerate(row)}, str(row[24])
 
 
+async def _duplicate_response(
+    session: AsyncSession,
+    binding: GoogleSheetBinding,
+    inbox: SyncInbox,
+    event_id: str,
+) -> WebhookChangeResponse:
+    """Return the canonical row for a retry whose first response was lost."""
+    if inbox.entity_id is None:
+        return WebhookChangeResponse(status="duplicate", event_id=event_id)
+    workspace = await session.get(Workspace, binding.workspace_id)
+    user = await session.get(User, binding.created_by)
+    if workspace is None or user is None:
+        return WebhookChangeResponse(
+            status="duplicate",
+            event_id=event_id,
+            entity_id=inbox.entity_id,
+        )
+    if inbox.entity_type == "transaction":
+        transaction = await transaction_repository.get_transaction(
+            session,
+            binding.workspace_id,
+            inbox.entity_id,
+            include_deleted=True,
+        )
+        if transaction is None:
+            return WebhookChangeResponse(
+                status="duplicate",
+                event_id=event_id,
+                entity_id=inbox.entity_id,
+            )
+        normalized, normalized_hash = await _normalized_row(session, workspace, user, transaction)
+        return WebhookChangeResponse(
+            status="duplicate",
+            event_id=event_id,
+            entity_id=transaction.id,
+            version=transaction.version,
+            row_hash=normalized_hash,
+            normalized_row=normalized,
+        )
+    if inbox.entity_type == "account":
+        account = await session.scalar(
+            select(Account).where(
+                Account.id == inbox.entity_id,
+                Account.workspace_id == binding.workspace_id,
+            )
+        )
+        if account is None:
+            return WebhookChangeResponse(
+                status="duplicate",
+                event_id=event_id,
+                entity_id=inbox.entity_id,
+            )
+        balances = {
+            item.account_id: item.balance
+            for item in await calculate_balances(session, binding.workspace_id)
+        }
+        row = account_row(account, calculated_balance=balances.get(account.id))
+        return WebhookChangeResponse(
+            status="duplicate",
+            event_id=event_id,
+            entity_id=account.id,
+            version=account.version,
+            row_hash=str(row[14]),
+            normalized_row={str(index): value for index, value in enumerate(row)},
+        )
+    category = await session.scalar(
+        select(Category).where(
+            Category.id == inbox.entity_id,
+            Category.workspace_id == binding.workspace_id,
+        )
+    )
+    if category is None:
+        return WebhookChangeResponse(
+            status="duplicate",
+            event_id=event_id,
+            entity_id=inbox.entity_id,
+        )
+    parent = await session.get(Category, category.parent_id) if category.parent_id else None
+    row = category_row(category, parent_name=parent.name if parent else None)
+    return WebhookChangeResponse(
+        status="duplicate",
+        event_id=event_id,
+        entity_id=category.id,
+        version=category.version,
+        row_hash=str(row[13]),
+        normalized_row={str(index): value for index, value in enumerate(row)},
+    )
+
+
 def _bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -638,11 +727,7 @@ async def apply_change(
         select(SyncInbox).where(SyncInbox.idempotency_key == idempotency_key)
     )
     if existing_inbox is not None and existing_inbox.status != "rejected":
-        return WebhookChangeResponse(
-            status="duplicate",
-            event_id=payload.event_id,
-            entity_id=existing_inbox.entity_id,
-        )
+        return await _duplicate_response(session, binding, existing_inbox, payload.event_id)
     if existing_inbox is not None:
         inbox = existing_inbox
         inbox.sheet_name = payload.sheet_name

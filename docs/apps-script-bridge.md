@@ -82,6 +82,50 @@ Installable onEdit лишь ставит строку в Document Properties que
 Плановый trigger отправляет до 100 событий одним `push`; обработка сохраняет inbox,
 idempotency, optimistic locking, audit, нормализацию и conflicts финансового ядра.
 
+### Локальная очередь и состояния
+
+Document Properties queue — активный журнал доставки, а event ID дополнительно хранится в
+note ячейки статуса. Note не содержит финансовых данных или secret и позволяет восстановить
+очередь после повреждения/потери property. Backend inbox остаётся окончательным журналом
+идемпотентности.
+
+```text
+user edit -> DIRTY + durable event ID + queued
+queued -> PENDING -> signed push
+  applied/duplicate + canonical row -> SYNCED + dequeue
+  conflict                         -> CONFLICT + dequeue
+  confirmed rejected event         -> ERROR + dequeue
+  network/transient/protocol error -> PENDING + remains queued
+  auth/configuration error         -> ERROR + remains queued until configuration is fixed
+```
+
+Удаление выполняется по паре `row key + event ID`, а не только по номеру строки. Поэтому
+ответ старой HTTP-попытки не может удалить более новое редактирование той же строки.
+`applied` и `duplicate` считаются подтверждением только при наличии валидной canonical row.
+Повтор запроса сохраняет business event ID, но подписывается новым timestamp/nonce.
+
+| Класс ошибки | Состояние строки | Очередь |
+|---|---|---|
+| DNS, timeout, connection reset | `PENDING` | сохраняется |
+| HTTP 408/425/429/500/502/503/504 | `PENDING` | сохраняется |
+| replay nonce | `PENDING` | сохраняется; новый HTTP retry получает новый nonce |
+| неверная подпись/configuration | `ERROR` | сохраняется до исправления настройки |
+| невалидный или неполный 2xx response | `PENDING` | сохраняется |
+| подтверждённый per-item validation reject | `ERROR` | удаляется как terminal |
+| version conflict | `CONFLICT` | удаляется как terminal |
+
+Все read-modify-write операции queue выполняются под Document Lock. Долгий HTTP-запрос
+идёт без Document Lock; отдельный Script Lock не допускает два одновременных push. Перед
+отправкой и после ответа event ID сверяется повторно. Изменение, возникшее во время HTTP,
+получает новый event ID и остаётся `DIRTY`.
+
+Перед каждым push выполняется recovery scan строк `DIRTY`/`PENDING`. Если property item
+исчез, он восстанавливается с тем же event ID из note. Для legacy `PENDING` новой строки без
+entity ID и без event note автоматический retry запрещён: невозможно доказать отсутствие
+уже применённого создания; строка переводится в `ERROR` с требованием полной сверки.
+Повреждённый JSON сохраняется в ограниченной quarantine property и перестраивается по
+маркерам строк. Переполнение queue больше не отбрасывает старые события через `slice`.
+
 Сверка отправляет пакетами компактные элементы `entity_type`, `entity_id`, `version`,
 `row_hash`, `row_number`, `sync_status`. Backend классифицирует matched/missing/duplicate,
 unknown, tamper, newer и conflict; восстановление выполняется новыми outbox events.
@@ -95,3 +139,16 @@ heartbeat, ротацию, паузу и сверку без secret values.
 
 OAuth/Sheets API реализация сохранена как необязательный provider `google_oauth` и видна в
 UI только при `GOOGLE_OAUTH_ENABLED=true`.
+
+## Автоматические проверки Apps Script
+
+Минимальный deterministic harness использует встроенный Node test runner и моки
+PropertiesService, LockService, SpreadsheetApp и UrlFetchApp:
+
+```powershell
+node --test google-apps-script/tests/queue-reliability.test.cjs
+```
+
+Он проверяет DNS/timeout/503, невалидный 2xx, auth/config failure, replay с новым nonce,
+partial batch, concurrent edit, recovery по event note и duplicate retry после потерянного
+ответа.

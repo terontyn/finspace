@@ -67,7 +67,7 @@ async def sheet_status(session: AsyncSession, context: RequestContext) -> Google
         granted_scopes=connection.granted_scopes if connection else [],
         token_expires_at=connection.token_expires_at if connection else None,
     )
-    counts = {"pending": 0, "failed": 0, "conflicts": 0}
+    counts = {"pending": 0, "inbox": 0, "failed": 0, "conflicts": 0}
     if binding is not None:
         counts["pending"] = int(
             await session.scalar(
@@ -87,6 +87,17 @@ async def sheet_status(session: AsyncSession, context: RequestContext) -> Google
                 .where(
                     SyncOutbox.binding_id == binding.id,
                     SyncOutbox.status == "failed",
+                )
+            )
+            or 0
+        )
+        counts["inbox"] = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(SyncInbox)
+                .where(
+                    SyncInbox.binding_id == binding.id,
+                    SyncInbox.status.in_(("received", "validated")),
                 )
             )
             or 0
@@ -113,6 +124,7 @@ async def sheet_status(session: AsyncSession, context: RequestContext) -> Google
         public_backend_url=settings.public_backend_url,
         connection=connection_status,
         binding_id=binding.id if binding else None,
+        spreadsheet_id=binding.spreadsheet_id if binding else None,
         spreadsheet_url=binding.spreadsheet_url if binding else None,
         spreadsheet_name=binding.spreadsheet_name if binding else None,
         template_version=binding.template_version if binding else None,
@@ -123,8 +135,13 @@ async def sheet_status(session: AsyncSession, context: RequestContext) -> Google
         last_successful_sync_at=binding.last_successful_sync_at if binding else None,
         last_reconciliation_at=binding.last_reconciliation_at if binding else None,
         pending_outbox=counts["pending"],
+        pending_inbox=counts["inbox"],
         failed_events=counts["failed"],
         open_conflicts=counts["conflicts"],
+        last_error_code=binding.last_error_code if binding else None,
+        last_error_message=(
+            binding.last_error_message[:500] if binding and binding.last_error_message else None
+        ),
         webhook_configured=bool(
             binding
             and (
