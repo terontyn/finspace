@@ -35,10 +35,20 @@ Backend нормализует BOM/пробелы, десятичную запя
 неоднозначное имя — ошибка строки. Alias-таблицы пока не добавлены, новые справочники
 автоматически не создаются.
 
+`ru-RU` трактует slash/dash даты как day/month, `en-US` — как month/day; ISO `YYYY-MM-DD`
+одинаков для обеих локалей. Пустые строки получают `skipped`. Сумма должна быть строго
+положительной: направление задаёт тип операции или отдельная income/expense колонка.
+Категория обязана соответствовать income/expense типу. Статус `reconciled` импортом не
+назначается, потому что он требует отдельного account reconciliation evidence.
+
+`occurred_at` хранится в UTC, но диапазон дат preview вычисляется в timezone workspace,
+поэтому операция около полуночи не отображает предыдущий календарный день. Mapping можно
+менять только до commit/cancel; терминальный batch нельзя вернуть в `parsed`.
+
 ## Дубликаты
 
-Fingerprint включает workspace, occurred date/time, type, amount, currency, source и
-target accounts, нормализованное description и external ID. Совпадение получает статус
+Fingerprint включает workspace, occurred date/time, type, amount, currency, исходный и
+целевой счета, нормализованное description и external ID. Совпадение получает статус
 `duplicate` и по умолчанию не импортируется. Пользователь может явно пометить конкретную
 строку «Это новая операция» через `PATCH /imports/{batch}/rows/{row}`; действие попадает
 в audit.
@@ -48,6 +58,9 @@ target accounts, нормализованное description и external ID. Со
 Commit блокирует неподготовленный/повторный batch, идемпотентно принимает тот же key,
 создаёт provenance `source=import`, `import_batch_id` и
 `created_transaction_id`. Ошибка откатывает всю DB-транзакцию.
+
+Batch блокируется `FOR UPDATE` на mapping/validation/finalize/rollback/cancel, поэтому два
+конкурентных finalize не могут создать две группы операций.
 
 `POST /api/v1/imports/{id}/rollback` soft-delete только операции этого batch. Повторный
 rollback безопасен. Если операция после импорта изменилась (`version != 1`), обычный
