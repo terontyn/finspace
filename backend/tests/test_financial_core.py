@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -8,6 +9,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.db.models.accounts import Account
+from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import User, Workspace, WorkspaceMember
 from app.db.session import AsyncSessionFactory
 
@@ -200,6 +202,143 @@ def test_account_duplicate_optimistic_lock_and_audit(
     assert audit.status_code == 200
     assert {item["action"] for item in audit.json()["items"]} >= {"create", "update"}
     assert any(item["request_id"] == request_id for item in audit.json()["items"])
+
+
+def test_account_and_category_soft_delete_responses_can_be_restored(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client, monkeypatch)
+    account = _create_account(client, headers, f"Lifecycle {uuid.uuid4().hex[:8]}")
+    category = _create_category(
+        client,
+        headers,
+        f"Lifecycle {uuid.uuid4().hex[:8]}",
+        "expense",
+    )
+
+    deleted_account = client.delete(
+        f"/api/v1/accounts/{account['id']}?version={account['version']}",
+        headers=headers,
+    )
+    assert deleted_account.status_code == 200, deleted_account.text
+    assert deleted_account.json()["version"] == int(account["version"]) + 1
+
+    restored_account = client.post(
+        f"/api/v1/accounts/{account['id']}/restore",
+        headers=headers,
+        json={"version": deleted_account.json()["version"]},
+    )
+    assert restored_account.status_code == 200, restored_account.text
+    assert restored_account.json()["version"] == int(account["version"]) + 2
+
+    deleted_category = client.delete(
+        f"/api/v1/categories/{category['id']}?version={category['version']}",
+        headers=headers,
+    )
+    assert deleted_category.status_code == 200, deleted_category.text
+    assert deleted_category.json()["version"] == int(category["version"]) + 1
+
+    restored_category = client.post(
+        f"/api/v1/categories/{category['id']}/restore",
+        headers=headers,
+        json={"version": deleted_category.json()["version"]},
+    )
+    assert restored_category.status_code == 200, restored_category.text
+    assert restored_category.json()["version"] == int(category["version"]) + 2
+
+
+def test_account_and_category_mutation_responses_survive_commit_expiration(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client, monkeypatch)
+    AsyncSessionFactory.configure(expire_on_commit=True)
+    try:
+        account = _create_account(
+            client,
+            headers,
+            f"Expiring lifecycle {uuid.uuid4().hex[:8]}",
+        )
+        parent = _create_category(
+            client,
+            headers,
+            f"Expiring parent {uuid.uuid4().hex[:8]}",
+            "expense",
+        )
+        child = _create_category(
+            client,
+            headers,
+            f"Expiring child {uuid.uuid4().hex[:8]}",
+            "expense",
+            parent_id=str(parent["id"]),
+        )
+
+        archived_account = client.patch(
+            f"/api/v1/accounts/{account['id']}",
+            headers=headers,
+            json={"version": account["version"], "is_archived": True},
+        )
+        assert archived_account.status_code == 200, archived_account.text
+        assert archived_account.json()["is_archived"] is True
+        assert datetime.fromisoformat(archived_account.json()["updated_at"])
+
+        deleted_account = client.delete(
+            f"/api/v1/accounts/{account['id']}?version={archived_account.json()['version']}",
+            headers=headers,
+        )
+        assert deleted_account.status_code == 200, deleted_account.text
+        assert datetime.fromisoformat(deleted_account.json()["updated_at"])
+        assert client.get(f"/api/v1/accounts/{account['id']}", headers=headers).status_code == 404
+
+        repeated_account_delete = client.delete(
+            f"/api/v1/accounts/{account['id']}?version={deleted_account.json()['version']}",
+            headers=headers,
+        )
+        assert repeated_account_delete.status_code == 404
+        assert repeated_account_delete.json()["error"]["code"] == "ACCOUNT_NOT_FOUND"
+
+        restored_account = client.post(
+            f"/api/v1/accounts/{account['id']}/restore",
+            headers=headers,
+            json={"version": deleted_account.json()["version"]},
+        )
+        assert restored_account.status_code == 200, restored_account.text
+        assert restored_account.json()["version"] == int(deleted_account.json()["version"]) + 1
+        assert datetime.fromisoformat(restored_account.json()["updated_at"])
+
+        archived_category = client.patch(
+            f"/api/v1/categories/{parent['id']}",
+            headers=headers,
+            json={"version": parent["version"], "is_archived": True},
+        )
+        assert archived_category.status_code == 200, archived_category.text
+        assert archived_category.json()["is_archived"] is True
+
+        deleted_category = client.delete(
+            f"/api/v1/categories/{parent['id']}?version={archived_category.json()['version']}",
+            headers=headers,
+        )
+        assert deleted_category.status_code == 200, deleted_category.text
+        assert datetime.fromisoformat(deleted_category.json()["updated_at"])
+        repeated_category_delete = client.delete(
+            f"/api/v1/categories/{parent['id']}?version={deleted_category.json()['version']}",
+            headers=headers,
+        )
+        assert repeated_category_delete.status_code == 404
+        assert repeated_category_delete.json()["error"]["code"] == "CATEGORY_NOT_FOUND"
+        child_after_parent_delete = client.get(f"/api/v1/categories/{child['id']}", headers=headers)
+        assert child_after_parent_delete.status_code == 200
+        assert child_after_parent_delete.json()["parent_id"] == parent["id"]
+
+        restored_category = client.post(
+            f"/api/v1/categories/{parent['id']}/restore",
+            headers=headers,
+            json={"version": deleted_category.json()["version"]},
+        )
+        assert restored_category.status_code == 200, restored_category.text
+        assert restored_category.json()["version"] == int(deleted_category.json()["version"]) + 1
+        assert datetime.fromisoformat(restored_category.json()["updated_at"])
+    finally:
+        AsyncSessionFactory.configure(expire_on_commit=False)
 
 
 def test_category_create_tree_and_cycle(
@@ -428,6 +567,104 @@ def test_partial_refund_and_limit(client: TestClient, monkeypatch: pytest.Monkey
     balances = client.get("/api/v1/accounts/balances", headers=headers).json()
     balance = next(item for item in balances if item["account_id"] == account["id"])
     assert balance["balance"] == "-60.0000"
+
+
+def test_refund_calculations_do_not_follow_related_transaction_across_workspaces(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client, monkeypatch)
+    account = _create_account(
+        client,
+        headers,
+        f"Refund isolation {uuid.uuid4().hex[:8]}",
+        opening_balance="100.00",
+    )
+    category = _create_category(
+        client, headers, f"Refund isolation expense {uuid.uuid4().hex[:8]}", "expense"
+    )
+    expense = _transaction(
+        client,
+        headers,
+        transaction_type="expense",
+        amount="10.00",
+        account_id=str(account["id"]),
+        category_id=str(category["id"]),
+    ).json()
+    refund = _transaction(
+        client,
+        headers,
+        transaction_type="refund",
+        amount="5.00",
+        account_id=str(account["id"]),
+        related_transaction_id=str(expense["id"]),
+    ).json()
+    before_summary = client.get("/api/v1/financial-summary", headers=headers).json()
+    before_rub = next(item for item in before_summary["groups"] if item["currency"] == "RUB")
+    before_expense = Decimal(before_rub["expense"])
+
+    async def corrupt_reference_to_foreign_transaction() -> None:
+        async with AsyncSessionFactory() as session:
+            unique = uuid.uuid4().hex
+            other_user = User(
+                email=f"refund-isolation-{unique}@test.local",
+                normalized_email=f"refund-isolation-{unique}@test.local",
+                display_name="Refund isolation owner",
+            )
+            session.add(other_user)
+            await session.flush()
+            other_workspace = Workspace(
+                name=f"Refund isolation {unique[:8]}",
+                base_currency="RUB",
+                timezone="UTC",
+                owner_user_id=other_user.id,
+            )
+            session.add(other_workspace)
+            await session.flush()
+            session.add(
+                WorkspaceMember(
+                    workspace_id=other_workspace.id,
+                    user_id=other_user.id,
+                    role="owner",
+                )
+            )
+            other_account = Account(
+                workspace_id=other_workspace.id,
+                name=f"Foreign {unique[:8]}",
+                account_type="debit_card",
+                currency="RUB",
+                opening_balance=Decimal("0"),
+                opening_balance_at=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+            )
+            session.add(other_account)
+            await session.flush()
+            foreign_original = FinancialTransaction(
+                workspace_id=other_workspace.id,
+                occurred_at=datetime.fromisoformat("2026-07-01T12:00:00+00:00"),
+                transaction_type="expense",
+                amount=Decimal("1"),
+                currency="RUB",
+                account_id=other_account.id,
+                status="confirmed",
+                source="manual",
+                created_by=other_user.id,
+                updated_by=other_user.id,
+            )
+            session.add(foreign_original)
+            await session.flush()
+            current_refund = await session.get(FinancialTransaction, uuid.UUID(str(refund["id"])))
+            assert current_refund is not None
+            current_refund.related_transaction_id = foreign_original.id
+            await session.commit()
+
+    asyncio.run(corrupt_reference_to_foreign_transaction())
+
+    balances = client.get("/api/v1/accounts/balances", headers=headers).json()
+    balance = next(item for item in balances if item["account_id"] == account["id"])
+    assert balance["balance"] == "90.0000"
+
+    summary = client.get("/api/v1/financial-summary", headers=headers).json()
+    rub = next(item for item in summary["groups"] if item["currency"] == "RUB")
+    assert Decimal(rub["expense"]) == before_expense + Decimal("5.0000")
 
 
 def test_money_is_string_in_api_and_decimal_in_database(

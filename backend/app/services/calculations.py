@@ -66,7 +66,12 @@ async def calculate_balances(
                     else None
                 )
                 if original is None:
-                    original = await session.get(FinancialTransaction, item.related_transaction_id)
+                    original = await session.scalar(
+                        select(FinancialTransaction).where(
+                            FinancialTransaction.id == item.related_transaction_id,
+                            FinancialTransaction.workspace_id == workspace_id,
+                        )
+                    )
                 if original is not None and original.transaction_type == "expense":
                     balance += item.amount
                 elif original is not None and original.transaction_type == "income":
@@ -131,6 +136,7 @@ async def calculate_summary(
                 original = await session.scalar(
                     select(FinancialTransaction).where(
                         FinancialTransaction.id == item.related_transaction_id,
+                        FinancialTransaction.workspace_id == workspace_id,
                         or_(
                             FinancialTransaction.transaction_type == "income",
                             FinancialTransaction.transaction_type == "expense",

@@ -43,6 +43,69 @@ export function conflictDiff(conflict: SyncConflict): {
   };
 }
 
+const fieldLabels: Record<string, string> = {
+  account_id: "Счёт",
+  amount: "Сумма",
+  category_id: "Категория",
+  color: "Цвет",
+  comment: "Комментарий",
+  counterparty: "Контрагент",
+  currency: "Валюта",
+  description: "Описание",
+  icon: "Иконка",
+  institution: "Организация",
+  is_archived: "Архив",
+  name: "Название",
+  occurred_at: "Дата и время",
+  opening_balance: "Начальный остаток",
+  parent_id: "Родительская категория",
+  row_hash: "Контрольная сумма строки",
+  sort_order: "Порядок",
+  status: "Статус",
+  target_account_id: "Целевой счёт",
+  transaction_type: "Тип операции",
+};
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && !Array.isArray(value) && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export interface ConflictFieldDiff {
+  field: string;
+  label: string;
+  database: unknown;
+  external: unknown;
+}
+
+export function conflictFieldDiffs(conflict: SyncConflict): ConflictFieldDiff[] {
+  const changed = record(conflict.sheet_payload.changed_fields);
+  const visible = record(conflict.sheet_payload.visible_row);
+  return conflict.conflicting_fields.map((field) => ({
+    field,
+    label: fieldLabels[field] ?? field,
+    database: conflict.database_payload[field],
+    external: field in changed
+      ? changed[field]
+      : field in visible
+        ? visible[field]
+        : conflict.sheet_payload[field],
+  }));
+}
+
+export function conflictValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "boolean") return value ? "Да" : "Нет";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+export function conflictEntityLabel(entityType: string): string {
+  return ({ account: "Счёт", category: "Категория", transaction: "Операция" })[entityType]
+    ?? entityType;
+}
+
 export function conflictResolutionMessage(resolution: string): string {
   const labels: Record<string, string> = {
     keep_database: "оставить PostgreSQL",

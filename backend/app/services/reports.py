@@ -7,10 +7,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import ApiError
+from app.db.models.accounts import Account
 from app.db.models.automations import NotificationSetting, RecurringRule, TelegramLink
 from app.db.models.categories import Category
 from app.db.models.google_sync import GoogleSheetBinding, SyncConflict, SyncOutbox
-from app.db.models.transactions import FinancialTransaction
+from app.db.models.transactions import FinancialTransaction, TransactionSplit
 from app.db.models.users import Workspace, WorkspaceMember
 from app.schemas.automations import (
     MoneyTotal,
@@ -19,10 +21,325 @@ from app.schemas.automations import (
     WeeklyReportGroup,
     WeeklyReportResponse,
 )
+from app.schemas.financial_reports import (
+    FinancialReportCategory,
+    FinancialReportExpense,
+    FinancialReportGroup,
+    FinancialReportMonth,
+    FinancialReportPeriod,
+    FinancialReportResponse,
+)
 from app.services.backup_status import get_backup_status
 from app.services.calculations import calculate_balances
 
 EFFECTIVE_STATUSES = ("confirmed", "reconciled")
+
+
+def _previous_month_start(value: date) -> date:
+    if value.month == 1:
+        return date(value.year - 1, 12, 1)
+    return date(value.year, value.month - 1, 1)
+
+
+def _month_keys(start: date, end: date) -> list[str]:
+    current = start.replace(day=1)
+    last = end.replace(day=1)
+    result: list[str] = []
+    while current <= last:
+        result.append(current.strftime("%Y-%m"))
+        current = (
+            date(current.year + 1, 1, 1)
+            if current.month == 12
+            else date(current.year, current.month + 1, 1)
+        )
+    return result
+
+
+async def financial_report(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    date_from: date,
+    date_to: date,
+    currency: str | None,
+) -> FinancialReportResponse:
+    if date_from > date_to:
+        raise ApiError(
+            status_code=422,
+            code="INVALID_REPORT_PERIOD",
+            message="date_from must not be after date_to",
+        )
+
+    zone = ZoneInfo(workspace.timezone)
+    cutoff_from = datetime.combine(date_from, time.min, tzinfo=zone).astimezone(UTC)
+    cutoff_to = datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=zone).astimezone(UTC)
+    comparison_date_from = _previous_month_start(date_from.replace(day=1))
+    comparison_cutoff = datetime.combine(comparison_date_from, time.min, tzinfo=zone).astimezone(
+        UTC
+    )
+    filters = [
+        FinancialTransaction.workspace_id == workspace.id,
+        FinancialTransaction.occurred_at >= comparison_cutoff,
+        FinancialTransaction.occurred_at < cutoff_to,
+        FinancialTransaction.status.in_(EFFECTIVE_STATUSES),
+        FinancialTransaction.deleted_at.is_(None),
+    ]
+    if currency is not None:
+        filters.append(FinancialTransaction.currency == currency)
+    transactions = list(
+        (
+            await session.scalars(
+                select(FinancialTransaction)
+                .where(*filters)
+                .order_by(FinancialTransaction.occurred_at, FinancialTransaction.id)
+            )
+        ).all()
+    )
+    selected = [item for item in transactions if item.occurred_at >= cutoff_from]
+
+    related_ids = {
+        item.related_transaction_id
+        for item in transactions
+        if item.transaction_type == "refund" and item.related_transaction_id is not None
+    }
+    originals = {item.id: item for item in transactions}
+    if related_ids:
+        related = list(
+            (
+                await session.scalars(
+                    select(FinancialTransaction).where(
+                        FinancialTransaction.workspace_id == workspace.id,
+                        FinancialTransaction.id.in_(related_ids),
+                    )
+                )
+            ).all()
+        )
+        originals.update({item.id: item for item in related})
+
+    expense_originals = {
+        item.id: item for item in originals.values() if item.transaction_type == "expense"
+    }
+    split_rows = (
+        list(
+            (
+                await session.scalars(
+                    select(TransactionSplit)
+                    .where(TransactionSplit.transaction_id.in_(expense_originals))
+                    .order_by(TransactionSplit.transaction_id, TransactionSplit.id)
+                )
+            ).all()
+        )
+        if expense_originals
+        else []
+    )
+    splits: dict[uuid.UUID, list[TransactionSplit]] = defaultdict(list)
+    for split in split_rows:
+        splits[split.transaction_id].append(split)
+
+    category_ids = {
+        item.category_id for item in expense_originals.values() if item.category_id is not None
+    } | {item.category_id for item in split_rows}
+    category_names = {
+        item.id: item.name
+        for item in (
+            list(
+                (
+                    await session.scalars(
+                        select(Category).where(
+                            Category.workspace_id == workspace.id,
+                            Category.id.in_(category_ids),
+                        )
+                    )
+                ).all()
+            )
+            if category_ids
+            else []
+        )
+    }
+    account_ids = {item.account_id for item in selected if item.transaction_type == "expense"}
+    account_names = {
+        item.id: item.name
+        for item in (
+            list(
+                (
+                    await session.scalars(
+                        select(Account).where(
+                            Account.workspace_id == workspace.id,
+                            Account.id.in_(account_ids),
+                        )
+                    )
+                ).all()
+            )
+            if account_ids
+            else []
+        )
+    }
+
+    def category_name(category_id: uuid.UUID | None) -> str:
+        if category_id is None:
+            return "Без категории"
+        return category_names.get(category_id, "Без категории")
+
+    def empty_totals() -> dict[str, Decimal | int]:
+        return {
+            "income": Decimal("0"),
+            "expense": Decimal("0"),
+            "adjustment": Decimal("0"),
+            "transfer": Decimal("0"),
+            "count": 0,
+        }
+
+    def apply_effect(target: dict[str, Decimal | int], item: FinancialTransaction) -> None:
+        target["count"] = int(target["count"]) + 1
+        if item.transaction_type == "income":
+            target["income"] = Decimal(target["income"]) + item.amount
+        elif item.transaction_type == "expense":
+            target["expense"] = Decimal(target["expense"]) + item.amount
+        elif item.transaction_type == "adjustment":
+            target["adjustment"] = Decimal(target["adjustment"]) + item.amount
+        elif item.transaction_type == "transfer":
+            target["transfer"] = Decimal(target["transfer"]) + item.amount
+        elif item.transaction_type == "refund":
+            original = (
+                originals.get(item.related_transaction_id)
+                if item.related_transaction_id is not None
+                else None
+            )
+            if original is not None and original.transaction_type == "expense":
+                target["expense"] = Decimal(target["expense"]) - item.amount
+            elif original is not None and original.transaction_type == "income":
+                target["income"] = Decimal(target["income"]) - item.amount
+
+    totals: dict[str, dict[str, Decimal | int]] = defaultdict(empty_totals)
+    monthly: dict[str, dict[str, dict[str, Decimal | int]]] = defaultdict(
+        lambda: defaultdict(empty_totals)
+    )
+    for item in transactions:
+        month = item.occurred_at.astimezone(zone).strftime("%Y-%m")
+        apply_effect(monthly[item.currency][month], item)
+    for item in selected:
+        apply_effect(totals[item.currency], item)
+
+    category_amounts: dict[str, dict[uuid.UUID | None, Decimal]] = defaultdict(
+        lambda: defaultdict(lambda: Decimal("0"))
+    )
+    category_counts: dict[str, dict[uuid.UUID | None, int]] = defaultdict(lambda: defaultdict(int))
+
+    def allocate_expense(
+        currency_code: str, original: FinancialTransaction, amount: Decimal
+    ) -> None:
+        transaction_splits = splits.get(original.id, [])
+        if not transaction_splits:
+            category_amounts[currency_code][original.category_id] += amount
+            category_counts[currency_code][original.category_id] += 1
+            return
+        remaining = _money(amount)
+        for index, split in enumerate(transaction_splits):
+            allocated = (
+                remaining
+                if index == len(transaction_splits) - 1
+                else _money(amount * split.amount / original.amount)
+            )
+            category_amounts[currency_code][split.category_id] += allocated
+            category_counts[currency_code][split.category_id] += 1
+            remaining = _money(remaining - allocated)
+
+    for item in selected:
+        if item.transaction_type == "expense":
+            allocate_expense(item.currency, item, item.amount)
+        elif item.transaction_type == "refund":
+            original = (
+                originals.get(item.related_transaction_id)
+                if item.related_transaction_id is not None
+                else None
+            )
+            if original is not None and original.transaction_type == "expense":
+                allocate_expense(item.currency, original, -item.amount)
+
+    month_keys = _month_keys(comparison_date_from, date_to)
+    currencies = sorted(set(totals) | set(monthly))
+    groups: list[FinancialReportGroup] = []
+    for currency_code in currencies:
+        values = totals[currency_code]
+        income = _money(Decimal(values["income"]))
+        expense = _money(Decimal(values["expense"]))
+        adjustment = _money(Decimal(values["adjustment"]))
+        categories = [
+            FinancialReportCategory(
+                category_id=category_id,
+                name=category_name(category_id),
+                amount=_money(amount),
+                transaction_count=category_counts[currency_code][category_id],
+            )
+            for category_id, amount in sorted(
+                category_amounts[currency_code].items(),
+                key=lambda item: (-item[1], category_name(item[0])),
+            )
+        ]
+        month_items: list[FinancialReportMonth] = []
+        for month in month_keys:
+            month_values = monthly[currency_code][month]
+            month_income = _money(Decimal(month_values["income"]))
+            month_expense = _money(Decimal(month_values["expense"]))
+            month_adjustment = _money(Decimal(month_values["adjustment"]))
+            month_items.append(
+                FinancialReportMonth(
+                    month=month,
+                    income=month_income,
+                    expense=month_expense,
+                    adjustment=month_adjustment,
+                    net_cashflow=_money(month_income - month_expense + month_adjustment),
+                    transactions_count=int(month_values["count"]),
+                )
+            )
+        largest = sorted(
+            (
+                item
+                for item in selected
+                if item.currency == currency_code and item.transaction_type == "expense"
+            ),
+            key=lambda item: (item.amount, item.occurred_at, item.id),
+            reverse=True,
+        )[:10]
+        groups.append(
+            FinancialReportGroup(
+                currency=currency_code,
+                income=income,
+                expense=expense,
+                adjustment=adjustment,
+                net_cashflow=_money(income - expense + adjustment),
+                transfer_volume=_money(Decimal(values["transfer"])),
+                transactions_count=int(values["count"]),
+                spending_by_category=categories,
+                monthly_comparison=month_items,
+                largest_expenses=[
+                    FinancialReportExpense(
+                        transaction_id=item.id,
+                        occurred_at=item.occurred_at,
+                        amount=item.amount,
+                        account_id=item.account_id,
+                        account_name=account_names.get(item.account_id, "Счёт"),
+                        category_name=(
+                            "Разделено" if splits.get(item.id) else category_name(item.category_id)
+                        ),
+                        counterparty=item.counterparty,
+                        description=item.description,
+                    )
+                    for item in largest
+                ],
+            )
+        )
+
+    return FinancialReportResponse(
+        period=FinancialReportPeriod(
+            date_from=date_from,
+            date_to=date_to,
+            cutoff_from=cutoff_from,
+            cutoff_to=cutoff_to,
+            timezone=workspace.timezone,
+        ),
+        groups=groups,
+    )
 
 
 async def weekly_report(

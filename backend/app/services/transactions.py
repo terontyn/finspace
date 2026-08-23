@@ -58,6 +58,12 @@ async def _validate_transaction(
     *,
     current_id: uuid.UUID | None = None,
 ) -> None:
+    if data.status == "reconciled":
+        raise ApiError(
+            status_code=409,
+            code="RECONCILIATION_REQUIRED",
+            message="Use account reconciliation to reconcile transactions",
+        )
     source_account = await _account(session, workspace_id, data.account_id)
     if source_account.currency != data.currency:
         raise ApiError(
@@ -271,7 +277,9 @@ async def update_transaction(
     commit: bool = True,
     audit_source: str = "api",
 ) -> FinancialTransaction:
-    transaction = await repository.get_transaction(session, context.workspace.id, transaction_id)
+    transaction = await repository.get_transaction(
+        session, context.workspace.id, transaction_id, for_update=True
+    )
     if transaction is None:
         raise ApiError(
             status_code=404,
@@ -280,6 +288,12 @@ async def update_transaction(
         )
     if transaction.version != data.version:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
+    if transaction.status == "reconciled":
+        raise ApiError(
+            status_code=409,
+            code="RECONCILED_TRANSACTION_IMMUTABLE",
+            message="A reconciled transaction cannot be changed",
+        )
     existing_splits = await repository.get_splits(session, transaction.id)
     current = {
         "occurred_at": transaction.occurred_at,
@@ -302,6 +316,12 @@ async def update_transaction(
         ],
     }
     changes = data.model_dump(exclude_unset=True, exclude={"version"})
+    if changes.get("status") == "reconciled":
+        raise ApiError(
+            status_code=409,
+            code="RECONCILIATION_REQUIRED",
+            message="Use account reconciliation to reconcile transactions",
+        )
     current.update(changes)
     merged = TransactionCreate.model_validate(current)
     await _validate_transaction(session, context.workspace.id, merged, current_id=transaction.id)
@@ -366,6 +386,7 @@ async def _change_lifecycle(
         context.workspace.id,
         transaction_id,
         include_deleted=action == "restore",
+        for_update=True,
     )
     if transaction is None:
         raise ApiError(
@@ -375,6 +396,12 @@ async def _change_lifecycle(
         )
     if transaction.version != version:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
+    if transaction.status == "reconciled" and action != "restore":
+        raise ApiError(
+            status_code=409,
+            code="RECONCILED_TRANSACTION_IMMUTABLE",
+            message="A reconciled transaction cannot be changed",
+        )
     before = snapshot("transaction", transaction)
     if action == "delete":
         transaction.deleted_at = datetime.now(UTC)
@@ -432,7 +459,9 @@ async def confirm_transaction(
     transaction_id: uuid.UUID,
     version: int,
 ) -> FinancialTransaction:
-    transaction = await repository.get_transaction(session, context.workspace.id, transaction_id)
+    transaction = await repository.get_transaction(
+        session, context.workspace.id, transaction_id, for_update=True
+    )
     if transaction is None:
         raise ApiError(
             status_code=404,
