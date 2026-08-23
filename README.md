@@ -5,8 +5,14 @@ Script Bridge без Google Cloud OAuth: пользователь вручную
 синхронизирует её через HMAC pull/ACK/push поверх transactional outbox/inbox.
 
 > [!WARNING]
-> Используйте только тестовые данные. Проект не имеет публичного TLS, шифрования backup
-> и удалённой копии, поэтому пока не предназначен для реальных финансовых данных.
+> Self-hosted deployment использует TLS через Tailscale, но это не отменяет обязанность
+> владельца защищать сервер, ключи и резервные копии. Внешняя зашифрованная копия backup и
+> MFA пока не подтверждены. Не публикуйте PostgreSQL, Redis, Adminer или n8n и не храните
+> реальные банковские credentials в Finspace.
+
+Текущее production-состояние, история выполненных этапов и ограничения зафиксированы в
+[docs/project-history-and-status.md](docs/project-history-and-status.md). Повседневные
+команды и аварийные сценарии: [docs/operations-runbook.md](docs/operations-runbook.md).
 
 ## Сервисы
 
@@ -170,6 +176,9 @@ docker compose exec frontend npm run build
 
 ## Документация
 
+- [История этапов и текущее состояние](docs/project-history-and-status.md)
+- [Эксплуатационная инструкция](docs/operations-runbook.md)
+- [Prompt для следующего ассистента](docs/next-assistant-handoff.md)
 - [Архитектура](docs/architecture.md)
 - [Локальная разработка](docs/local-development.md)
 - [Production deployment frontend](docs/frontend-production.md)
