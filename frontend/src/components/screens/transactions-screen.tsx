@@ -1,335 +1,101 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiClient } from "@/lib/api-client";
 import { formatMoney } from "@/lib/money";
-import type {
-  Account,
-  AuditEntry,
-  Category,
-  Currency,
-  Paged,
-  Transaction,
-  TransactionStatus,
-  TransactionType,
-} from "@/types/finance";
+import type { Account, AuditEntry, Category, Paged, Transaction, TransactionStatus, TransactionType } from "@/types/finance";
 
-interface TransactionsScreenProps {
-  onError: (error: unknown) => void;
-}
+import { initialTransactionForm, transactionCancelMutation, transactionFormFromRecord, transactionMutation, type TransactionForm } from "./transaction-form";
 
-interface TransactionForm {
-  occurredAt: string;
-  transactionType: "income" | "expense" | "transfer";
-  amount: string;
-  currency: Currency;
-  accountId: string;
-  targetAccountId: string;
-  categoryId: string;
-  counterparty: string;
-  description: string;
-  status: "draft" | "confirmed";
-}
+interface TransactionsScreenProps { initialAccountId?: string; onError: (error: unknown) => void; openForm?: boolean; }
 
-const typeLabels: Record<TransactionType, string> = {
-  income: "Доход",
-  expense: "Расход",
-  transfer: "Перевод",
-  refund: "Возврат",
-  adjustment: "Корректировка",
-};
+const typeLabels: Record<TransactionType, string> = { income: "Доход", expense: "Расход", transfer: "Перевод", refund: "Возврат", adjustment: "Корректировка" };
+const statusLabels: Record<TransactionStatus, string> = { draft: "Черновик", confirmed: "Подтверждена", reconciled: "Сверена", cancelled: "Отменена" };
+const sourceLabels: Record<Transaction["source"], string> = { manual: "Вручную", api: "API", import: "Импорт", system: "Система", google_sheets: "Google Sheets", automation: "Автоматизация", telegram: "Telegram" };
+const limit = 10;
 
-const statusLabels: Record<TransactionStatus, string> = {
-  draft: "Черновик",
-  confirmed: "Подтверждена",
-  reconciled: "Сверена",
-  cancelled: "Отменена",
-};
-
-function initialForm(): TransactionForm {
-  const now = new Date();
-  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-  return {
-    occurredAt: now.toISOString().slice(0, 16),
-    transactionType: "expense",
-    amount: "",
-    currency: "RUB",
-    accountId: "",
-    targetAccountId: "",
-    categoryId: "",
-    counterparty: "",
-    description: "",
-    status: "confirmed",
-  };
-}
-
-export function TransactionsScreen({ onError }: TransactionsScreenProps) {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [form, setForm] = useState<TransactionForm>(initialForm);
-  const [editing, setEditing] = useState<Transaction | null>(null);
-  const [history, setHistory] = useState<{ transaction: Transaction; items: AuditEntry[] } | null>(null);
-  const [typeFilter, setTypeFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [search, setSearch] = useState("");
-  const [appliedSearch, setAppliedSearch] = useState("");
-  const [offset, setOffset] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const limit = 10;
-
-  const query = useMemo(() => {
-    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-    if (typeFilter) params.set("transaction_type", typeFilter);
-    if (statusFilter) params.set("status", statusFilter);
-    if (appliedSearch) params.set("search", appliedSearch);
-    return params.toString();
-  }, [appliedSearch, offset, statusFilter, typeFilter]);
-
-  const load = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const [transactionResult, accountResult, categoryResult] = await Promise.all([
-        apiClient.get<Paged<Transaction>>(`/api/v1/transactions?${query}`),
-        apiClient.get<Paged<Account>>("/api/v1/accounts?is_archived=false&limit=200"),
-        apiClient.get<Paged<Category>>("/api/v1/categories?is_archived=false&limit=500"),
-      ]);
-      setTransactions(transactionResult.items);
-      setTotal(transactionResult.page.total);
-      setAccounts(accountResult.items);
-      setCategories(categoryResult.items);
-    } catch (error) {
-      onError(error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [onError, query]);
+function TransactionDrawer({ accounts, categories, editing, form, isSaving, onChange, onClose, onSave }: {
+  accounts: Account[]; categories: Category[]; editing: Transaction | null; form: TransactionForm; isSaving: boolean;
+  onChange: (next: TransactionForm) => void; onClose: () => void; onSave: (event: React.FormEvent) => void;
+}) {
+  const drawerRef = useRef<HTMLElement>(null);
+  const visibleCategories = categories.filter((category) => category.category_type === form.transactionType || category.category_type === "both");
 
   useEffect(() => {
-    queueMicrotask(() => void load());
-  }, [load]);
+    const frame = window.requestAnimationFrame(() => drawerRef.current?.querySelector<HTMLElement>("input, select, button")?.focus());
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusable = Array.from(drawerRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])'));
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener("keydown", handleKey); };
+  }, [onClose]);
+
+  function setType(transactionType: TransactionForm["transactionType"]) {
+    const account = accounts.find((item) => item.id === form.accountId);
+    onChange({ ...form, transactionType, categoryId: "", targetAccountId: "", splits: [], currency: account?.currency ?? form.currency });
+  }
 
   function selectAccount(accountId: string) {
     const account = accounts.find((item) => item.id === accountId);
-    setForm({ ...form, accountId, currency: account?.currency ?? form.currency });
+    onChange({ ...form, accountId, currency: account?.currency ?? form.currency });
   }
 
-  function resetForm() {
-    setEditing(null);
-    setForm(initialForm());
-  }
+  return <div className="transaction-drawer-backdrop" onMouseDown={onClose} role="presentation"><section aria-label={editing ? "Редактирование операции" : "Новая операция"} aria-modal="true" className="transaction-drawer" onMouseDown={(event) => event.stopPropagation()} ref={drawerRef} role="dialog">
+    <header><div><span className="kicker">{editing ? "Редактирование" : "Новая запись"}</span><h2>{editing ? "Изменить операцию" : "Добавить операцию"}</h2>{editing ? <small>Версия {editing.version} · {sourceLabels[editing.source]}</small> : null}</div><button aria-label="Закрыть" className="drawer-close" onClick={onClose} type="button">×</button></header>
+    <form onSubmit={onSave}>
+      <div className="transaction-type-tabs" role="group" aria-label="Тип операции">{(["expense", "income", "transfer"] as const).map((type) => <button className={form.transactionType === type ? "is-active" : ""} key={type} onClick={() => setType(type)} type="button">{typeLabels[type]}</button>)}</div>
+      <label className="drawer-amount-field"><span>Сумма</span><div><input required inputMode="decimal" pattern="\d+(\.\d{1,4})?" value={form.amount} onChange={(event) => onChange({ ...form, amount: event.target.value })}/><strong>{form.currency}</strong></div></label>
+      <div className="drawer-form-grid"><label><span>Счёт</span><select required value={form.accountId} onChange={(event) => selectAccount(event.target.value)}><option value="">Выберите счёт</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.currency}</option>)}</select></label><label><span>Дата и время</span><input required type="datetime-local" value={form.occurredAt} onChange={(event) => onChange({ ...form, occurredAt: event.target.value })}/></label></div>
+      {form.transactionType === "transfer" ? <label><span>Счёт назначения</span><select required value={form.targetAccountId} onChange={(event) => onChange({ ...form, targetAccountId: event.target.value })}><option value="">Выберите счёт</option>{accounts.filter((account) => account.id !== form.accountId).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.currency}</option>)}</select></label> : <label><span>Категория</span><select disabled={form.splits.length > 0} value={form.categoryId} onChange={(event) => onChange({ ...form, categoryId: event.target.value })}><option value="">Без категории</option>{visibleCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>}
+      <label><span>Контрагент</span><input maxLength={300} value={form.counterparty} onChange={(event) => onChange({ ...form, counterparty: event.target.value })} placeholder="Магазин или человек"/></label>
+      <label><span>Описание</span><input value={form.description} onChange={(event) => onChange({ ...form, description: event.target.value })} placeholder="Назначение операции"/></label>
+      <label><span>Комментарий</span><textarea rows={2} value={form.comment} onChange={(event) => onChange({ ...form, comment: event.target.value })} placeholder="Необязательно"/></label>
+      <label><span>Статус</span><select value={form.status} onChange={(event) => onChange({ ...form, status: event.target.value as TransactionForm["status"] })}><option value="confirmed">Подтверждена</option><option value="draft">Черновик</option></select></label>
+      {form.transactionType !== "transfer" ? <div className="split-editor"><div><span>Разделение по категориям</span><button className="text-button" onClick={() => onChange({ ...form, categoryId: "", splits: [...form.splits, { amount: "", categoryId: "", comment: "" }] })} type="button">＋ Добавить часть</button></div>{form.splits.map((split, index) => <div className="split-editor-row" key={index}><select aria-label={`Категория части ${index + 1}`} required value={split.categoryId} onChange={(event) => onChange({ ...form, splits: form.splits.map((item, itemIndex) => itemIndex === index ? { ...item, categoryId: event.target.value } : item) })}><option value="">Категория</option>{visibleCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><input aria-label={`Сумма части ${index + 1}`} inputMode="decimal" pattern="\d+(\.\d{1,4})?" required value={split.amount} onChange={(event) => onChange({ ...form, splits: form.splits.map((item, itemIndex) => itemIndex === index ? { ...item, amount: event.target.value } : item) })}/><button aria-label={`Удалить часть ${index + 1}`} className="text-button text-button--danger" onClick={() => onChange({ ...form, splits: form.splits.filter((_, itemIndex) => itemIndex !== index) })} type="button">×</button></div>)}</div> : null}
+      <footer><button className="secondary-button" onClick={onClose} type="button">Отмена</button><button className="primary-button" disabled={isSaving} type="submit">{isSaving ? "Сохраняем…" : editing ? "Сохранить изменения" : "Добавить операцию"}</button></footer>
+    </form>
+  </section></div>;
+}
 
-  function startEdit(transaction: Transaction) {
-    const date = new Date(transaction.occurred_at);
-    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
-    if (!["income", "expense", "transfer"].includes(transaction.transaction_type)) return;
-    setEditing(transaction);
-    setForm({
-      occurredAt: date.toISOString().slice(0, 16),
-      transactionType: transaction.transaction_type as TransactionForm["transactionType"],
-      amount: transaction.amount,
-      currency: transaction.currency,
-      accountId: transaction.account.id,
-      targetAccountId: transaction.target_account?.id ?? "",
-      categoryId: transaction.category?.id ?? "",
-      counterparty: transaction.counterparty ?? "",
-      description: transaction.description ?? "",
-      status: transaction.status === "draft" ? "draft" : "confirmed",
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
+export function TransactionsScreen({ initialAccountId, onError, openForm = false }: TransactionsScreenProps) {
+  const [transactions, setTransactions] = useState<Transaction[]>([]); const [accounts, setAccounts] = useState<Account[]>([]); const [categories, setCategories] = useState<Category[]>([]);
+  const [form, setForm] = useState<TransactionForm>(initialTransactionForm); const [editing, setEditing] = useState<Transaction | null>(null); const [drawerOpen, setDrawerOpen] = useState(openForm);
+  const [history, setHistory] = useState<{ transaction: Transaction; items: AuditEntry[] } | null>(null); const [selected, setSelected] = useState<string[]>([]);
+  const [typeFilter, setTypeFilter] = useState(""); const [statusFilter, setStatusFilter] = useState(""); const [accountFilter, setAccountFilter] = useState(""); const [categoryFilter, setCategoryFilter] = useState("");
+  const [search, setSearch] = useState(""); const [appliedSearch, setAppliedSearch] = useState(""); const [offset, setOffset] = useState(0); const [total, setTotal] = useState(0); const [isLoading, setIsLoading] = useState(true); const [isSaving, setIsSaving] = useState(false);
 
-  async function save(event: React.FormEvent) {
-    event.preventDefault();
-    setIsSaving(true);
-    const payload = {
-      occurred_at: new Date(form.occurredAt).toISOString(),
-      transaction_type: form.transactionType,
-      amount: form.amount,
-      currency: form.currency,
-      account_id: form.accountId,
-      target_account_id: form.transactionType === "transfer" ? form.targetAccountId : null,
-      category_id: form.transactionType === "transfer" ? null : form.categoryId || null,
-      counterparty: form.counterparty || null,
-      description: form.description || null,
-      status: form.status,
-    };
-    try {
-      if (editing) {
-        await apiClient.patch<Transaction>(`/api/v1/transactions/${editing.id}`, {
-          ...payload,
-          version: editing.version,
-        });
-      } else {
-        await apiClient.post<Transaction>("/api/v1/transactions", payload);
-      }
-      resetForm();
-      await load();
-    } catch (error) {
-      onError(error);
-    } finally {
-      setIsSaving(false);
-    }
-  }
+  const query = useMemo(() => { const params = new URLSearchParams({ limit: String(limit), offset: String(offset) }); if (typeFilter) params.set("transaction_type", typeFilter); if (statusFilter) params.set("status", statusFilter); if (accountFilter) params.set("account_id", accountFilter); if (categoryFilter) params.set("category_id", categoryFilter); if (appliedSearch) params.set("search", appliedSearch); return params.toString(); }, [accountFilter, appliedSearch, categoryFilter, offset, statusFilter, typeFilter]);
+  const load = useCallback(async () => { setIsLoading(true); try { const [transactionResult, accountResult, categoryResult] = await Promise.all([apiClient.get<Paged<Transaction>>(`/api/v1/transactions?${query}`), apiClient.get<Paged<Account>>("/api/v1/accounts?is_archived=false&limit=200"), apiClient.get<Paged<Category>>("/api/v1/categories?is_archived=false&limit=500")]); setTransactions(transactionResult.items); setTotal(transactionResult.page.total); setAccounts(accountResult.items); setCategories(categoryResult.items); setSelected([]); const initialAccount = openForm && initialAccountId ? accountResult.items.find((account) => account.id === initialAccountId) : null; if (initialAccount) setForm((current) => current.accountId ? current : { ...current, accountId: initialAccount.id, currency: initialAccount.currency }); } catch (error) { onError(error); } finally { setIsLoading(false); } }, [initialAccountId, onError, openForm, query]);
+  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
 
-  async function cancel(transaction: Transaction) {
-    try {
-      await apiClient.post<Transaction>(`/api/v1/transactions/${transaction.id}/cancel`, {
-        version: transaction.version,
-      });
-      await load();
-    } catch (error) {
-      onError(error);
-    }
-  }
+  function openCreate() { setEditing(null); setForm(initialTransactionForm()); setDrawerOpen(true); }
+  function closeDrawer() { setDrawerOpen(false); setEditing(null); setForm(initialTransactionForm()); }
+  function startEdit(transaction: Transaction) { const next = transactionFormFromRecord(transaction); if (!next) return; setEditing(transaction); setForm(next); setDrawerOpen(true); }
+  async function save(event: React.FormEvent) { event.preventDefault(); setIsSaving(true); const mutation = transactionMutation(form, editing); try { if (mutation.method === "PATCH") await apiClient.patch<Transaction>(mutation.path, mutation.body); else await apiClient.post<Transaction>(mutation.path, mutation.body); closeDrawer(); await load(); } catch (error) { onError(error); } finally { setIsSaving(false); } }
+  async function cancel(transaction: Transaction) { const mutation = transactionCancelMutation(transaction); try { await apiClient.post<Transaction>(mutation.path, mutation.body); await load(); } catch (error) { onError(error); } }
+  async function showHistory(transaction: Transaction) { try { const result = await apiClient.get<Paged<AuditEntry>>(`/api/v1/transactions/${transaction.id}/history`); setHistory({ transaction, items: result.items }); } catch (error) { onError(error); } }
+  function toggleSelected(id: string) { setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]); }
+  function applyFilter(type: string) { setOffset(0); setTypeFilter(type); }
 
-  async function showHistory(transaction: Transaction) {
-    try {
-      const result = await apiClient.get<Paged<AuditEntry>>(
-        `/api/v1/transactions/${transaction.id}/history`,
-      );
-      setHistory({ transaction, items: result.items });
-    } catch (error) {
-      onError(error);
-    }
-  }
-
-  const visibleCategories = categories.filter(
-    (category) =>
-      category.category_type === form.transactionType || category.category_type === "both",
-  );
-
-  return (
-    <section>
-      <header className="screen-header">
-        <div>
-          <span className="kicker">Финансовый журнал</span>
-          <h1>Операции</h1>
-          <p>Доходы, расходы и переводы с оптимистичной блокировкой.</p>
-        </div>
-        <button className="secondary-button" type="button" onClick={() => void load()}>
-          Повторить загрузку
-        </button>
-      </header>
-
-      <form className="form-panel transaction-form" onSubmit={(event) => void save(event)}>
-        <div className="panel-heading">
-          <div>
-            <span className="kicker">{editing ? "Редактирование" : "Новая запись"}</span>
-            <h2>{editing ? "Изменить операцию" : "Добавить операцию"}</h2>
-          </div>
-          {editing ? <button className="text-button" type="button" onClick={resetForm}>Отмена</button> : null}
-        </div>
-        <div className="transaction-form-grid">
-          <label>
-            Дата и время
-            <input required type="datetime-local" value={form.occurredAt} onChange={(event) => setForm({ ...form, occurredAt: event.target.value })} />
-          </label>
-          <label>
-            Тип
-            <select value={form.transactionType} onChange={(event) => {
-              const account = accounts.find((a) => a.id === form.accountId);
-              setForm({ ...form, transactionType: event.target.value as TransactionForm["transactionType"], categoryId: "", targetAccountId: "", currency: account?.currency ?? form.currency });
-            }}>
-              <option value="income">Доход</option><option value="expense">Расход</option><option value="transfer">Перевод</option>
-            </select>
-          </label>
-          <label>
-            Сумма
-            <input required inputMode="decimal" pattern="\d+(\.\d{1,4})?" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
-          </label>
-          <label>
-            Счёт
-            <select required value={form.accountId} onChange={(event) => selectAccount(event.target.value)}>
-              <option value="">Выберите счёт</option>
-              {accounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.currency}</option>)}
-            </select>
-          </label>
-          {form.transactionType === "transfer" ? (
-            <label>
-              Счёт назначения
-              <select required value={form.targetAccountId} onChange={(event) => setForm({ ...form, targetAccountId: event.target.value })}>
-                <option value="">Выберите счёт</option>
-                {accounts.filter((account) => account.id !== form.accountId).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.currency}</option>)}
-              </select>
-            </label>
-          ) : (
-            <label>
-              Категория
-              <select value={form.categoryId} onChange={(event) => setForm({ ...form, categoryId: event.target.value })}>
-                <option value="">Без категории</option>
-                {visibleCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-              </select>
-            </label>
-          )}
-          <label>
-            Контрагент
-            <input value={form.counterparty} onChange={(event) => setForm({ ...form, counterparty: event.target.value })} />
-          </label>
-          <label>
-            Статус
-            <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value as TransactionForm["status"] })}>
-              <option value="confirmed">Подтверждена</option><option value="draft">Черновик</option>
-            </select>
-          </label>
-          <label className="span-two">
-            Описание
-            <input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-          </label>
-        </div>
-        <button type="submit" disabled={isSaving}>{isSaving ? "Сохраняем…" : editing ? "Сохранить" : "Добавить операцию"}</button>
-      </form>
-
-      <div className="panel table-panel">
-        <form className="filters" onSubmit={(event) => { event.preventDefault(); setOffset(0); setAppliedSearch(search); }}>
-          <select aria-label="Фильтр по типу" value={typeFilter} onChange={(event) => { setOffset(0); setTypeFilter(event.target.value); }}>
-            <option value="">Все типы</option>
-            {Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-          <select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => { setOffset(0); setStatusFilter(event.target.value); }}>
-            <option value="">Все статусы</option>
-            {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-          <input aria-label="Поиск" placeholder="Контрагент или описание" value={search} onChange={(event) => setSearch(event.target.value)} />
-          <button className="secondary-button" type="submit">Найти</button>
-        </form>
-
-        <div className="table-scroll">
-          <table>
-            <thead><tr><th>Дата</th><th>Тип</th><th>Сумма</th><th>Валюта</th><th>Счёт</th><th>Счёт назначения</th><th>Категория</th><th>Контрагент</th><th>Описание</th><th>Статус</th><th /></tr></thead>
-            <tbody>
-              {transactions.map((transaction) => (
-                <tr key={transaction.id}>
-                  <td>{new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date(transaction.occurred_at))}</td>
-                  <td><span className={`type-chip type-chip--${transaction.transaction_type}`}>{typeLabels[transaction.transaction_type]}</span></td>
-                  <td className="amount-cell">{formatMoney(transaction.amount, transaction.currency)}</td>
-                  <td>{transaction.currency}</td><td>{transaction.account.name}</td><td>{transaction.target_account?.name ?? "—"}</td><td>{transaction.category?.name ?? "—"}</td><td>{transaction.counterparty ?? "—"}</td><td>{transaction.description ?? "—"}</td>
-                  <td><span className={`status-chip status-chip--${transaction.status}`}>{statusLabels[transaction.status]}</span></td>
-                  <td><div className="table-actions"><button className="text-button" type="button" onClick={() => startEdit(transaction)}>Изменить</button><button className="text-button" type="button" onClick={() => void showHistory(transaction)}>История</button>{transaction.status !== "cancelled" ? <button className="text-button text-button--danger" type="button" onClick={() => void cancel(transaction)}>Отменить</button> : null}</div></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {!isLoading && !transactions.length ? <div className="empty-state">Операции не найдены.</div> : null}
-          {isLoading ? <div className="empty-state">Загружаем операции…</div> : null}
-        </div>
-        <div className="pagination">
-          <span>{total ? `${offset + 1}–${Math.min(offset + limit, total)} из ${total}` : "0 операций"}</span>
-          <div><button className="secondary-button" type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Назад</button><button className="secondary-button" type="button" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)}>Дальше</button></div>
-        </div>
+  return <section>
+    <header className="screen-header"><div><span className="kicker">Финансовый журнал</span><h1>Операции</h1><p>Доходы, расходы и переводы — с версиями, историей и реальными данными.</p></div><div className="screen-header-actions"><button className="secondary-button" disabled={isLoading} onClick={() => void load()} type="button">Обновить</button><button className="primary-button" onClick={openCreate} type="button">＋ Добавить операцию</button></div></header>
+    <div className="panel transaction-ledger">
+      <form className="transaction-filters" onSubmit={(event) => { event.preventDefault(); setOffset(0); setAppliedSearch(search); }}><label className="transaction-search"><svg aria-hidden="true" fill="none" height="17" viewBox="0 0 24 24" width="17"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input aria-label="Поиск" placeholder="Контрагент, описание или комментарий" value={search} onChange={(event) => setSearch(event.target.value)}/></label><button className="secondary-button" type="submit">Найти</button><div className="transaction-filter-chips" role="group" aria-label="Фильтр по типу">{[["","Все"],["expense","Расходы"],["income","Доходы"],["transfer","Переводы"]].map(([value,label]) => <button className={typeFilter === value ? "is-active" : ""} key={value} onClick={() => applyFilter(value)} type="button">{label}</button>)}</div><select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => { setOffset(0); setStatusFilter(event.target.value); }}><option value="">Все статусы</option>{Object.entries(statusLabels).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select><select aria-label="Фильтр по счёту" value={accountFilter} onChange={(event) => { setOffset(0); setAccountFilter(event.target.value); }}><option value="">Все счета</option>{accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select><select aria-label="Фильтр по категории" value={categoryFilter} onChange={(event) => { setOffset(0); setCategoryFilter(event.target.value); }}><option value="">Все категории</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></form>
+      <div className="transaction-result-line"><span>Найдено: <strong>{total}</strong></span>{selected.length ? <div className="transaction-bulk"><strong>Выбрано: {selected.length}</strong><span title="Requires API support">Пакетные изменения требуют API</span><button className="text-button" onClick={() => setSelected([])} type="button">Снять выбор</button></div> : null}</div>
+      <div className="transaction-table-wrap"><table className="transaction-table"><thead><tr><th><input aria-label="Выбрать страницу" checked={Boolean(transactions.length) && selected.length === transactions.length} onChange={(event) => setSelected(event.target.checked ? transactions.map((item) => item.id) : [])} type="checkbox"/></th><th>Дата</th><th>Контрагент</th><th>Категория</th><th>Счёт</th><th>Статус</th><th>Сумма</th><th><span className="sr-only">Действия</span></th></tr></thead><tbody>{transactions.map((transaction) => <tr className={selected.includes(transaction.id) ? "is-selected" : ""} key={transaction.id}><td><input aria-label={`Выбрать ${transaction.counterparty ?? typeLabels[transaction.transaction_type]}`} checked={selected.includes(transaction.id)} onChange={() => toggleSelected(transaction.id)} type="checkbox"/></td><td><time dateTime={transaction.occurred_at}>{new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(transaction.occurred_at))}</time></td><td><strong>{transaction.counterparty ?? typeLabels[transaction.transaction_type]}</strong><small>{transaction.description ?? sourceLabels[transaction.source]}</small></td><td><span className="category-pill">{transaction.splits.length ? `${transaction.splits.length} категории` : transaction.category?.name ?? "Без категории"}</span></td><td><strong>{transaction.account.name}</strong><small>{transaction.transaction_type === "transfer" ? `→ ${transaction.target_account?.name ?? "—"}` : sourceLabels[transaction.source]}</small></td><td><span className={`status-chip status-chip--${transaction.status}`}>{statusLabels[transaction.status]}</span></td><td className={`amount-cell amount-cell--${transaction.transaction_type}`}>{transaction.transaction_type === "expense" ? "− " : transaction.transaction_type === "income" ? "+ " : ""}{formatMoney(transaction.amount, transaction.currency)}</td><td><div className="transaction-row-actions"><button className="text-button" onClick={() => startEdit(transaction)} type="button">Изменить</button><button className="text-button" onClick={() => void showHistory(transaction)} type="button">История</button>{transaction.status !== "cancelled" ? <button className="text-button text-button--danger" onClick={() => void cancel(transaction)} type="button">Отменить</button> : null}</div></td></tr>)}</tbody></table>
+        <div className="transaction-mobile-list">{transactions.map((transaction) => <article className={selected.includes(transaction.id) ? "transaction-mobile-card is-selected" : "transaction-mobile-card"} key={transaction.id}><div><input aria-label={`Выбрать ${transaction.counterparty ?? typeLabels[transaction.transaction_type]}`} checked={selected.includes(transaction.id)} onChange={() => toggleSelected(transaction.id)} type="checkbox"/><span className={`transaction-type-icon transaction-type-icon--${transaction.transaction_type}`}>{transaction.transaction_type === "income" ? "↓" : transaction.transaction_type === "transfer" ? "↔" : "↑"}</span><div><strong>{transaction.counterparty ?? typeLabels[transaction.transaction_type]}</strong><small>{transaction.category?.name ?? sourceLabels[transaction.source]} · {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(new Date(transaction.occurred_at))}</small></div><b className={`amount-cell--${transaction.transaction_type}`}>{transaction.transaction_type === "expense" ? "− " : transaction.transaction_type === "income" ? "+ " : ""}{formatMoney(transaction.amount, transaction.currency)}</b></div><footer><span className={`status-chip status-chip--${transaction.status}`}>{statusLabels[transaction.status]}</span><button className="text-button" onClick={() => startEdit(transaction)} type="button">Изменить</button><button className="text-button" onClick={() => void showHistory(transaction)} type="button">История</button></footer></article>)}</div>
+        {!isLoading && !transactions.length ? <div className="empty-state"><strong>Операции не найдены</strong><span>Измените фильтры или добавьте новую операцию.</span></div> : null}{isLoading ? <div className="transaction-skeleton" aria-label="Загружаем операции">{Array.from({ length: 5 }, (_, index) => <i key={index}/>)}</div> : null}
       </div>
-
-      {history ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setHistory(null)}>
-          <section className="history-panel" role="dialog" aria-modal="true" aria-label="История операции" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="panel-heading"><div><span className="kicker">Audit log</span><h2>История операции</h2><p>{history.transaction.description ?? typeLabels[history.transaction.transaction_type]}</p></div><button className="text-button" type="button" onClick={() => setHistory(null)}>Закрыть</button></div>
-            <ol className="history-list">{history.items.map((entry) => <li key={entry.id}><span className="history-dot" /><div><strong>{entry.action}</strong><span>{new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(entry.created_at))}</span>{entry.request_id ? <code>{entry.request_id}</code> : null}</div></li>)}</ol>
-          </section>
-        </div>
-      ) : null}
-    </section>
-  );
+      <div className="pagination"><span>{total ? `${offset + 1}–${Math.min(offset + limit, total)} из ${total}` : "0 операций"}</span><div><button className="secondary-button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))} type="button">Назад</button><button className="secondary-button" disabled={offset + limit >= total} onClick={() => setOffset(offset + limit)} type="button">Дальше</button></div></div>
+    </div>
+    {drawerOpen ? <TransactionDrawer accounts={accounts} categories={categories} editing={editing} form={form} isSaving={isSaving} onChange={setForm} onClose={closeDrawer} onSave={(event) => void save(event)}/> : null}
+    {history ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setHistory(null)}><section className="history-panel" role="dialog" aria-modal="true" aria-label="История операции" onMouseDown={(event) => event.stopPropagation()}><div className="panel-heading"><div><span className="kicker">Audit log</span><h2>История операции</h2><p>{history.transaction.counterparty ?? typeLabels[history.transaction.transaction_type]}</p></div><button className="text-button" type="button" onClick={() => setHistory(null)}>Закрыть</button></div><ol className="history-list">{history.items.map((entry) => <li key={entry.id}><span className="history-dot"/><div><strong>{entry.action}</strong><span>{new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(entry.created_at))}</span>{entry.request_id ? <code>{entry.request_id}</code> : null}</div></li>)}</ol></section></div> : null}
+  </section>;
 }

@@ -103,9 +103,9 @@ async def run(arguments: list[str]) -> int:
 
         cycle_environment = {**child_environment, "MIGRATION_TEST_CYCLE": "true"}
         _run(["alembic", "downgrade", "0005_apps_script_bridge"], cycle_environment)
-        _run(["alembic", "upgrade", "0006_automations_telegram"], cycle_environment)
+        _run(["alembic", "upgrade", "head"], cycle_environment)
         _run(["alembic", "downgrade", "0005_apps_script_bridge"], cycle_environment)
-        _run(["alembic", "upgrade", "0006_automations_telegram"], cycle_environment)
+        _run(["alembic", "upgrade", "head"], cycle_environment)
         await assert_test_database_marker(database_url, expected_run_id=str(test_run_id))
 
         _run(

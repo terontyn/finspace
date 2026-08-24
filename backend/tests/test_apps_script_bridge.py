@@ -442,6 +442,25 @@ def test_hmac_replay_push_conflict_isolation_and_reconciliation(
     assert pushed.json()["results"][0]["status"] == "applied"
     transaction_id = pushed.json()["results"][0]["result"]["entity_id"]
 
+    duplicate_delivery = _bridge_post(
+        client,
+        "push",
+        str(binding["id"]),
+        str(binding["secret"]),
+        payload,
+        nonce=str(uuid.uuid4()),
+    )
+    assert duplicate_delivery.status_code == 200, duplicate_delivery.text
+    duplicate_result = duplicate_delivery.json()["results"][0]
+    assert duplicate_result["status"] == "duplicate"
+    assert duplicate_result["result"]["event_id"] == payload["events"][0]["event_id"]
+    assert duplicate_result["result"]["entity_id"] == transaction_id
+    assert duplicate_result["result"]["version"] == 1
+    assert duplicate_result["result"]["normalized_row"]
+    transactions_after_retry = client.get("/api/v1/transactions", headers=headers)
+    assert transactions_after_retry.status_code == 200
+    assert transactions_after_retry.json()["page"]["total"] == 1
+
     replay = _bridge_post(
         client,
         "push",

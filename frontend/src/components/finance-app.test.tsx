@@ -54,7 +54,7 @@ function installTestWindow(): () => void {
 function renderFinanceApp() {
   return create(
     <AuthProvider>
-      <FinanceApp />
+      <FinanceApp screen="today" />
     </AuthProvider>,
   );
 }
@@ -111,10 +111,14 @@ test("renders the finance application when a session is restored", async () => {
   const originalGet = apiClient.get;
   let renderer: ReactTestRenderer | undefined;
   apiClient.restoreSession = async () => restoredSession;
-  apiClient.get = (<T,>(path: string) =>
-    Promise.resolve(
-      (path === "/api/v1/accounts/balances" ? [] : { groups: [] }) as T,
-    )) as typeof apiClient.get;
+  apiClient.get = (<T,>(path: string) => {
+    if (path === "/api/v1/accounts/balances") return Promise.resolve([] as T);
+    if (path.startsWith("/api/v1/financial-summary?")) return Promise.resolve({ groups: [] } as T);
+    if (path.startsWith("/api/v1/transactions?")) {
+      return Promise.resolve({ items: [], page: { limit: 6, offset: 0, total: 0 } } as T);
+    }
+    throw new Error(`Unexpected test request: ${path}`);
+  }) as typeof apiClient.get;
 
   try {
     await act(async () => {

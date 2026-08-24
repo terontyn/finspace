@@ -38,6 +38,7 @@ class GoogleSheetStatus(ApiModel):
     public_backend_url: str | None = None
     connection: GoogleConnectionStatus
     binding_id: uuid.UUID | None = None
+    spreadsheet_id: str | None = None
     spreadsheet_url: str | None = None
     spreadsheet_name: str | None = None
     template_version: int | None = None
@@ -48,8 +49,11 @@ class GoogleSheetStatus(ApiModel):
     last_successful_sync_at: datetime | None = None
     last_reconciliation_at: datetime | None = None
     pending_outbox: int = 0
+    pending_inbox: int = 0
     failed_events: int = 0
     open_conflicts: int = 0
+    last_error_code: str | None = None
+    last_error_message: str | None = None
     webhook_configured: bool = False
     spreadsheet_registered: bool = False
     last_pull_at: datetime | None = None

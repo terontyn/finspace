@@ -14,9 +14,10 @@ Secret. Нужны работающий Финпространство, Redis и
 6. Вручную создайте пустую Google-таблицу и откройте **Расширения → Apps Script**. Этот
    container-bound script автоматически использует свой default project.
 7. Запустите `setupFinspace()` и подтвердите разрешения. Будут созданы 13 листов, hidden
-   meta/list sheets, headers, filters, validations, named ranges и защиты.
-8. Запустите `configureConnection()`. Вставьте URL, Binding ID и secret; скрипт
-   зарегистрирует текущий spreadsheet и отправит heartbeat.
+   meta/list sheets, headers, filters, validations, named ranges и защиты. Затем вернитесь
+   в таблицу и перезагрузите страницу — `onOpen()` добавит меню **Финпространство**.
+8. Выберите **Финпространство → Настроить подключение**. Вставьте URL, Binding ID и
+   secret; скрипт зарегистрирует текущий spreadsheet и отправит heartbeat.
 9. Через меню **Финпространство → Установить триггеры** выберите интервал. Устанавливаются
    installable onEdit, плановая sync-задача, onOpen и по желанию nightly reminder.
 10. Нажмите **Получить обновления**. Initial export поступит через pull и завершится после

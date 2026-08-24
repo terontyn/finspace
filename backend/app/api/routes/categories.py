@@ -21,6 +21,12 @@ from app.services import categories as service
 router = APIRouter()
 
 
+async def _commit_category_response(session: DbSession, category: object) -> CategoryResponse:
+    response = CategoryResponse.model_validate(category)
+    await session.commit()
+    return response
+
+
 @router.get("/tree", response_model=list[CategoryTreeItem])
 async def category_tree(
     context: CurrentContext,
@@ -72,7 +78,8 @@ async def category_create(
     context: EditorContext,
     session: DbSession,
 ) -> CategoryResponse:
-    return CategoryResponse.model_validate(await service.create_category(session, context, data))
+    category = await service.create_category(session, context, data, commit=False)
+    return await _commit_category_response(session, category)
 
 
 @router.get("/{category_id}", response_model=CategoryResponse)
@@ -94,9 +101,8 @@ async def category_update(
     context: EditorContext,
     session: DbSession,
 ) -> CategoryResponse:
-    return CategoryResponse.model_validate(
-        await service.update_category(session, context, category_id, data)
-    )
+    category = await service.update_category(session, context, category_id, data, commit=False)
+    return await _commit_category_response(session, category)
 
 
 @router.delete("/{category_id}", response_model=CategoryResponse)
@@ -106,9 +112,8 @@ async def category_delete(
     session: DbSession,
     version: int = Query(ge=1),
 ) -> CategoryResponse:
-    return CategoryResponse.model_validate(
-        await service.delete_category(session, context, category_id, version)
-    )
+    category = await service.delete_category(session, context, category_id, version, commit=False)
+    return await _commit_category_response(session, category)
 
 
 @router.post("/{category_id}/restore", response_model=CategoryResponse)
@@ -118,6 +123,7 @@ async def category_restore(
     context: EditorContext,
     session: DbSession,
 ) -> CategoryResponse:
-    return CategoryResponse.model_validate(
-        await service.restore_category(session, context, category_id, data.version)
+    category = await service.restore_category(
+        session, context, category_id, data.version, commit=False
     )
+    return await _commit_category_response(session, category)

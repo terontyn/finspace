@@ -189,9 +189,7 @@ def upgrade() -> None:
         ["is_active", "next_run_at"],
         postgresql_where=sa.text("deleted_at IS NULL"),
     )
-    op.create_index(
-        "ix_recurring_rules_workspace", "recurring_rules", ["workspace_id", "name"]
-    )
+    op.create_index("ix_recurring_rules_workspace", "recurring_rules", ["workspace_id", "name"])
 
     op.create_table(
         "recurring_rule_executions",
@@ -408,8 +406,7 @@ def downgrade() -> None:
     op.drop_constraint("ck_transactions_source", "transactions", type_="check")
     op.execute(
         sa.text(
-            "UPDATE transactions SET source = 'system' "
-            "WHERE source IN ('automation', 'telegram')"
+            "UPDATE transactions SET source = 'system' WHERE source IN ('automation', 'telegram')"
         )
     )
     op.create_check_constraint(

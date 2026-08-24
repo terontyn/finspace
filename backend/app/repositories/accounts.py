@@ -12,12 +12,15 @@ async def get_account(
     account_id: uuid.UUID,
     *,
     include_deleted: bool = False,
+    for_update: bool = False,
 ) -> Account | None:
     statement = select(Account).where(
         Account.id == account_id, Account.workspace_id == workspace_id
     )
     if not include_deleted:
         statement = statement.where(Account.deleted_at.is_(None))
+    if for_update:
+        statement = statement.with_for_update()
     return await session.scalar(statement)
 
 

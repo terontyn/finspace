@@ -1,15 +1,13 @@
 import uuid
 from datetime import datetime
-from typing import Any
-
-from pydantic import Field
+from typing import Any, Literal
 
 from app.schemas.common import ApiModel, PageMeta
 
 
 class ImportMappingRequest(ApiModel):
     mapping: dict[str, str]
-    locale: str = Field(default="ru-RU", max_length=20)
+    locale: Literal["ru-RU", "en-US"] = "ru-RU"
 
 
 class ImportCommitRequest(ApiModel):

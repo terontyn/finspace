@@ -1,257 +1,119 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { apiClient } from "@/lib/api-client";
 import { formatMoney, moneyTone } from "@/lib/money";
-import type { Account, AccountBalance, AccountType, Currency, Paged } from "@/types/finance";
+import type { Account, AccountBalance, Paged } from "@/types/finance";
 
-interface AccountsScreenProps {
-  onError: (error: unknown) => void;
+import { AccountDrawer, accountTypeLabels, accountTypeSymbols } from "./account-drawer";
+import { accountArchiveMutation, accountDeleteMutation, accountFormFromRecord, accountMutation, accountRestoreDeletedMutation, initialAccountForm, type AccountForm } from "./account-form";
+import { groupBalanceTotals } from "./dashboard-data";
+
+interface AccountsScreenProps { onError: (error: unknown) => void; }
+
+function AccountRow({ account, balance, onArchive, onDelete, onEdit, onRestore }: {
+  account: Account;
+  balance?: AccountBalance;
+  onArchive: (account: Account) => void;
+  onDelete: (account: Account) => void;
+  onEdit: (account: Account) => void;
+  onRestore: (account: Account) => void;
+}) {
+  const currentBalance = balance?.balance ?? account.opening_balance;
+  return <article className="account-list-row" data-account-id={account.id}>
+    <Link aria-label={`Открыть счёт ${account.name}`} className="account-type-symbol" href={`/accounts/${account.id}`}>{accountTypeSymbols[account.account_type]}</Link>
+    <div className="account-list-primary"><Link href={`/accounts/${account.id}`}><strong>{account.name}</strong></Link><span>{accountTypeLabels[account.account_type]}{account.institution ? ` · ${account.institution}` : ""}</span></div>
+    <div className="account-list-meta"><span>Начальный остаток</span><strong>{formatMoney(account.opening_balance, account.currency)}</strong></div>
+    {account.credit_limit ? <div className="account-list-meta"><span>Кредитный лимит</span><strong>{formatMoney(account.credit_limit, account.currency)}</strong></div> : <div className="account-list-meta"><span>Дата отсчёта</span><strong>{new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium" }).format(new Date(account.opening_balance_at))}</strong></div>}
+    <div className="account-list-balance"><span>Текущий остаток</span><strong className={`money--${moneyTone(currentBalance)}`}>{formatMoney(currentBalance, account.currency)}</strong></div>
+    <div className="account-list-actions">{account.is_archived ? <button className="text-button" onClick={() => onRestore(account)} type="button">Восстановить</button> : <><button className="text-button" onClick={() => onEdit(account)} type="button">Изменить</button><button className="text-button" onClick={() => onArchive(account)} type="button">В архив</button></>}<button className="text-button text-button--danger" onClick={() => onDelete(account)} type="button">Удалить</button></div>
+  </article>;
 }
-
-interface AccountForm {
-  name: string;
-  accountType: AccountType;
-  currency: Currency;
-  institution: string;
-  openingBalance: string;
-  description: string;
-}
-
-const emptyForm: AccountForm = {
-  name: "",
-  accountType: "debit_card",
-  currency: "RUB",
-  institution: "",
-  openingBalance: "0.0000",
-  description: "",
-};
-
-const typeLabels: Record<AccountType, string> = {
-  cash: "Наличные",
-  debit_card: "Дебетовая карта",
-  credit_card: "Кредитная карта",
-  current_account: "Расчётный счёт",
-  savings: "Накопительный",
-  deposit: "Вклад",
-  brokerage: "Брокерский",
-  crypto_wallet: "Криптокошелёк",
-  other: "Другой",
-};
 
 export function AccountsScreen({ onError }: AccountsScreenProps) {
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [activeAccounts, setActiveAccounts] = useState<Account[]>([]);
+  const [archivedAccounts, setArchivedAccounts] = useState<Account[]>([]);
   const [balances, setBalances] = useState<AccountBalance[]>([]);
-  const [form, setForm] = useState<AccountForm>(emptyForm);
+  const [form, setForm] = useState<AccountForm>(() => initialAccountForm());
   const [editing, setEditing] = useState<Account | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [deletedAccount, setDeletedAccount] = useState<Account | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
 
-  const balanceById = useMemo(
-    () => new Map(balances.map((balance) => [balance.account_id, balance])),
-    [balances],
-  );
+  const balanceById = useMemo(() => new Map(balances.map((balance) => [balance.account_id, balance])), [balances]);
+  const activeIds = useMemo(() => new Set(activeAccounts.map((account) => account.id)), [activeAccounts]);
+  const activeTotals = useMemo(() => groupBalanceTotals(balances.filter((balance) => activeIds.has(balance.account_id))), [activeIds, balances]);
 
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [accountResult, balanceResult] = await Promise.all([
-        apiClient.get<Paged<Account>>(`/api/v1/accounts?is_archived=${showArchived}&limit=200`),
+      const [activeResult, archivedResult, balanceResult] = await Promise.all([
+        apiClient.get<Paged<Account>>("/api/v1/accounts?is_archived=false&limit=200"),
+        apiClient.get<Paged<Account>>("/api/v1/accounts?is_archived=true&limit=200"),
         apiClient.get<AccountBalance[]>("/api/v1/accounts/balances"),
       ]);
-      setAccounts(accountResult.items);
+      setActiveAccounts(activeResult.items);
+      setArchivedAccounts(archivedResult.items);
       setBalances(balanceResult);
-    } catch (error) {
-      onError(error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [onError, showArchived]);
+    } catch (error) { onError(error); } finally { setIsLoading(false); }
+  }, [onError]);
 
-  useEffect(() => {
-    queueMicrotask(() => void load());
-  }, [load]);
+  useEffect(() => { queueMicrotask(() => void load()); }, [load]);
 
-  function startEdit(account: Account) {
-    setEditing(account);
-    setForm({
-      name: account.name,
-      accountType: account.account_type,
-      currency: account.currency,
-      institution: account.institution ?? "",
-      openingBalance: account.opening_balance,
-      description: account.description ?? "",
-    });
-  }
-
-  function resetForm() {
-    setEditing(null);
-    setForm(emptyForm);
-  }
+  function openCreate() { setEditing(null); setForm(initialAccountForm()); setDrawerOpen(true); }
+  function startEdit(account: Account) { setEditing(account); setForm(accountFormFromRecord(account)); setDrawerOpen(true); }
+  function closeDrawer() { setDrawerOpen(false); setEditing(null); setForm(initialAccountForm()); }
 
   async function save(event: React.FormEvent) {
-    event.preventDefault();
-    setIsSaving(true);
+    event.preventDefault(); setIsSaving(true);
+    const mutation = accountMutation(form, editing);
     try {
-      if (editing) {
-        await apiClient.patch<Account>(`/api/v1/accounts/${editing.id}`, {
-          version: editing.version,
-          name: form.name,
-          account_type: form.accountType,
-          currency: form.currency,
-          institution: form.institution || null,
-          opening_balance: form.openingBalance,
-          description: form.description || null,
-        });
-      } else {
-        await apiClient.post<Account>("/api/v1/accounts", {
-          name: form.name,
-          account_type: form.accountType,
-          currency: form.currency,
-          institution: form.institution || null,
-          opening_balance: form.openingBalance,
-          opening_balance_at: new Date().toISOString(),
-          description: form.description || null,
-        });
-      }
-      resetForm();
-      await load();
-    } catch (error) {
-      onError(error);
-    } finally {
-      setIsSaving(false);
-    }
+      if (mutation.method === "PATCH") await apiClient.patch<Account>(mutation.path, mutation.body);
+      else await apiClient.post<Account>(mutation.path, mutation.body);
+      closeDrawer(); await load();
+    } catch (error) { onError(error); } finally { setIsSaving(false); }
   }
 
-  async function archive(account: Account) {
-    try {
-      await apiClient.delete<Account>(`/api/v1/accounts/${account.id}?version=${account.version}`);
-      await load();
-    } catch (error) {
-      onError(error);
-    }
+  async function setArchived(account: Account, isArchived: boolean) {
+    const mutation = accountArchiveMutation(account, isArchived);
+    try { await apiClient.patch<Account>(mutation.path, mutation.body); await load(); } catch (error) { onError(error); }
   }
 
-  return (
-    <section>
-      <header className="screen-header">
-        <div>
-          <span className="kicker">Структура денег</span>
-          <h1>Счета</h1>
-          <p>Стартовый и рассчитанный остаток хранятся отдельно.</p>
-        </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={showArchived}
-            onChange={(event) => setShowArchived(event.target.checked)}
-          />
-          Архив
-        </label>
-      </header>
+  async function remove(account: Account) {
+    if (!window.confirm(`Удалить счёт «${account.name}»? Его можно восстановить до перезагрузки страницы.`)) return;
+    const mutation = accountDeleteMutation(account);
+    try { const deleted = await apiClient.delete<Account>(mutation.path); setDeletedAccount(deleted); await load(); } catch (error) { onError(error); }
+  }
 
-      <div className="two-column">
-        <div className="panel">
-          <div className="panel-heading">
-            <h2>{showArchived ? "Архивные счета" : "Активные счета"}</h2>
-            <button className="secondary-button" type="button" onClick={() => void load()}>
-              Обновить
-            </button>
-          </div>
-          {isLoading ? <div className="empty-state">Загружаем счета…</div> : null}
-          {!isLoading && !accounts.length ? (
-            <div className="empty-state">В этом разделе пока нет счетов.</div>
-          ) : null}
-          <div className="card-list">
-            {accounts.map((account) => {
-              const balance = balanceById.get(account.id);
-              return (
-                <article className="account-card" key={account.id}>
-                  <div className="account-icon">
-                    {account.account_type === "cash" ? "💵"
-                      : account.account_type === "credit_card" ? "💳"
-                      : account.account_type === "savings" ? "🏦"
-                      : account.account_type === "deposit" ? "📈"
-                      : account.account_type === "brokerage" ? "📊"
-                      : account.account_type === "crypto_wallet" ? "🪙"
-                      : "🏧"}
-                  </div>
-                  <div className="account-details">
-                    <strong>{account.name}</strong>
-                    <span>
-                      {typeLabels[account.account_type]}
-                      {account.institution ? ` · ${account.institution}` : ""}
-                    </span>
-                  </div>
-                  <div className="account-total">
-                    <strong className={`money money--${moneyTone(balance?.balance ?? "0")}`}>
-                      {formatMoney(balance?.balance ?? account.opening_balance, account.currency)}
-                    </strong>
-                    <span>старт {formatMoney(account.opening_balance, account.currency)}</span>
-                  </div>
-                  {!account.is_archived ? (
-                    <div className="row-actions">
-                      <button className="text-button" type="button" onClick={() => startEdit(account)}>
-                        Изменить
-                      </button>
-                      <button className="text-button text-button--danger" type="button" onClick={() => void archive(account)}>
-                        В архив
-                      </button>
-                    </div>
-                  ) : null}
-                </article>
-              );
-            })}
-          </div>
-        </div>
+  async function restoreDeleted() {
+    if (!deletedAccount) return;
+    const mutation = accountRestoreDeletedMutation(deletedAccount);
+    try { await apiClient.post<Account>(mutation.path, mutation.body); setDeletedAccount(null); await load(); } catch (error) { onError(error); }
+  }
 
-        <form className="form-panel" onSubmit={(event) => void save(event)}>
-          <div className="panel-heading">
-            <div>
-              <span className="kicker">{editing ? "Редактирование" : "Новый объект"}</span>
-              <h2>{editing ? editing.name : "Добавить счёт"}</h2>
-            </div>
-            {editing ? (
-              <button className="text-button" type="button" onClick={resetForm}>
-                Отмена
-              </button>
-            ) : null}
-          </div>
-          <label>
-            Название
-            <input required maxLength={200} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
-          </label>
-          <div className="form-grid">
-            <label>
-              Тип
-              <select value={form.accountType} onChange={(event) => setForm({ ...form, accountType: event.target.value as AccountType })}>
-                {Object.entries(typeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-              </select>
-            </label>
-            <label>
-              Валюта
-              <select value={form.currency} onChange={(event) => setForm({ ...form, currency: event.target.value as Currency })}>
-                <option>RUB</option><option>EUR</option><option>USD</option>
-              </select>
-            </label>
-          </div>
-          <label>
-            Организация
-            <input value={form.institution} onChange={(event) => setForm({ ...form, institution: event.target.value })} />
-          </label>
-          <label>
-            Начальный остаток
-            <input required inputMode="decimal" pattern="-?\d+(\.\d{1,4})?" value={form.openingBalance} onChange={(event) => setForm({ ...form, openingBalance: event.target.value })} />
-          </label>
-          <label>
-            Описание
-            <textarea rows={3} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
-          </label>
-          <button type="submit" disabled={isSaving}>{isSaving ? "Сохраняем…" : editing ? "Сохранить изменения" : "Создать счёт"}</button>
-        </form>
-      </div>
+  return <section>
+    <header className="screen-header"><div><span className="kicker">Структура денег</span><h1>Счета</h1><p>Текущие остатки рассчитываются backend из начального баланса и подтверждённых операций.</p></div><div className="screen-header-actions"><button className="secondary-button" disabled={isLoading} onClick={() => void load()} type="button">Обновить</button><button className="primary-button" onClick={openCreate} type="button">＋ Новый счёт</button></div></header>
+
+    {deletedAccount ? <div className="undo-banner" role="status"><span>Счёт «{deletedAccount.name}» удалён.</span><button className="text-button" onClick={() => void restoreDeleted()} type="button">Восстановить</button><button aria-label="Скрыть уведомление" className="text-button" onClick={() => setDeletedAccount(null)} type="button">×</button></div> : null}
+
+    <section aria-label="Сводка по активным счетам" className="account-summary-grid">
+      <article><span>Активные счета</span><strong>{activeAccounts.length}</strong><small>Архивных: {archivedAccounts.length}</small></article>
+      {activeTotals.map((total) => <article key={total.currency}><span>Баланс · {total.currency}</span><strong className={`money--${moneyTone(total.total)}`}>{formatMoney(total.total, total.currency)}</strong><small>{total.accountsCount} активных счетов</small></article>)}
     </section>
-  );
+
+    <section className="panel accounts-section">
+      <div className="panel-heading"><div><span className="kicker">Рабочие счета</span><h2>Активные</h2></div><span className="count-badge">{activeAccounts.length}</span></div>
+      {isLoading ? <div className="account-list-skeleton">{Array.from({ length: 3 }, (_, index) => <i key={index}/>)}</div> : activeAccounts.length ? <div className="account-compact-list">{activeAccounts.map((account) => <AccountRow account={account} balance={balanceById.get(account.id)} key={account.id} onArchive={(value) => void setArchived(value, true)} onDelete={(value) => void remove(value)} onEdit={startEdit} onRestore={(value) => void setArchived(value, false)}/>)}</div> : <div className="empty-state"><strong>Активных счетов нет</strong><span>Создайте счёт или восстановите его из архива.</span></div>}
+    </section>
+
+    <section className="panel accounts-section accounts-section--archived">
+      <div className="panel-heading"><div><span className="kicker">Не участвуют в работе</span><h2>Архив</h2></div><span className="count-badge">{archivedAccounts.length}</span></div>
+      {!isLoading && archivedAccounts.length ? <div className="account-compact-list">{archivedAccounts.map((account) => <AccountRow account={account} balance={balanceById.get(account.id)} key={account.id} onArchive={(value) => void setArchived(value, true)} onDelete={(value) => void remove(value)} onEdit={startEdit} onRestore={(value) => void setArchived(value, false)}/>)}</div> : !isLoading ? <div className="empty-state"><strong>Архив пуст</strong><span>Здесь появятся счета, которые больше не используются.</span></div> : null}
+    </section>
+
+    {drawerOpen ? <AccountDrawer editing={editing} form={form} isSaving={isSaving} onChange={setForm} onClose={closeDrawer} onSave={(event) => void save(event)}/> : null}
+  </section>;
 }

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   conflictDiff,
+  conflictFieldDiffs,
   conflictResolutionMessage,
   fullExportMessage,
   googleStateLabel,
@@ -26,6 +27,7 @@ function status(overrides: Partial<GoogleSheetStatus> = {}): GoogleSheetStatus {
       token_expires_at: null,
     },
     binding_id: "binding",
+    spreadsheet_id: "sheet-1",
     spreadsheet_url: null,
     spreadsheet_name: null,
     template_version: 1,
@@ -36,8 +38,11 @@ function status(overrides: Partial<GoogleSheetStatus> = {}): GoogleSheetStatus {
     last_successful_sync_at: null,
     last_reconciliation_at: null,
     pending_outbox: 0,
+    pending_inbox: 0,
     failed_events: 0,
     open_conflicts: 0,
+    last_error_code: null,
+    last_error_message: null,
     webhook_configured: true,
     spreadsheet_registered: true,
     last_pull_at: null,
@@ -106,6 +111,21 @@ test("conflict diff keeps both payloads", () => {
   const diff = conflictDiff(conflict);
   assert.match(diff.database, /10/);
   assert.match(diff.sheet, /11/);
+});
+
+test("conflict field diff prefers external changed fields over technical payload", () => {
+  const conflict = {
+    conflicting_fields: ["name", "is_archived"],
+    database_payload: { name: "Продукты", is_archived: false },
+    sheet_payload: {
+      changed_fields: { name: "Рестораны", is_archived: true },
+      visible_row: { name: "Не использовать" },
+    },
+  } as unknown as SyncConflict;
+  assert.deepEqual(conflictFieldDiffs(conflict), [
+    { field: "name", label: "Название", database: "Продукты", external: "Рестораны" },
+    { field: "is_archived", label: "Архив", database: false, external: true },
+  ]);
 });
 
 test("manual conflict resolution validates a JSON object", () => {

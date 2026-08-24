@@ -14,6 +14,7 @@ from app.api.routes import (
     month_close,
     notifications,
     recurring_rules,
+    reports,
     service_accounts,
     summary,
     system,
@@ -69,3 +70,4 @@ api_router.include_router(
 api_router.include_router(transactions.router, prefix="/transactions", tags=["transactions"])
 api_router.include_router(audit.router, prefix="/audit", tags=["audit"])
 api_router.include_router(summary.router, tags=["summary"])
+api_router.include_router(reports.router, prefix="/reports", tags=["reports"])

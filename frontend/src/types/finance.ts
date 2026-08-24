@@ -44,6 +44,50 @@ export interface AccountBalance {
   balance: Money;
 }
 
+export interface AccountReconciliationTransaction {
+  id: string;
+  occurred_at: string;
+  transaction_type: TransactionType;
+  amount: Money;
+  signed_amount: Money;
+  currency: Currency;
+  status: TransactionStatus;
+  counterparty: string | null;
+  description: string | null;
+  version: number;
+}
+
+export interface AccountReconciliationPreview {
+  account_id: string;
+  statement_date: string;
+  cutoff_at: string;
+  statement_balance: Money;
+  calculated_balance: Money;
+  difference: Money;
+  currency: Currency;
+  account_version: number;
+  preview_token: string;
+  transactions: AccountReconciliationTransaction[];
+}
+
+export interface AccountReconciliation {
+  id: string;
+  account_id: string;
+  statement_date: string;
+  statement_balance: Money;
+  calculated_balance: Money;
+  difference: Money;
+  currency: Currency;
+  status: "confirmed";
+  account_version: number;
+  version: number;
+  created_by: string;
+  confirmed_by: string;
+  created_at: string;
+  confirmed_at: string;
+  transaction_ids: string[];
+}
+
 export interface Category {
   id: string;
   parent_id: string | null;
@@ -107,6 +151,57 @@ export interface FinancialSummaryGroup {
   net_cashflow: Money;
   transfer_volume: Money;
   transactions_count: number;
+}
+
+export interface FinancialReportCategory {
+  category_id: string | null;
+  name: string;
+  amount: Money;
+  transaction_count: number;
+}
+
+export interface FinancialReportMonth {
+  month: string;
+  income: Money;
+  expense: Money;
+  adjustment: Money;
+  net_cashflow: Money;
+  transactions_count: number;
+}
+
+export interface FinancialReportExpense {
+  transaction_id: string;
+  occurred_at: string;
+  amount: Money;
+  account_id: string;
+  account_name: string;
+  category_name: string;
+  counterparty: string | null;
+  description: string | null;
+}
+
+export interface FinancialReportGroup {
+  currency: Currency;
+  income: Money;
+  expense: Money;
+  adjustment: Money;
+  net_cashflow: Money;
+  transfer_volume: Money;
+  transactions_count: number;
+  spending_by_category: FinancialReportCategory[];
+  monthly_comparison: FinancialReportMonth[];
+  largest_expenses: FinancialReportExpense[];
+}
+
+export interface FinancialReport {
+  period: {
+    date_from: string;
+    date_to: string;
+    cutoff_from: string;
+    cutoff_to: string;
+    timezone: string;
+  };
+  groups: FinancialReportGroup[];
 }
 
 export interface Paged<T> {

@@ -17,6 +17,7 @@ export interface GoogleSheetStatus {
   public_backend_url: string | null;
   connection: GoogleConnectionStatus;
   binding_id: string | null;
+  spreadsheet_id: string | null;
   spreadsheet_url: string | null;
   spreadsheet_name: string | null;
   template_version: number | null;
@@ -27,8 +28,11 @@ export interface GoogleSheetStatus {
   last_successful_sync_at: string | null;
   last_reconciliation_at: string | null;
   pending_outbox: number;
+  pending_inbox: number;
   failed_events: number;
   open_conflicts: number;
+  last_error_code: string | null;
+  last_error_message: string | null;
   webhook_configured: boolean;
   spreadsheet_registered: boolean;
   last_pull_at: string | null;

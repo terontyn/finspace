@@ -89,8 +89,6 @@ function removeTriggers_(notify) {
 }
 
 function scheduledFinspaceSync() {
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(1000)) return;
   try {
     pushPendingChanges_(false);
     pullChanges_(false);
@@ -102,8 +100,6 @@ function scheduledFinspaceSync() {
       String(error).slice(0, 1000)
     );
     throw error;
-  } finally {
-    lock.releaseLock();
   }
 }
 

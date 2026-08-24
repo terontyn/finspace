@@ -65,8 +65,6 @@ STATUS_ALIASES = {
     "подтверждена": "confirmed",
     "draft": "draft",
     "черновик": "draft",
-    "reconciled": "reconciled",
-    "сверена": "reconciled",
 }
 
 
@@ -314,14 +312,19 @@ async def upload_import(
 
 
 async def get_batch(
-    session: AsyncSession, workspace_id: uuid.UUID, batch_id: uuid.UUID
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    *,
+    for_update: bool = False,
 ) -> ImportBatch:
-    batch = await session.scalar(
-        select(ImportBatch).where(
-            ImportBatch.id == batch_id,
-            ImportBatch.workspace_id == workspace_id,
-        )
+    query = select(ImportBatch).where(
+        ImportBatch.id == batch_id,
+        ImportBatch.workspace_id == workspace_id,
     )
+    if for_update:
+        query = query.with_for_update()
+    batch = await session.scalar(query)
     if batch is None:
         raise ApiError(status_code=404, code="IMPORT_NOT_FOUND", message="Import was not found")
     return batch
@@ -334,7 +337,7 @@ async def override_duplicate(
     row_id: uuid.UUID,
     data: ImportRowOverrideRequest,
 ) -> ImportRow:
-    batch = await get_batch(session, context.workspace.id, batch_id)
+    batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if batch.status not in {"validated", "ready"}:
         raise ApiError(
             status_code=409,
@@ -382,19 +385,33 @@ async def set_mapping(
     batch_id: uuid.UUID,
     data: ImportMappingRequest,
 ) -> ImportBatch:
-    batch = await get_batch(session, context.workspace.id, batch_id)
+    batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
+    if batch.status not in {"mapping_required", "parsed", "validated", "ready"}:
+        raise ApiError(
+            status_code=409,
+            code="IMPORT_NOT_READY",
+            message="Import mapping can only be changed before the batch is committed",
+        )
     unknown = set(data.mapping) - MAPPING_FIELDS
     required = {"date", "account"}
-    has_amount = "amount" in data.mapping or {
-        "income_amount",
-        "expense_amount",
-    }.intersection(data.mapping)
-    if unknown or not required.issubset(data.mapping) or not has_amount:
+    has_split_amount = bool(
+        {
+            "income_amount",
+            "expense_amount",
+        }.intersection(data.mapping)
+    )
+    has_single_amount = "amount" in data.mapping
+    missing = required - set(data.mapping)
+    if has_single_amount and "transaction_type" not in data.mapping:
+        missing.add("transaction_type")
+    if not has_single_amount and not has_split_amount:
+        missing.add("amount")
+    if unknown or missing:
         raise ApiError(
             status_code=422,
             code="IMPORT_MAPPING_INVALID",
             message="Import mapping is incomplete or contains unknown fields",
-            details={"unknown": sorted(unknown), "required": sorted(required)},
+            details={"unknown": sorted(unknown), "required": sorted(missing)},
         )
     batch.mapping = {"fields": data.mapping, "locale": data.locale}
     batch.status = "parsed"
@@ -437,9 +454,19 @@ def _parse_decimal(value: str) -> Decimal:
     return amount.quantize(Decimal("0.0001"))
 
 
-def _parse_occurred(date_value: str, time_value: str, timezone_name: str) -> datetime:
+def _parse_occurred(
+    date_value: str,
+    time_value: str,
+    timezone_name: str,
+    locale: str,
+) -> datetime:
     parsed_date: date | None = None
-    for date_format in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
+    localized_formats = (
+        ("%m/%d/%Y", "%m-%d-%Y", "%m.%d.%Y")
+        if locale == "en-US"
+        else ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y")
+    )
+    for date_format in ("%Y-%m-%d", *localized_formats):
         try:
             parsed_date = datetime.strptime(date_value, date_format).date()
             break
@@ -537,7 +564,7 @@ async def _find_duplicate(
 async def validate_import(
     session: AsyncSession, context: RequestContext, batch_id: uuid.UUID
 ) -> ImportBatch:
-    batch = await get_batch(session, context.workspace.id, batch_id)
+    batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if not batch.mapping or batch.status not in {"parsed", "validated", "ready"}:
         raise ApiError(
             status_code=409,
@@ -587,6 +614,13 @@ async def validate_import(
     for row in rows:
         errors: list[dict[str, Any]] = []
         normalized: dict[str, Any] | None = None
+        if not any(_clean_text(value) for value in row.raw_data.values()):
+            row.status = "skipped"
+            row.normalized_data = None
+            row.validation_errors = None
+            row.duplicate_transaction_id = None
+            counts["skipped"] += 1
+            continue
         try:
             income_value = _mapped(row.raw_data, fields, "income_amount")
             expense_value = _mapped(row.raw_data, fields, "expense_amount")
@@ -606,6 +640,7 @@ async def validate_import(
                 _mapped(row.raw_data, fields, "date"),
                 _mapped(row.raw_data, fields, "time"),
                 context.workspace.timezone,
+                str(mapping.get("locale", "ru-RU")),
             )
             account = _resolve_name(
                 account_map, _mapped(row.raw_data, fields, "account"), "account"
@@ -625,6 +660,12 @@ async def validate_import(
                 category = _resolve_name(category_map, category_value, "category")
                 if transaction_type == "transfer":
                     raise ValueError("Transfer cannot contain a category")
+                allowed_category_types = {
+                    "income": {"income", "both"},
+                    "expense": {"expense", "both"},
+                }[transaction_type]
+                if category.category_type not in allowed_category_types:
+                    raise ValueError("Category type does not match transaction type")
             currency = (_mapped(row.raw_data, fields, "currency") or account.currency).upper()
             if currency != account.currency:
                 raise ValueError("Currency does not match account currency")
@@ -661,7 +702,12 @@ async def validate_import(
             if target_account:
                 affected_accounts.add(target_account.name)
             currencies.add(currency)
-            dates.append(occurred_at.date().isoformat())
+            # The batch summary is a business-date preview for the workspace,
+            # not the UTC storage date of the transaction.  Around midnight a
+            # UTC conversion can otherwise show the previous calendar day.
+            dates.append(
+                occurred_at.astimezone(ZoneInfo(context.workspace.timezone)).date().isoformat()
+            )
         except ValueError as exc:
             errors.append({"code": "VALIDATION_ERROR", "message": str(exc)})
             row.status = "invalid"
@@ -670,6 +716,7 @@ async def validate_import(
         row.validation_errors = errors or None
     batch.status = "ready" if counts["valid"] > 0 else "validated"
     batch.summary = {
+        "source_columns": list((batch.summary or {}).get("source_columns", [])),
         **counts,
         "accounts": sorted(affected_accounts),
         "currencies": sorted(currencies),
@@ -700,7 +747,7 @@ async def commit_import(
     confirmation: bool,
     idempotency_key: str | None,
 ) -> tuple[ImportBatch, int]:
-    batch = await get_batch(session, context.workspace.id, batch_id)
+    batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if batch.status == "imported" and batch.idempotency_key == idempotency_key:
         imported_count = int(
             await session.scalar(
@@ -807,7 +854,7 @@ async def rollback_import(
     *,
     force: bool,
 ) -> tuple[ImportBatch, int]:
-    batch = await get_batch(session, context.workspace.id, batch_id)
+    batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if batch.status == "rolled_back":
         return batch, 0
     if batch.status != "imported":
@@ -815,14 +862,26 @@ async def rollback_import(
     transactions = list(
         (
             await session.scalars(
-                select(FinancialTransaction).where(
+                select(FinancialTransaction)
+                .where(
                     FinancialTransaction.workspace_id == context.workspace.id,
                     FinancialTransaction.import_batch_id == batch.id,
                     FinancialTransaction.deleted_at.is_(None),
                 )
+                .with_for_update()
             )
         ).all()
     )
+    reconciled = [item for item in transactions if item.status == "reconciled"]
+    if reconciled:
+        raise ApiError(
+            status_code=409,
+            code="IMPORT_ROLLBACK_RECONCILED_CONFLICT",
+            message="Reconciled imported transactions cannot be rolled back",
+            details={
+                "transaction_ids": sorted(str(item.id) for item in reconciled),
+            },
+        )
     changed = [item for item in transactions if item.version != 1]
     if changed and not force:
         raise ApiError(
@@ -890,7 +949,7 @@ async def rollback_import(
 async def cancel_import(
     session: AsyncSession, context: RequestContext, batch_id: uuid.UUID
 ) -> ImportBatch:
-    batch = await get_batch(session, context.workspace.id, batch_id)
+    batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if batch.status in {"imported", "rolled_back"}:
         raise ApiError(
             status_code=409, code="IMPORT_NOT_READY", message="Batch cannot be cancelled"

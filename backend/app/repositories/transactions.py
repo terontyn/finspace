@@ -13,6 +13,7 @@ async def get_transaction(
     transaction_id: uuid.UUID,
     *,
     include_deleted: bool = False,
+    for_update: bool = False,
 ) -> FinancialTransaction | None:
     statement = select(FinancialTransaction).where(
         FinancialTransaction.id == transaction_id,
@@ -20,6 +21,8 @@ async def get_transaction(
     )
     if not include_deleted:
         statement = statement.where(FinancialTransaction.deleted_at.is_(None))
+    if for_update:
+        statement = statement.with_for_update()
     return await session.scalar(statement)
 
 

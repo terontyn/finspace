@@ -9,6 +9,10 @@ payload snapshots и список полей; token, secret и traceback туд�
 - `keep_sheet` — заново валидировать видимые Sheet changes против текущей версии;
 - `manual_merge` — передать явно объединённые поля и повторить ту же validation.
 
+Перед resolution backend блокирует conflict и финансовую сущность. Если entity version
+изменилась после создания snapshot, возвращается `GOOGLE_SYNC_CONFLICT_STALE` (409), а
+устаревший выбор не применяется. Повторное решение закрытого конфликта также отклоняется.
+
 Reconciliation читает три primary sheets и сравнивает UUID, version, row hash, deleted state,
 duplicates, unknown и missing rows. Missing row безопасно возвращается из PostgreSQL через
 outbox. Unknown/duplicate/technical mismatch не принимаются автоматически. Отсутствие строки

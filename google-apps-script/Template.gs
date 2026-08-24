@@ -56,7 +56,6 @@ function setupFinspace() {
     refreshReferenceLists_();
     spreadsheet.getSheetByName('_sync_meta').hideSheet();
     spreadsheet.getSheetByName('_lists').hideSheet();
-    buildFinspaceMenu_();
     spreadsheet.toast('Шаблон v1 установлен.', 'Финпространство');
   } finally {
     lock.releaseLock();

@@ -1,3 +1,7 @@
+from app.db.models.account_reconciliation import (
+    AccountReconciliation,
+    AccountReconciliationItem,
+)
 from app.db.models.accounts import Account
 from app.db.models.audit import AuditLog
 from app.db.models.auth import AuthSession
@@ -30,6 +34,8 @@ from app.db.models.users import User, Workspace, WorkspaceMember
 
 __all__ = [
     "Account",
+    "AccountReconciliation",
+    "AccountReconciliationItem",
     "AuditLog",
     "AuthSession",
     "AutomationRun",

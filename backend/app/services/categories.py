@@ -54,7 +54,11 @@ async def _validate_parent(
 
 
 async def create_category(
-    session: AsyncSession, context: RequestContext, data: CategoryCreate
+    session: AsyncSession,
+    context: RequestContext,
+    data: CategoryCreate,
+    *,
+    commit: bool = True,
 ) -> Category:
     await _validate_parent(session, context.workspace.id, data.parent_id)
     if await repository.find_level_name(session, context.workspace.id, data.parent_id, data.name):
@@ -79,7 +83,8 @@ async def create_category(
         entity_type="category",
         entity=category,
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return category
 
 
@@ -147,7 +152,12 @@ async def update_category(
 
 
 async def delete_category(
-    session: AsyncSession, context: RequestContext, category_id: uuid.UUID, version: int
+    session: AsyncSession,
+    context: RequestContext,
+    category_id: uuid.UUID,
+    version: int,
+    *,
+    commit: bool = True,
 ) -> Category:
     category = await repository.get_category(session, context.workspace.id, category_id)
     if category is None:
@@ -155,7 +165,9 @@ async def delete_category(
     if category.version != version:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
     before = snapshot("category", category)
-    category.deleted_at = datetime.now(UTC)
+    changed_at = datetime.now(UTC)
+    category.deleted_at = changed_at
+    category.updated_at = changed_at
     category.version += 1
     await session.flush()
     await record_audit(
@@ -176,12 +188,18 @@ async def delete_category(
         entity=category,
         operation="delete",
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return category
 
 
 async def restore_category(
-    session: AsyncSession, context: RequestContext, category_id: uuid.UUID, version: int
+    session: AsyncSession,
+    context: RequestContext,
+    category_id: uuid.UUID,
+    version: int,
+    *,
+    commit: bool = True,
 ) -> Category:
     category = await repository.get_category(
         session, context.workspace.id, category_id, include_deleted=True
@@ -202,6 +220,7 @@ async def restore_category(
         raise ApiError(status_code=409, code="DUPLICATE_NAME", message="Name is in use")
     before = snapshot("category", category)
     category.deleted_at = None
+    category.updated_at = datetime.now(UTC)
     category.version += 1
     await session.flush()
     await record_audit(
@@ -222,7 +241,8 @@ async def restore_category(
         entity=category,
         operation="restore",
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return category
 
 

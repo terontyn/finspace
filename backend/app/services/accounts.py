@@ -22,7 +22,11 @@ def _validate_credit_limit(account_type: str, credit_limit: object) -> None:
 
 
 async def create_account(
-    session: AsyncSession, context: RequestContext, data: AccountCreate
+    session: AsyncSession,
+    context: RequestContext,
+    data: AccountCreate,
+    *,
+    commit: bool = True,
 ) -> Account:
     if await repository.find_active_name(session, context.workspace.id, data.name):
         raise ApiError(
@@ -49,7 +53,8 @@ async def create_account(
         entity_type="account",
         entity=account,
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return account
 
 
@@ -62,7 +67,9 @@ async def update_account(
     commit: bool = True,
     audit_source: str = "api",
 ) -> Account:
-    account = await repository.get_account(session, context.workspace.id, account_id)
+    account = await repository.get_account(
+        session, context.workspace.id, account_id, for_update=True
+    )
     if account is None:
         raise ApiError(status_code=404, code="ACCOUNT_NOT_FOUND", message="Account was not found")
     if account.version != data.version:
@@ -118,15 +125,24 @@ async def update_account(
 
 
 async def delete_account(
-    session: AsyncSession, context: RequestContext, account_id: uuid.UUID, version: int
+    session: AsyncSession,
+    context: RequestContext,
+    account_id: uuid.UUID,
+    version: int,
+    *,
+    commit: bool = True,
 ) -> Account:
-    account = await repository.get_account(session, context.workspace.id, account_id)
+    account = await repository.get_account(
+        session, context.workspace.id, account_id, for_update=True
+    )
     if account is None:
         raise ApiError(status_code=404, code="ACCOUNT_NOT_FOUND", message="Account was not found")
     if account.version != version:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
     before = snapshot("account", account)
-    account.deleted_at = datetime.now(UTC)
+    changed_at = datetime.now(UTC)
+    account.deleted_at = changed_at
+    account.updated_at = changed_at
     account.version += 1
     await session.flush()
     await record_audit(
@@ -147,15 +163,25 @@ async def delete_account(
         entity=account,
         operation="delete",
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return account
 
 
 async def restore_account(
-    session: AsyncSession, context: RequestContext, account_id: uuid.UUID, version: int
+    session: AsyncSession,
+    context: RequestContext,
+    account_id: uuid.UUID,
+    version: int,
+    *,
+    commit: bool = True,
 ) -> Account:
     account = await repository.get_account(
-        session, context.workspace.id, account_id, include_deleted=True
+        session,
+        context.workspace.id,
+        account_id,
+        include_deleted=True,
+        for_update=True,
     )
     if account is None:
         raise ApiError(status_code=404, code="ACCOUNT_NOT_FOUND", message="Account was not found")
@@ -169,6 +195,7 @@ async def restore_account(
         raise ApiError(status_code=409, code="DUPLICATE_NAME", message="Name is in use")
     before = snapshot("account", account)
     account.deleted_at = None
+    account.updated_at = datetime.now(UTC)
     account.version += 1
     await session.flush()
     await record_audit(
@@ -189,5 +216,6 @@ async def restore_account(
         entity=account,
         operation="restore",
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return account

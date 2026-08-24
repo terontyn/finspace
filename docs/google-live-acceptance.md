@@ -32,9 +32,10 @@ IDs и статусы evidence; secret, JWT, cookies, HMAC headers и row payloa
 2. Убедитесь, что connection отсутствует, provider равен `apps_script_bridge`, а secret
    показан только в create response.
 3. Получите package, вручную создайте пустую Google-таблицу и вставьте source files.
-4. Выполните `setupFinspace()`: проверьте 13 листов, hidden `_sync_meta`/`_lists`, headers,
+4. Выполните `setupFinspace()`, затем вернитесь в таблицу и перезагрузите страницу:
+   проверьте меню **Финпространство**, 13 листов, hidden `_sync_meta`/`_lists`, headers,
    filters, protected technical columns, named ranges, validations и conditional formatting.
-5. Выполните `configureConnection()`. Повторная регистрация той же книги должна быть
+5. Через меню выберите **Настроить подключение**. Повторная регистрация той же книги должна быть
    идемпотентна; другая книга должна требовать явный rebind.
 6. Установите triggers и проверьте свежий heartbeat в приложении.
 

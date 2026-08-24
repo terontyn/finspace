@@ -3,13 +3,15 @@
 ## Контейнеры и потоки
 
 ```text
-Браузер -> Next.js :3000 -> /api/* -> FastAPI :8000 (Docker network)
-                                     |-> PostgreSQL :5432
-                                     `-> Redis :6379 (login rate limit/readiness)
+Tailnet browser -> Tailscale Serve :443 -> Next.js :3000 -> /api/* -> FastAPI :8000
+                                                                   |-> PostgreSQL :5432
+                                                                   `-> Redis :6379
+Google Apps Script -> Tailscale Funnel :8443 -> FastAPI HMAC Bridge endpoints
 backup service -> pg_dump/pg_restore -> ./backups -> временная restore-БД
 FastAPI upload -> ./data/imports -> import_batches/import_rows -> transactions
-FastAPI -> PostgreSQL + sync_outbox -> sync-worker -> Google Sheets API
-Google Sheets -> Apps Script HMAC webhook -> sync_inbox -> validation/conflicts -> PostgreSQL
+FastAPI -> PostgreSQL + sync_outbox <- Apps Script pull/ACK
+Google Sheets -> Apps Script HMAC push -> sync_inbox -> validation/conflicts -> PostgreSQL
+optional sync-worker -> Google Sheets API (только provider google_oauth)
 n8n schedule/Telegram long polling -> ServiceKey Backend API -> domain services -> audit/outbox
 ```
 
@@ -73,10 +75,12 @@ DB-транзакцией; частичный импорт не остаётся
 Backup не является частью бизнес-транзакции: целостность доказывается `pg_restore --list`,
 SHA-256 и пробным восстановлением в отдельную БД.
 
-## Границы этапа
+## Текущие границы
 
-Google Sheets поддерживает одну созданную приложением книгу на workspace; произвольные и
-несколько книг не синхронизируются. Нет OCR, банковских/ИИ API, публичного production
-deployment, MFA и managed cloud backup. n8n и Telegram работают только локально через
-ограниченный Backend API. Будущие интеграции должны работать через
-API/outbox/staging, а не напрямую писать в PostgreSQL.
+Google Sheets поддерживает одну зарегистрированную книгу на workspace; произвольные и
+несколько книг не синхронизируются. Self-hosted production frontend доступен только внутри
+tailnet, а публичный Funnel 8443 используется Apps Script Bridge. Нет OCR, банковских/ИИ
+API, MFA и подтверждённого managed/offsite encrypted backup. Код n8n и Telegram реализован,
+но их production-активация выполняется отдельно; n8n должен оставаться локальным и видеть
+только ограниченный Backend API. Будущие интеграции работают через API/outbox/staging, а
+не напрямую пишут в PostgreSQL.

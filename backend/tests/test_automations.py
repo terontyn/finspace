@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.api.routes import recurring_rules as recurring_rules_routes
 from app.core.config import settings
 from app.db.models.audit import AuditLog
 from app.db.models.automations import ServiceApiKey, TelegramIntent, TelegramLinkCode
@@ -227,6 +228,7 @@ def test_service_key_expiration_permission_and_workspace_scope(client: TestClien
 
 def test_recurring_rule_validation_execution_confirmation_and_outbox(
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity, headers = _register(client, "Recurring")
     account, target, category = _references(client, headers)
@@ -248,6 +250,15 @@ def test_recurring_rule_validation_execution_confirmation_and_outbox(
     assert rule["next_run_at"] is not None
     assert rule["amount"] == "1250.2500"
 
+    class SteppedRouteClock:
+        calls = 0
+
+        @classmethod
+        def now(cls, _timezone: object | None = None) -> datetime:
+            cls.calls += 1
+            return datetime(2026, 8, 23, 7, 14, 16 + cls.calls, tzinfo=UTC)
+
+    monkeypatch.setattr(recurring_rules_routes, "datetime", SteppedRouteClock)
     run_key = f"manual-recurring:{rule['id']}:acceptance"
     first = client.post(
         f"/api/v1/recurring-rules/{rule['id']}/run-now",
