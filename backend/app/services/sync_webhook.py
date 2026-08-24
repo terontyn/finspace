@@ -26,7 +26,7 @@ from app.schemas.transactions import TransactionCreate, TransactionUpdate
 from app.services import accounts as account_service
 from app.services import categories as category_service
 from app.services import transactions as transaction_service
-from app.services.audit import record_audit, snapshot
+from app.services.audit import record_audit
 from app.services.calculations import calculate_balances
 from app.services.sync_hash import canonical_value, row_hash
 from app.services.sync_payload import (
@@ -462,6 +462,64 @@ async def _duplicate_response(
     )
 
 
+def _conflict_database_hash(conflict: SyncConflict) -> str:
+    payload = dict(conflict.database_payload)
+    if "entity_id" in payload:
+        return row_hash(payload)
+    if conflict.entity_type == "transaction":
+        return row_hash(
+            {
+                "entity_id": payload.get("id", conflict.entity_id),
+                "version": payload.get("version", conflict.database_version),
+                "occurred_at": payload.get("occurred_at"),
+                "transaction_type": payload.get("transaction_type"),
+                "amount": payload.get("amount"),
+                "currency": payload.get("currency"),
+                "account_id": payload.get("account_id"),
+                "target_account_id": payload.get("target_account_id"),
+                "category_id": payload.get("category_id"),
+                "counterparty": payload.get("counterparty"),
+                "description": payload.get("description"),
+                "comment": payload.get("comment"),
+                "status": payload.get("status"),
+                "deleted_at": payload.get("deleted_at"),
+            }
+        )
+    return row_hash(payload)
+
+
+async def _conflict_response(
+    session: AsyncSession,
+    binding: GoogleSheetBinding,
+    inbox: SyncInbox,
+    event_id: str,
+) -> WebhookChangeResponse:
+    conflict = await session.scalar(
+        select(SyncConflict)
+        .where(
+            SyncConflict.binding_id == binding.id,
+            SyncConflict.entity_type == inbox.entity_type,
+            SyncConflict.entity_id == inbox.entity_id,
+            SyncConflict.sheet_payload == inbox.payload,
+        )
+        .order_by(SyncConflict.created_at.desc(), SyncConflict.id.desc())
+    )
+    if conflict is None:
+        raise ApiError(
+            status_code=500,
+            code="GOOGLE_SYNC_CONFLICT_STATE_INVALID",
+            message="Stored synchronization conflict is incomplete",
+        )
+    return WebhookChangeResponse(
+        status="conflict",
+        event_id=event_id,
+        entity_id=conflict.entity_id,
+        version=conflict.database_version,
+        row_hash=_conflict_database_hash(conflict),
+        conflict_id=conflict.id,
+    )
+
+
 def _bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -727,6 +785,13 @@ async def apply_change(
         select(SyncInbox).where(SyncInbox.idempotency_key == idempotency_key)
     )
     if existing_inbox is not None and existing_inbox.status != "rejected":
+        if existing_inbox.status == "conflict":
+            return await _conflict_response(
+                session,
+                binding,
+                existing_inbox,
+                payload.event_id,
+            )
         return await _duplicate_response(session, binding, existing_inbox, payload.event_id)
     if existing_inbox is not None:
         inbox = existing_inbox
@@ -788,7 +853,7 @@ async def apply_change(
                 entity_id=transaction.id,
                 database_version=transaction.version,
                 sheet_version=payload.expected_version,
-                database_payload=canonical_value(snapshot("transaction", transaction)),
+                database_payload=canonical_value(transaction_payload(transaction)),
                 sheet_payload=canonical_value(payload.model_dump(mode="json")),
                 conflicting_fields=sorted(payload.changed_fields),
                 status="open",

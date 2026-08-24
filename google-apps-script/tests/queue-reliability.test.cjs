@@ -424,3 +424,39 @@ test('ambiguous first response retries idempotently and canonical duplicate conf
   assert.equal(harness.context.queuedFinspaceEdits_().length, 0);
   assert.equal(harness.sheets.get('Операции').read(2, 24, 1, 1)[0][0], 2);
 });
+
+test('ambiguous conflict response retries terminal conflict without marking the row SYNCED', () => {
+  let backendConflicts = 0;
+  let first = true;
+  let conflictId = null;
+  const harness = createHarness((_url, options) => {
+    const event = JSON.parse(options.payload).events[0];
+    if (first) {
+      first = false;
+      backendConflicts += 1;
+      conflictId = 'conflict-id';
+      throw new Error('connection reset after backend conflict commit');
+    }
+    return response(200, {
+      results: [{
+        event_id: event.event_id,
+        status: 'conflict',
+        result: {
+          status: 'conflict',
+          event_id: event.event_id,
+          entity_id: event.entity_id,
+          version: 2,
+          row_hash: 'canonical-hash',
+          conflict_id: conflictId,
+        },
+      }],
+    });
+  });
+  seedTransaction(harness);
+  assert.throws(() => harness.context.pushPendingChanges_(false), /BRIDGE_NETWORK_ERROR/);
+  const result = harness.context.pushPendingChanges_(false);
+  assert.equal(backendConflicts, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { sent: 1, remaining: 0 });
+  assert.equal(harness.context.queuedFinspaceEdits_().length, 0);
+  assert.equal(harness.sheets.get('Операции').read(2, 17, 1, 1)[0][0], 'CONFLICT');
+});

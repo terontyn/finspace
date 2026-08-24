@@ -454,6 +454,33 @@ def test_webhook_hmac_idempotency_transaction_and_conflict(
     assert any(
         item["id"] == conflict.json()["conflict_id"] for item in conflict_list.json()["items"]
     )
+
+    async def conflict_count() -> int:
+        async with AsyncSessionFactory() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SyncConflict)
+                    .where(SyncConflict.binding_id == uuid.UUID(binding["id"]))
+                )
+                or 0
+            )
+
+    conflicts_before_retry = asyncio.run(conflict_count())
+    retried_conflict = client.post(
+        "/api/v1/google-sheets/webhook/changes",
+        content=conflict_body,
+        headers=_signed_headers(
+            binding["id"],
+            secret["secret"],
+            conflict_body,
+            "nonce-conflict-retry",
+        ),
+    )
+    assert retried_conflict.status_code == 200, retried_conflict.text
+    assert retried_conflict.json() == conflict.json()
+    assert asyncio.run(conflict_count()) == conflicts_before_retry
+
     changed_after_conflict = client.patch(
         f"/api/v1/transactions/{transaction_id}",
         headers=headers,

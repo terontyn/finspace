@@ -16,7 +16,9 @@ from app.db.models.users import User, Workspace, WorkspaceMember
 from app.db.session import AsyncSessionFactory
 from app.dependencies.context import RequestContext
 from app.schemas.account_reconciliation import AccountReconciliationConfirmRequest
+from app.schemas.transactions import TransactionCreate
 from app.services import account_reconciliation as reconciliation_service
+from app.services import transactions as transaction_service
 
 
 def _bootstrap(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
@@ -853,6 +855,97 @@ def test_concurrent_confirmation_allows_only_one_commit(
     assert len(conflicts) == 1
     assert conflicts[0].status_code == 409
     assert conflicts[0].code == "VERSION_CONFLICT"
+
+
+def test_reconciliation_serializes_concurrent_insert_before_cutoff(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers = _bootstrap(client, monkeypatch)
+    account = _account(client, headers)
+    category_id = _category(client, headers, "income")
+    _transaction(client, headers, account_id=str(account["id"]), amount="10")
+    preview = _preview(client, headers, account, statement_balance="110").json()
+    original_effective_transactions = reconciliation_service._effective_transactions
+
+    async def race() -> tuple[bool, object, FinancialTransaction]:
+        snapshot_read = asyncio.Event()
+        release_confirmation = asyncio.Event()
+        insert_finished = asyncio.Event()
+
+        async def paused_effective_transactions(*args: object, **kwargs: object):
+            result = await original_effective_transactions(*args, **kwargs)  # type: ignore[arg-type]
+            if kwargs.get("for_update"):
+                snapshot_read.set()
+                await release_confirmation.wait()
+            return result
+
+        monkeypatch.setattr(
+            reconciliation_service,
+            "_effective_transactions",
+            paused_effective_transactions,
+        )
+
+        async def context_for(session: object) -> RequestContext:
+            user = await session.get(User, uuid.UUID(headers["X-User-ID"]))  # type: ignore[attr-defined]
+            workspace = await session.get(  # type: ignore[attr-defined]
+                Workspace, uuid.UUID(headers["X-Workspace-ID"])
+            )
+            assert user is not None and workspace is not None
+            return RequestContext(
+                user=user,
+                workspace=workspace,
+                role="owner",
+                request_id=str(uuid.uuid4()),
+            )
+
+        async def confirm() -> object:
+            async with AsyncSessionFactory() as session:
+                context = await context_for(session)
+                data = AccountReconciliationConfirmRequest.model_validate(
+                    _confirm_payload(account, preview, key=f"insert-race-{uuid.uuid4()}")
+                )
+                return await reconciliation_service.confirm_reconciliation(
+                    session, context, uuid.UUID(str(account["id"])), data
+                )
+
+        async def insert() -> FinancialTransaction:
+            async with AsyncSessionFactory() as session:
+                context = await context_for(session)
+                data = TransactionCreate.model_validate(
+                    {
+                        "occurred_at": "2026-02-20T12:00:00Z",
+                        "transaction_type": "income",
+                        "amount": "5.0000",
+                        "currency": "RUB",
+                        "account_id": account["id"],
+                        "category_id": category_id,
+                        "status": "confirmed",
+                        "source": "manual",
+                        "splits": [],
+                    }
+                )
+                transaction = await transaction_service.create_transaction(session, context, data)
+                insert_finished.set()
+                return transaction
+
+        confirmation_task = asyncio.create_task(confirm())
+        await asyncio.wait_for(snapshot_read.wait(), timeout=5)
+        insert_task = asyncio.create_task(insert())
+        try:
+            await asyncio.wait_for(asyncio.shield(insert_finished.wait()), timeout=0.5)
+            inserted_before_confirmation = True
+        except TimeoutError:
+            inserted_before_confirmation = False
+        release_confirmation.set()
+        confirmation = await asyncio.wait_for(confirmation_task, timeout=5)
+        inserted = await asyncio.wait_for(insert_task, timeout=5)
+        return inserted_before_confirmation, confirmation, inserted
+
+    inserted_before_confirmation, confirmation, inserted = asyncio.run(race())
+    assert inserted_before_confirmation is False
+    assert not isinstance(confirmation, ApiError)
+    assert str(inserted.id) not in confirmation.transaction_ids  # type: ignore[union-attr]
+    assert inserted.status == "confirmed"
 
 
 def test_confirmation_rolls_back_all_changes_on_internal_error(

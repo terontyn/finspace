@@ -189,6 +189,82 @@ def test_csv_staging_validate_commit_duplicate_and_rollback(
     assert deleted.status_code == 404
 
 
+def test_import_rollback_never_removes_reconciled_transaction(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers, _ = _auth(client, monkeypatch)
+    account_name, category_name = _references(client, headers)
+    batch = _upload(client, headers, _csv(account_name, category_name)).json()
+    batch_id = batch["id"]
+    mapped = client.put(f"/api/v1/imports/{batch_id}/mapping", headers=headers, json=_mapping())
+    assert mapped.status_code == 200, mapped.text
+    validated = client.post(f"/api/v1/imports/{batch_id}/validate", headers=headers)
+    assert validated.status_code == 200, validated.text
+    committed = client.post(
+        f"/api/v1/imports/{batch_id}/commit",
+        headers={**headers, "X-Idempotency-Key": str(uuid.uuid4())},
+        json={"confirm": True},
+    )
+    assert committed.status_code == 200, committed.text
+
+    accounts = client.get("/api/v1/accounts", headers=headers).json()["items"]
+    account = next(item for item in accounts if item["name"] == account_name)
+    transactions = client.get("/api/v1/transactions", headers=headers).json()["items"]
+    imported = next(item for item in transactions if item["source"] == "import")
+    preview = client.post(
+        f"/api/v1/accounts/{account['id']}/reconciliation/preview",
+        headers=headers,
+        json={
+            "statement_date": "2026-07-31",
+            "statement_balance": "-1234.5600",
+            "currency": "RUB",
+            "account_version": account["version"],
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    preview_payload = preview.json()
+    confirmed = client.post(
+        f"/api/v1/accounts/{account['id']}/reconciliation/confirm",
+        headers=headers,
+        json={
+            "statement_date": preview_payload["statement_date"],
+            "statement_balance": preview_payload["statement_balance"],
+            "currency": preview_payload["currency"],
+            "account_version": account["version"],
+            "preview_token": preview_payload["preview_token"],
+            "idempotency_key": f"import-reconciliation-{uuid.uuid4()}",
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["transaction_ids"] == [imported["id"]]
+
+    transaction_before = client.get(
+        f"/api/v1/transactions/{imported['id']}", headers=headers
+    ).json()
+    history_before = client.get(
+        f"/api/v1/accounts/{account['id']}/reconciliations", headers=headers
+    ).json()
+
+    for force in (False, True):
+        rolled_back = client.post(
+            f"/api/v1/imports/{batch_id}/rollback",
+            headers=headers,
+            json={"force": force},
+        )
+        assert rolled_back.status_code == 409, rolled_back.text
+        error = rolled_back.json()["error"]
+        assert error["code"] == "IMPORT_ROLLBACK_RECONCILED_CONFLICT"
+        assert error["details"] == {"transaction_ids": [imported["id"]]}
+        assert (
+            client.get(f"/api/v1/transactions/{imported['id']}", headers=headers).json()
+            == transaction_before
+        )
+        assert (
+            client.get(f"/api/v1/accounts/{account['id']}/reconciliations", headers=headers).json()
+            == history_before
+        )
+
+
 def test_import_validation_errors_limits_and_workspace_isolation(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

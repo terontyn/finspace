@@ -862,14 +862,26 @@ async def rollback_import(
     transactions = list(
         (
             await session.scalars(
-                select(FinancialTransaction).where(
+                select(FinancialTransaction)
+                .where(
                     FinancialTransaction.workspace_id == context.workspace.id,
                     FinancialTransaction.import_batch_id == batch.id,
                     FinancialTransaction.deleted_at.is_(None),
                 )
+                .with_for_update()
             )
         ).all()
     )
+    reconciled = [item for item in transactions if item.status == "reconciled"]
+    if reconciled:
+        raise ApiError(
+            status_code=409,
+            code="IMPORT_ROLLBACK_RECONCILED_CONFLICT",
+            message="Reconciled imported transactions cannot be rolled back",
+            details={
+                "transaction_ids": sorted(str(item.id) for item in reconciled),
+            },
+        )
     changed = [item for item in transactions if item.version != 1]
     if changed and not force:
         raise ApiError(
