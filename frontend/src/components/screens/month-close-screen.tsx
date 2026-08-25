@@ -83,6 +83,78 @@ function recordList(value: unknown): Array<Record<string, unknown>> {
     : [];
 }
 
+function strictRecordList(
+  value: unknown,
+  validator: (item: Record<string, unknown>) => boolean,
+): Array<Record<string, unknown>> | null {
+  if (!Array.isArray(value)) return null;
+  const result: Array<Record<string, unknown>> = [];
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || !validator(item as Record<string, unknown>)) {
+      return null;
+    }
+    result.push(item as Record<string, unknown>);
+  }
+  return result;
+}
+
+function isMoneyString(value: unknown): value is Money {
+  return typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value);
+}
+
+function isCurrencyCode(value: unknown): value is Currency {
+  return typeof value === "string" && /^[A-Z]{3}$/.test(value);
+}
+
+function isRequiredString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function historicalCurrencies(value: unknown): Array<Record<string, unknown>> | null {
+  return strictRecordList(value, (item) =>
+    isCurrencyCode(item.currency)
+    && isMoneyString(item.income)
+    && isMoneyString(item.expense)
+    && isMoneyString(item.adjustment)
+    && isMoneyString(item.net_cashflow)
+    && isMoneyString(item.transfer_volume)
+    && Number.isInteger(item.transactions_count),
+  );
+}
+
+function historicalBalances(value: unknown): Array<Record<string, unknown>> | null {
+  return strictRecordList(value, (item) =>
+    isRequiredString(item.account_id)
+    && isRequiredString(item.name)
+    && isCurrencyCode(item.currency)
+    && isMoneyString(item.opening_balance)
+    && isMoneyString(item.balance),
+  );
+}
+
+function historicalReconciliation(value: unknown): Array<Record<string, unknown>> | null {
+  const accountTypes = new Set([
+    "cash", "debit_card", "credit_card", "current_account", "savings", "deposit",
+    "brokerage", "crypto_wallet", "other",
+  ]);
+  return strictRecordList(value, (item) => {
+    const covered = item.covered;
+    const state = item.state;
+    return isRequiredString(item.account_id)
+      && isRequiredString(item.account_name)
+      && accountTypes.has(String(item.account_type))
+      && isCurrencyCode(item.currency)
+      && (item.period_end_balance === null || isMoneyString(item.period_end_balance))
+      && (state === "reconciled" || state === "not_reconciled")
+      && typeof covered === "boolean"
+      && covered === (state === "reconciled")
+      && isRequiredString(item.required_statement_date)
+      && (item.latest_statement_date === null || isRequiredString(item.latest_statement_date))
+      && (item.eligibility_reason === "period_activity" || item.eligibility_reason === "non_zero_period_end_balance")
+      && typeof item.archived === "boolean";
+  });
+}
+
 function stringValue(value: unknown, fallback = "—"): string {
   return typeof value === "string" ? value : fallback;
 }
@@ -366,6 +438,14 @@ export function MonthCloseScreen({ onError }: { onError: (error: unknown) => voi
 
   const currencies = recordList(selected?.summary.currencies);
   const prepareAllowed = periodSummary?.capabilities.can_prepare ?? false;
+  const closedCurrencies = revisionReport ? historicalCurrencies(revisionReport.currencies) : null;
+  const closedBalances = revisionReport ? historicalBalances(revisionReport.account_balances) : null;
+  const closedReconciliation = revisionReport
+    ? historicalReconciliation(revisionReport.reconciliation_coverage)
+    : null;
+  const closedCurrenciesUnavailable = revisionReport !== null && closedCurrencies === null;
+  const closedBalancesUnavailable = revisionReport !== null && closedBalances === null;
+  const closedReconciliationUnavailable = revisionReport !== null && closedReconciliation === null;
 
   return <section className="month-close-screen">
     <header className="screen-header month-close-header"><div><span className="kicker">Hard close · проверяемые снимки</span><h1>Закрытие месяца</h1><p>Подготовка ничего не исправляет. После подтверждения финансовые изменения до cutoff блокируются, а revision остаётся неизменной.</p></div><div className="month-close-header-state"><span>Закрыто по</span><strong>{page?.closed_through ?? "не закрывалось"}</strong><small>Backup policy: {page?.backup_policy === "require_healthy" ? "требуется healthy" : "предупреждать"}</small></div></header>
@@ -395,6 +475,6 @@ export function MonthCloseScreen({ onError }: { onError: (error: unknown) => voi
 
     {dialog === "reopen" && selected ? <ActionDialog description="Разрешено открыть только последний закрытый месяц. Revision останется в истории, а причина — в audit." eyebrow="Owner action" onClose={() => { if (!busy) { setDialog(null); clearIntent("reopen"); } }} title={`Открыть revision ${selected.current_revision}?`}><div className="month-close-dialog-body"><div className="month-close-dialog-warning month-close-dialog-warning--danger">После открытия финансовые операции периода снова можно будет менять до следующего confirm.</div><label className="month-close-reason">Обязательная причина<textarea autoComplete="off" maxLength={500} minLength={3} onChange={(event) => setReason(event.target.value)} placeholder="Что требуется исправить и кто это согласовал" required rows={4} value={reason}/><small>{reason.trim().length}/500 · минимум 3 символа</small></label></div><footer><button className="secondary-button" disabled={busy !== null} onClick={() => { setDialog(null); clearIntent("reopen"); }} type="button">Отмена</button><button className="danger-button" disabled={busy !== null || reason.trim().length < 3} onClick={() => void reopen()} type="button">{busy === "reopen" ? "Открываем…" : "Открыть месяц"}</button></footer></ActionDialog> : null}
 
-    {revisionOpen ? <EntityDrawer ariaLabel="Исторический снимок закрытия месяца" eyebrow="As closed · read only" onClose={closeRevision} subtitle={revisionReport ? `Подтверждено ${dateTimeLabel(revisionReport.confirmed_at)}` : "Загружаем immutable snapshot"} title={revisionReport ? `Revision ${revisionReport.revision_number}` : "Исторический снимок"}>{revisionReport ? <div className="month-close-revision-detail">{revisionReport.legacy_unverified ? <div className="notice notice--warning" role="alert">Историческое закрытие создано до введения проверяемых снимков Finspace.</div> : <div className="month-close-fingerprint"><span>Financial fingerprint</span><code>{revisionReport.financial_fingerprint}</code></div>}<section><span className="kicker">Закрыто в revision {revisionReport.revision_number}</span><CurrencySummary groups={recordList(revisionReport.currencies)} unavailable={revisionReport.currencies === null}/></section><section><span className="kicker">Текущие данные</span><CurrencySummary groups={recordList(comparison?.current.currencies)}/></section>{comparison ? <div className="month-close-comparison-state"><strong>{comparison.unavailable_sections.includes("currencies") ? "Сравнение валютных итогов недоступно" : comparison.differences.currencies.some((item) => item.changed) ? "Текущие итоги отличаются" : "Валютные итоги совпадают"}</strong><span>{comparison.unavailable_sections.includes("currencies") ? "Legacy snapshot не содержит достаточных данных; current ledger не подставляется вместо истории." : "Сравнение выполняется отдельно по каждой валюте. Валюты не складываются."}</span></div> : null}<AccountBalances unavailable={revisionReport.account_balances === null} value={revisionReport.account_balances}/><ReconciliationCoverage unavailable={revisionReport.reconciliation_coverage === null} value={revisionReport.reconciliation_coverage}/></div> : <div className="month-close-history-loading">Загружаем snapshot и сравнение…</div>}</EntityDrawer> : null}
+    {revisionOpen ? <EntityDrawer ariaLabel="Исторический снимок закрытия месяца" eyebrow="As closed · read only" onClose={closeRevision} subtitle={revisionReport ? `Подтверждено ${dateTimeLabel(revisionReport.confirmed_at)}` : "Загружаем immutable snapshot"} title={revisionReport ? `Revision ${revisionReport.revision_number}` : "Исторический снимок"}>{revisionReport ? <div className="month-close-revision-detail">{revisionReport.legacy_unverified ? <div className="notice notice--warning" role="alert">Историческое закрытие создано до введения проверяемых снимков Finspace.</div> : <div className="month-close-fingerprint"><span>Financial fingerprint</span><code>{revisionReport.financial_fingerprint}</code></div>}<section><span className="kicker">Закрыто в revision {revisionReport.revision_number}</span><CurrencySummary groups={closedCurrencies ?? []} unavailable={closedCurrenciesUnavailable}/></section><section><span className="kicker">Текущие данные</span><CurrencySummary groups={recordList(comparison?.current.currencies)}/></section>{comparison ? <div className="month-close-comparison-state"><strong>{closedCurrenciesUnavailable || comparison.unavailable_sections.includes("currencies") ? "Сравнение валютных итогов недоступно" : comparison.differences.currencies.some((item) => item.changed) ? "Текущие итоги отличаются" : "Валютные итоги совпадают"}</strong><span>{closedCurrenciesUnavailable || comparison.unavailable_sections.includes("currencies") ? "Legacy snapshot не содержит достаточных данных; current ledger не подставляется вместо истории." : "Сравнение выполняется отдельно по каждой валюте. Валюты не складываются."}</span></div> : null}<AccountBalances unavailable={closedBalancesUnavailable} value={closedBalances ?? []}/><ReconciliationCoverage unavailable={closedReconciliationUnavailable} value={closedReconciliation ?? []}/></div> : <div className="month-close-history-loading">Загружаем snapshot и сравнение…</div>}</EntityDrawer> : null}
   </section>;
 }

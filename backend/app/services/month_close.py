@@ -1,10 +1,12 @@
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +27,9 @@ from app.db.models.imports import ImportBatch, ImportRow
 from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import User, Workspace
 from app.dependencies.context import RequestContext
+from app.schemas.accounts import AccountBalance
+from app.schemas.common import Money
+from app.schemas.financial_reports import FinancialReportCategory, FinancialReportGroup
 from app.services.audit import record_audit, request_uuid
 from app.services.backup_status import get_backup_status
 from app.services.calculations import calculate_balances
@@ -39,6 +44,7 @@ from app.services.month_close_fingerprint import financial_fingerprint, hash_can
 from app.services.reports import financial_report
 
 EFFECTIVE_STATUSES = ("confirmed", "reconciled")
+MONEY_ADAPTER = TypeAdapter(Money)
 
 ISSUE_DEFINITIONS: dict[str, tuple[str, str, str]] = {
     "MONTH_CLOSE_PERIOD_NOT_ENDED": (
@@ -1340,14 +1346,226 @@ def _public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in snapshot.items() if not key.startswith("_")}
 
 
-def _snapshot_optional_list(snapshot: dict[str, Any], key: str) -> list[dict[str, Any]] | None:
+def _snapshot_rows(
+    snapshot: dict[str, Any],
+    key: str,
+    validator: Callable[[dict[str, Any]], bool],
+) -> list[dict[str, Any]] | None:
     value = snapshot.get(key)
-    return _as_dict_list(value) if isinstance(value, list) else None
+    if not isinstance(value, list):
+        return None
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or not validator(item):
+            return None
+        result.append(dict(item))
+    return result
 
 
 def _snapshot_optional_int(snapshot: dict[str, Any], key: str) -> int | None:
     value = snapshot.get(key)
     return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _is_money_string(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        MONEY_ADAPTER.validate_python(value)
+    except ValidationError:
+        return False
+    return True
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_currency_code(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 3
+        and value.isascii()
+        and value.isalpha()
+        and value.isupper()
+    )
+
+
+def _is_uuid_string(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_iso_date(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_financial_category(item: dict[str, Any]) -> bool:
+    if (
+        not isinstance(item.get("name"), str)
+        or not _is_money_string(item.get("amount"))
+        or not _is_count(item.get("transaction_count"))
+    ):
+        return False
+    try:
+        FinancialReportCategory.model_validate(item)
+    except ValidationError:
+        return False
+    return True
+
+
+def _valid_currency_summary(item: dict[str, Any]) -> bool:
+    money_fields = ("income", "expense", "adjustment", "net_cashflow", "transfer_volume")
+    category_rows = item.get("spending_by_category")
+    monthly_rows = item.get("monthly_comparison")
+    expense_rows = item.get("largest_expenses")
+    if (
+        not _is_currency_code(item.get("currency"))
+        or not all(_is_money_string(item.get(key)) for key in money_fields)
+        or not _is_count(item.get("transactions_count"))
+        or not isinstance(category_rows, list)
+        or not all(
+            isinstance(row, dict) and _valid_financial_category(row) for row in category_rows
+        )
+        or not isinstance(monthly_rows, list)
+        or not all(
+            isinstance(row, dict)
+            and all(
+                _is_money_string(row.get(key))
+                for key in ("income", "expense", "adjustment", "net_cashflow")
+            )
+            and _is_count(row.get("transactions_count"))
+            for row in monthly_rows
+        )
+        or not isinstance(expense_rows, list)
+        or not all(
+            isinstance(row, dict) and _is_money_string(row.get("amount")) for row in expense_rows
+        )
+    ):
+        return False
+    try:
+        FinancialReportGroup.model_validate(item)
+    except ValidationError:
+        return False
+    return True
+
+
+def _valid_account_balance(item: dict[str, Any]) -> bool:
+    if (
+        not _is_uuid_string(item.get("account_id"))
+        or not isinstance(item.get("name"), str)
+        or not _is_currency_code(item.get("currency"))
+        or not _is_money_string(item.get("opening_balance"))
+        or not _is_money_string(item.get("balance"))
+    ):
+        return False
+    try:
+        AccountBalance.model_validate(item)
+    except ValidationError:
+        return False
+    return True
+
+
+def _valid_category_group(item: dict[str, Any]) -> bool:
+    categories = item.get("categories")
+    return (
+        _is_currency_code(item.get("currency"))
+        and isinstance(categories, list)
+        and all(
+            isinstance(category, dict) and _valid_financial_category(category)
+            for category in categories
+        )
+    )
+
+
+def _valid_reconciliation_coverage(item: dict[str, Any]) -> bool:
+    account_types = {
+        "cash",
+        "debit_card",
+        "credit_card",
+        "current_account",
+        "savings",
+        "deposit",
+        "brokerage",
+        "crypto_wallet",
+        "other",
+    }
+    state = item.get("state")
+    covered = item.get("covered")
+    latest_statement_date = item.get("latest_statement_date")
+    period_end_balance = item.get("period_end_balance")
+    required_keys = {
+        "account_id",
+        "account_name",
+        "account_type",
+        "currency",
+        "period_end_balance",
+        "state",
+        "covered",
+        "required_statement_date",
+        "latest_statement_date",
+        "eligibility_reason",
+        "archived",
+    }
+    return (
+        required_keys.issubset(item)
+        and _is_uuid_string(item.get("account_id"))
+        and isinstance(item.get("account_name"), str)
+        and item.get("account_type") in account_types
+        and _is_currency_code(item.get("currency"))
+        and (period_end_balance is None or _is_money_string(period_end_balance))
+        and state in {"reconciled", "not_reconciled"}
+        and isinstance(covered, bool)
+        and covered == (state == "reconciled")
+        and _is_iso_date(item.get("required_statement_date"))
+        and (latest_statement_date is None or _is_iso_date(latest_statement_date))
+        and item.get("eligibility_reason") in {"period_activity", "non_zero_period_end_balance"}
+        and isinstance(item.get("archived"), bool)
+    )
+
+
+def _valid_issue(item: dict[str, Any], severity: str) -> bool:
+    return (
+        isinstance(item.get("code"), str)
+        and item.get("severity") == severity
+        and isinstance(item.get("scope"), str)
+        and _is_count(item.get("count"))
+        and isinstance(item.get("message"), str)
+        and isinstance(item.get("details"), dict)
+    )
+
+
+def _snapshot_issues(snapshot: dict[str, Any]) -> dict[str, list[dict[str, Any]]] | None:
+    value = snapshot.get("issues")
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, list[dict[str, Any]]] = {}
+    for bucket, severity in (
+        ("blocking", "blocker"),
+        ("warnings", "warning"),
+        ("info", "info"),
+    ):
+        rows = value.get(bucket)
+        if not isinstance(rows, list):
+            return None
+        parsed: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict) or not _valid_issue(row, severity):
+                return None
+            parsed.append(dict(row))
+        result[bucket] = parsed
+    return result
 
 
 def _as_dict_list(value: object) -> list[dict[str, Any]]:
@@ -1589,34 +1807,28 @@ async def as_closed_report(
     revision = await get_revision(session, workspace_id, period, revision_number)
     user = await session.get(User, revision.confirmed_by)
     snapshot = _public_snapshot(dict(revision.snapshot))
-    issue_value = snapshot.get("issues")
-    issues: dict[str, object] | None = None
-    if isinstance(issue_value, dict) and all(
-        isinstance(issue_value.get(key), list) for key in ("blocking", "warnings", "info")
-    ):
-        issues = dict(issue_value)
-    issues_available = issues is not None
-    available_issues = issues or {}
-    blocking = _as_dict_list(available_issues.get("blocking"))
-    warnings = _as_dict_list(available_issues.get("warnings"))
-    infos = _as_dict_list(available_issues.get("info"))
+    issues = _snapshot_issues(snapshot)
     period_value = snapshot.get("period")
     sections: dict[str, object | None] = {
-        "currencies": _snapshot_optional_list(snapshot, "currencies"),
-        "account_balances": _snapshot_optional_list(snapshot, "account_balances"),
-        "category_aggregates": _snapshot_optional_list(snapshot, "category_aggregates"),
+        "currencies": _snapshot_rows(snapshot, "currencies", _valid_currency_summary),
+        "account_balances": _snapshot_rows(snapshot, "account_balances", _valid_account_balance),
+        "category_aggregates": _snapshot_rows(
+            snapshot, "category_aggregates", _valid_category_group
+        ),
         "transaction_count": _snapshot_optional_int(snapshot, "transaction_count"),
-        "reconciliation_coverage": _snapshot_optional_list(snapshot, "reconciliation_coverage"),
+        "reconciliation_coverage": _snapshot_rows(
+            snapshot, "reconciliation_coverage", _valid_reconciliation_coverage
+        ),
         "issue_summary": (
             {
-                "blocker_count": len(blocking),
-                "warning_count": len(warnings),
-                "info_count": len(infos),
-                "blockers": blocking,
-                "warnings": warnings,
-                "info": infos,
+                "blocker_count": len(issues["blocking"]),
+                "warning_count": len(issues["warnings"]),
+                "info_count": len(issues["info"]),
+                "blockers": issues["blocking"],
+                "warnings": issues["warnings"],
+                "info": issues["info"],
             }
-            if issues_available
+            if issues is not None
             else None
         ),
     }

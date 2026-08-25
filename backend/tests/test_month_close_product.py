@@ -315,6 +315,7 @@ def test_history_as_closed_isolation_reclose_and_legacy(
     assert original_report.status_code == 200, original_report.text
     original = original_report.json()
     assert original["mode"] == "as_closed"
+    assert original["unavailable_sections"] == []
     assert {item["currency"] for item in original["currencies"]} == {"RUB", "USD"}
     assert any(item["name"] == "Historical account" for item in original["account_balances"])
     assert any(
@@ -497,3 +498,169 @@ def test_history_as_closed_isolation_reclose_and_legacy(
         "category_aggregates",
         "currencies",
     }
+
+
+def test_malformed_snapshot_sections_are_unavailable_without_false_comparison(
+    client: TestClient,
+) -> None:
+    identity, headers = _register(client, "Month Close Malformed Snapshot")
+    workspace_id = uuid.UUID(str(identity["workspace"]["id"]))
+    user_id = uuid.UUID(str(identity["user"]["id"]))
+    cases = [
+        (1, {"currencies": [{}]}, "currencies", "currencies"),
+        (2, {"currencies": ["bad"]}, "currencies", "currencies"),
+        (3, {"account_balances": [{}]}, "account_balances", "account_balances"),
+        (
+            4,
+            {"reconciliation_coverage": [{}]},
+            "reconciliation_coverage",
+            "reconciliation_coverage",
+        ),
+        (
+            5,
+            {
+                "category_aggregates": [
+                    {
+                        "currency": "RUB",
+                        "categories": [
+                            {
+                                "amount": "10.0000",
+                                "category_id": None,
+                                "name": "Malformed category",
+                            }
+                        ],
+                    }
+                ]
+            },
+            "category_aggregates",
+            "category_aggregates",
+        ),
+        (
+            6,
+            {"issues": {"blocking": ["bad"], "warnings": [], "info": []}},
+            "issue_summary",
+            "issue_summary",
+        ),
+    ]
+
+    def snapshot(overrides: dict[str, object] | None = None) -> dict[str, object]:
+        return {
+            "currencies": [],
+            "account_balances": [],
+            "category_aggregates": [],
+            "transaction_count": 0,
+            "reconciliation_coverage": [],
+            "issues": {"blocking": [], "warnings": [], "info": []},
+            **(overrides or {}),
+        }
+
+    async def seed() -> None:
+        async with AsyncSessionFactory() as session:
+            now = datetime.now(UTC)
+            for month, override, _, _ in cases:
+                period = date(2025, month, 1)
+                closure = MonthClosure(
+                    workspace_id=workspace_id,
+                    period_month=period,
+                    status="confirmed",
+                    confirmed_by=user_id,
+                    confirmed_at=now,
+                    summary=snapshot(override),
+                    blocking_issues=[],
+                    warning_issues=[],
+                    version=1,
+                )
+                session.add(closure)
+                await session.flush()
+                revision = MonthCloseRevision(
+                    workspace_id=workspace_id,
+                    closure_id=closure.id,
+                    revision_number=1,
+                    period_month=period,
+                    period_start_at=datetime(2025, month, 1, tzinfo=UTC),
+                    period_end_at=(
+                        datetime(2025, month + 1, 1, tzinfo=UTC)
+                        if month < 12
+                        else datetime(2026, 1, 1, tzinfo=UTC)
+                    ),
+                    snapshot=snapshot(override),
+                    financial_fingerprint=None,
+                    legacy_unverified=True,
+                    confirmed_by=user_id,
+                    confirmed_at=now,
+                    source="migration",
+                    idempotency_key=f"malformed-{month}-{uuid.uuid4()}",
+                    created_at=now,
+                )
+                session.add(revision)
+                await session.flush()
+                closure.current_revision_id = revision.id
+
+            valid_period = date(2025, 7, 1)
+            valid_closure = MonthClosure(
+                workspace_id=workspace_id,
+                period_month=valid_period,
+                status="confirmed",
+                confirmed_by=user_id,
+                confirmed_at=now,
+                summary=snapshot(),
+                blocking_issues=[],
+                warning_issues=[],
+                version=1,
+            )
+            session.add(valid_closure)
+            await session.flush()
+            valid_revision = MonthCloseRevision(
+                workspace_id=workspace_id,
+                closure_id=valid_closure.id,
+                revision_number=1,
+                period_month=valid_period,
+                period_start_at=datetime(2025, 7, 1, tzinfo=UTC),
+                period_end_at=datetime(2025, 8, 1, tzinfo=UTC),
+                snapshot=snapshot(),
+                financial_fingerprint=None,
+                legacy_unverified=True,
+                confirmed_by=user_id,
+                confirmed_at=now,
+                source="migration",
+                idempotency_key=f"valid-empty-{uuid.uuid4()}",
+                created_at=now,
+            )
+            session.add(valid_revision)
+            await session.flush()
+            valid_closure.current_revision_id = valid_revision.id
+            await session.commit()
+
+    asyncio.run(seed())
+
+    for month, _, response_key, unavailable_key in cases:
+        report = client.get(f"/api/v1/month-close/2025/{month}/history/1/report", headers=headers)
+        assert report.status_code == 200, report.text
+        body = report.json()
+        assert body[response_key] is None
+        assert unavailable_key in body["unavailable_sections"]
+
+    for month in (1, 2):
+        comparison = client.get(
+            f"/api/v1/month-close/2025/{month}/history/1/comparison", headers=headers
+        )
+        assert comparison.status_code == 200, comparison.text
+        assert comparison.json()["differences"]["currencies"] == []
+        assert "currencies" in comparison.json()["unavailable_sections"]
+
+    valid_empty = client.get("/api/v1/month-close/2025/7/history/1/report", headers=headers)
+    assert valid_empty.status_code == 200, valid_empty.text
+    valid_body = valid_empty.json()
+    assert valid_body["currencies"] == []
+    assert valid_body["account_balances"] == []
+    assert valid_body["category_aggregates"] == []
+    assert valid_body["reconciliation_coverage"] == []
+    assert valid_body["issue_summary"] == {
+        "blocker_count": 0,
+        "warning_count": 0,
+        "info_count": 0,
+        "blockers": [],
+        "warnings": [],
+        "info": [],
+    }
+    assert valid_body["unavailable_sections"] == []

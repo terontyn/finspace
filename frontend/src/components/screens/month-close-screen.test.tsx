@@ -44,7 +44,7 @@ const summary = {
   backup_status: "unverified",
   backup_verified_at: null,
   currencies: [{ adjustment: "5.0000", currency: "RUB", expense: "20.0000", income: "50.0000", net_cashflow: "35.0000", transactions_count: 3, transfer_volume: "10.0000" }],
-  reconciliation_coverage: [{ account_id: "account-1", account_name: "Основной", account_type: "debit_card", archived: false, covered: false, currency: "RUB", latest_statement_date: null, required_statement_date: "2026-07-31", state: "not_reconciled" }],
+  reconciliation_coverage: [{ account_id: "account-1", account_name: "Основной", account_type: "debit_card", archived: false, covered: false, currency: "RUB", eligibility_reason: "period_activity", latest_statement_date: null, period_end_balance: "135.0000", required_statement_date: "2026-07-31", state: "not_reconciled" }],
   transaction_count: 3,
 };
 
@@ -564,6 +564,99 @@ test("legacy snapshot with missing sections shows unavailable instead of fake ze
     assert.match(output, /Недоступно/);
     assert.match(output, /Сравнение валютных итогов недоступно/);
     assert.doesNotMatch(output, /Financial fingerprint|Валютные итоги совпадают|Текущие итоги отличаются/);
+  } finally {
+    if (renderer) await act(async () => renderer?.unmount());
+    apiClient.get = originalGet;
+    restore();
+  }
+});
+
+test("malformed historical finance rows render unavailable without synthetic zeroes", async () => {
+  const originalGet = apiClient.get;
+  const restore = installBrowserGlobals();
+  const malformedReport: MonthCloseAsClosedReport = {
+    ...report,
+    account_balances: [{}],
+    currencies: [{}],
+    reconciliation_coverage: [{}],
+    unavailable_sections: [],
+  };
+  const malformedComparison: MonthCloseComparison = {
+    ...comparison,
+    as_closed: malformedReport,
+    unavailable_sections: [],
+  };
+  let renderer: ReactTestRenderer | undefined;
+  apiClient.get = (<T,>(path: string) => {
+    if (path === "/api/v1/month-close?limit=120") return Promise.resolve(page(confirmedClosure) as T);
+    if (path.includes("/history?")) return Promise.resolve(historyPage([revision]) as T);
+    if (path.endsWith("/report")) return Promise.resolve(malformedReport as T);
+    if (path.endsWith("/comparison")) return Promise.resolve(malformedComparison as T);
+    throw new Error(`Unexpected request: ${path}`);
+  }) as typeof apiClient.get;
+  try {
+    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer?.root.findByProps({ children: "Открыть снимок →" }).props.onClick(); await settle(); });
+    const historicalKicker = renderer?.root.findAllByProps({ className: "kicker" }).find((item) =>
+      renderedText(item) === "Закрыто в revision 1"
+    );
+    const historicalCurrency = historicalKicker?.parent;
+    assert.ok(historicalCurrency);
+    assert.match(renderedText(historicalCurrency), /Недоступно/);
+    assert.doesNotMatch(renderedText(historicalCurrency), /RUB|0[,.]00/);
+
+    const historicalBalances = findLastByProps(renderer!, { className: "panel month-close-balances" });
+    assert.match(renderedText(historicalBalances), /Недоступно/);
+    assert.doesNotMatch(renderedText(historicalBalances), /Счёт|RUB|0[,.]00/);
+
+    const historicalCoverage = findLastByProps(renderer!, { className: "panel month-close-reconciliation" });
+    assert.match(renderedText(historicalCoverage), /Недоступно/);
+    assert.doesNotMatch(renderedText(historicalCoverage), /Счёт|RUB/);
+  } finally {
+    if (renderer) await act(async () => renderer?.unmount());
+    apiClient.get = originalGet;
+    restore();
+  }
+});
+
+test("valid empty historical sections remain distinct from unavailable", async () => {
+  const originalGet = apiClient.get;
+  const restore = installBrowserGlobals();
+  const emptyReport: MonthCloseAsClosedReport = {
+    ...report,
+    account_balances: [],
+    category_aggregates: [],
+    currencies: [],
+    reconciliation_coverage: [],
+    unavailable_sections: [],
+  };
+  const emptyComparison: MonthCloseComparison = {
+    ...comparison,
+    as_closed: emptyReport,
+    current: { currencies: [] },
+    differences: { account_balances: [], category_aggregates: [], currencies: [] },
+    unavailable_sections: [],
+  };
+  let renderer: ReactTestRenderer | undefined;
+  apiClient.get = (<T,>(path: string) => {
+    if (path === "/api/v1/month-close?limit=120") return Promise.resolve(page(confirmedClosure) as T);
+    if (path.includes("/history?")) return Promise.resolve(historyPage([revision]) as T);
+    if (path.endsWith("/report")) return Promise.resolve(emptyReport as T);
+    if (path.endsWith("/comparison")) return Promise.resolve(emptyComparison as T);
+    throw new Error(`Unexpected request: ${path}`);
+  }) as typeof apiClient.get;
+  try {
+    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer?.root.findByProps({ children: "Открыть снимок →" }).props.onClick(); await settle(); });
+    const historicalKicker = renderer?.root.findAllByProps({ className: "kicker" }).find((item) =>
+      renderedText(item) === "Закрыто в revision 1"
+    );
+    const historicalCurrency = historicalKicker?.parent;
+    assert.ok(historicalCurrency);
+    assert.match(renderedText(historicalCurrency), /Финансовой активности нет/);
+    assert.doesNotMatch(renderedText(historicalCurrency), /Недоступно/);
+    assert.match(renderedText(findLastByProps(renderer!, { className: "panel month-close-balances" })), /Счетов на дату нет/);
+    assert.match(renderedText(findLastByProps(renderer!, { className: "panel month-close-reconciliation" })), /Сверка не требуется/);
   } finally {
     if (renderer) await act(async () => renderer?.unmount());
     apiClient.get = originalGet;
