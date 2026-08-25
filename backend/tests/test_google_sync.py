@@ -15,7 +15,9 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from app.core.config import settings
+from app.core.errors import ApiError
 from app.db.models.accounts import Account
+from app.db.models.audit import AuditLog
 from app.db.models.google_sync import (
     GoogleConnection,
     GoogleOAuthFlow,
@@ -25,11 +27,13 @@ from app.db.models.google_sync import (
     SyncOutbox,
     SyncRun,
 )
+from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import WorkspaceMember
 from app.db.session import AsyncSessionFactory
 from app.dependencies.google import get_google_client
 from app.integrations.google_client import GoogleApiError
 from app.main import app
+from app.services import sync_webhook
 from app.workers.sync_worker import _finish_group, claim_batch
 from tests.google_fakes import FakeGoogleClient
 
@@ -96,6 +100,22 @@ def _create_sheet(client: TestClient, headers: dict[str, str]) -> dict[str, obje
     response = client.post("/api/v1/google-sheets/create", headers=headers)
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def _close_july(client: TestClient, headers: dict[str, str]) -> None:
+    prepared = client.post("/api/v1/month-close/2026/7/prepare", headers=headers, json={})
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json()["status"] == "ready", prepared.text
+    confirmed = client.post(
+        "/api/v1/month-close/2026/7/confirm",
+        headers={**headers, "X-Idempotency-Key": f"google-close-{uuid.uuid4()}"},
+        json={
+            "version": prepared.json()["version"],
+            "confirm": True,
+            "prepare_token": prepared.json()["prepare_token"],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def test_oauth_state_is_single_use_and_tokens_are_encrypted(
@@ -638,20 +658,379 @@ def test_webhook_hmac_idempotency_transaction_and_conflict(
 
     transaction_count = client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
     invalid_decimal["changed_fields"]["amount"] = "126,50"
-    recovered_decimal = send_case(invalid_decimal, "nonce-recovered-decimal")
+    collision_decimal = send_case(invalid_decimal, "nonce-rejected-collision")
+    assert collision_decimal.status_code == 409
+    assert collision_decimal.json()["error"]["code"] == "GOOGLE_SYNC_EVENT_IDEMPOTENCY_CONFLICT"
+    assert (
+        client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
+        == transaction_count
+    )
+
+    recovered_payload = json.loads(json.dumps(invalid_decimal))
+    recovered_payload["event_id"] = str(uuid.uuid4())
+    recovered_decimal = send_case(recovered_payload, "nonce-recovered-decimal")
     assert recovered_decimal.status_code == 200, recovered_decimal.text
     assert recovered_decimal.json()["status"] == "applied"
     assert (
         client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
         == transaction_count + 1
     )
-    duplicate_decimal = send_case(invalid_decimal, "nonce-duplicate-decimal")
+    duplicate_decimal = send_case(recovered_payload, "nonce-duplicate-decimal")
     assert duplicate_decimal.status_code == 200
     assert duplicate_decimal.json()["status"] == "duplicate"
     assert (
         client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
         == transaction_count + 1
     )
+    app.dependency_overrides.clear()
+
+
+def test_google_financial_writes_respect_month_close_and_keep_database_remains_allowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_google(monkeypatch)
+    _, headers = _register(client)
+    fake = FakeGoogleClient()
+    _connect_google(client, headers, fake)
+    binding = _create_sheet(client, headers)
+    account = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={
+            "name": "Closed sheet account",
+            "account_type": "cash",
+            "currency": "RUB",
+            "opening_balance": "100.0000",
+            "opening_balance_at": "2026-01-01T00:00:00Z",
+        },
+    ).json()
+    category = client.post(
+        "/api/v1/categories",
+        headers=headers,
+        json={"name": "Closed sheet expense", "category_type": "expense"},
+    ).json()
+    transaction = client.post(
+        "/api/v1/transactions",
+        headers=headers,
+        json={
+            "occurred_at": "2026-07-10T10:00:00Z",
+            "transaction_type": "expense",
+            "amount": "10.0000",
+            "currency": "RUB",
+            "account_id": account["id"],
+            "category_id": category["id"],
+            "status": "confirmed",
+            "source": "manual",
+        },
+    )
+    assert transaction.status_code == 201, transaction.text
+    transaction = client.patch(
+        f"/api/v1/transactions/{transaction.json()['id']}",
+        headers=headers,
+        json={"version": transaction.json()["version"], "description": "Version two"},
+    )
+    assert transaction.status_code == 200, transaction.text
+    secret = client.post("/api/v1/google-sheets/apps-script/secret", headers=headers).json()
+    _close_july(client, headers)
+
+    def send(payload: dict[str, object], nonce: str):
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        return client.post(
+            "/api/v1/google-sheets/webhook/changes",
+            content=body,
+            headers=_signed_headers(binding["id"], secret["secret"], body, nonce),
+        )
+
+    new_payload: dict[str, object] = {
+        "event_id": str(uuid.uuid4()),
+        "spreadsheet_id": binding["spreadsheet_id"],
+        "sheet_name": "Операции",
+        "row_number": 2,
+        "entity_type": "transaction",
+        "entity_id": None,
+        "expected_version": None,
+        "row_hash": None,
+        "changed_fields": {
+            "occurred_at": "2026-07-20T10:00:00+05:00",
+            "transaction_type": "Расход",
+            "amount": "5,00",
+            "currency": "RUB",
+            "status": "Подтверждена",
+        },
+        "visible_row": {
+            "_account_id": account["id"],
+            "_category_id": category["id"],
+        },
+    }
+    rejected = send(new_payload, "closed-normal-inbound")
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "MONTH_CLOSED"
+
+    conflict_payload = {
+        **new_payload,
+        "event_id": str(uuid.uuid4()),
+        "entity_id": transaction.json()["id"],
+        "expected_version": 1,
+        "changed_fields": {"amount": "12.0000"},
+    }
+    conflict = send(conflict_payload, "closed-conflict")
+    assert conflict.status_code == 200, conflict.text
+    assert conflict.json()["status"] == "conflict"
+    conflict_url = f"/api/v1/google-sheets/conflicts/{conflict.json()['conflict_id']}/resolve"
+
+    keep_sheet = client.post(
+        conflict_url,
+        headers=headers,
+        json={"resolution": "keep_sheet"},
+    )
+    manual_merge = client.post(
+        conflict_url,
+        headers=headers,
+        json={"resolution": "manual_merge", "merged_payload": {"amount": "13.0000"}},
+    )
+    for response in (keep_sheet, manual_merge):
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "MONTH_CLOSED"
+
+    keep_database = client.post(
+        conflict_url,
+        headers=headers,
+        json={"resolution": "keep_database"},
+    )
+    assert keep_database.status_code == 200, keep_database.text
+    assert keep_database.json()["resolution"] == "keep_database"
+    unchanged = client.get(f"/api/v1/transactions/{transaction.json()['id']}", headers=headers)
+    assert unchanged.status_code == 200
+    assert unchanged.json()["amount"] == "10.0000"
+    app.dependency_overrides.clear()
+
+
+def test_rejected_google_event_replays_terminal_result_across_reopen(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_google(monkeypatch)
+    identity, headers = _register(client)
+    fake = FakeGoogleClient()
+    _connect_google(client, headers, fake)
+    binding = _create_sheet(client, headers)
+    account = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={
+            "name": "Terminal rejection account",
+            "account_type": "cash",
+            "currency": "RUB",
+            "opening_balance": "0.0000",
+            "opening_balance_at": "2026-01-01T00:00:00Z",
+        },
+    ).json()
+    category = client.post(
+        "/api/v1/categories",
+        headers=headers,
+        json={"name": "Terminal rejection category", "category_type": "expense"},
+    ).json()
+    secret = client.post("/api/v1/google-sheets/apps-script/secret", headers=headers).json()
+    _close_july(client, headers)
+
+    event_id = str(uuid.uuid4())
+    payload: dict[str, object] = {
+        "event_id": event_id,
+        "spreadsheet_id": binding["spreadsheet_id"],
+        "sheet_name": "Операции",
+        "row_number": 2,
+        "entity_type": "transaction",
+        "entity_id": None,
+        "expected_version": None,
+        "row_hash": None,
+        "changed_fields": {
+            "occurred_at": "2026-07-20T10:00:00+05:00",
+            "transaction_type": "Расход",
+            "amount": "5,00",
+            "currency": "RUB",
+            "status": "Подтверждена",
+        },
+        "visible_row": {
+            "_account_id": account["id"],
+            "_category_id": category["id"],
+        },
+    }
+
+    def send(candidate: dict[str, object], nonce: str):
+        body = json.dumps(candidate, ensure_ascii=False, separators=(",", ":")).encode()
+        return client.post(
+            "/api/v1/google-sheets/webhook/changes",
+            content=body,
+            headers=_signed_headers(binding["id"], secret["secret"], body, nonce),
+        )
+
+    def semantic_error(response: object) -> dict[str, object]:
+        error = dict(response.json()["error"])  # type: ignore[attr-defined]
+        error.pop("request_id", None)
+        return error
+
+    async def event_state() -> dict[str, object]:
+        workspace_id = uuid.UUID(str(identity["workspace"]["id"]))
+        async with AsyncSessionFactory() as session:
+            inbox = await session.scalar(
+                select(SyncInbox).where(
+                    SyncInbox.binding_id == uuid.UUID(str(binding["id"])),
+                    SyncInbox.source_event_id == event_id,
+                )
+            )
+            assert inbox is not None
+            return {
+                "inbox_id": str(inbox.id),
+                "status": inbox.status,
+                "payload": dict(inbox.payload),
+                "validation_errors": inbox.validation_errors,
+                "last_error_code": inbox.last_error_code,
+                "processed_at": inbox.processed_at,
+                "transactions": int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(FinancialTransaction)
+                        .where(FinancialTransaction.workspace_id == workspace_id)
+                    )
+                    or 0
+                ),
+                "financial_audits": int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(AuditLog)
+                        .where(
+                            AuditLog.workspace_id == workspace_id,
+                            AuditLog.entity_type == "transaction",
+                            AuditLog.source == "google_sheets",
+                        )
+                    )
+                    or 0
+                ),
+                "financial_outbox": int(
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(SyncOutbox)
+                        .where(
+                            SyncOutbox.workspace_id == workspace_id,
+                            SyncOutbox.entity_type == "transaction",
+                        )
+                    )
+                    or 0
+                ),
+            }
+
+    first = send(payload, "terminal-rejected-first")
+    assert first.status_code == 409, first.text
+    assert first.json()["error"]["code"] == "MONTH_CLOSED"
+    first_state = asyncio.run(event_state())
+    assert first_state["status"] == "rejected"
+    assert first_state["last_error_code"] == "MONTH_CLOSED"
+    assert first_state["validation_errors"] == [
+        {
+            "terminal": True,
+            "status_code": 409,
+            "code": "MONTH_CLOSED",
+            "message": "Financial history is closed for the affected period",
+            "details": {
+                "closed_through": "2026-07-31",
+                "affected_periods": ["2026-07"],
+            },
+        }
+    ]
+
+    # The exact retry while still closed replays the persisted result and has
+    # no ledger, audit, outbox, or inbox mutation.
+    still_closed = send(payload, "terminal-rejected-still-closed")
+    assert still_closed.status_code == 409
+    assert semantic_error(still_closed) == semantic_error(first)
+    assert asyncio.run(event_state()) == first_state
+
+    # The event ID is an immutable business identity, not a mutable queue slot.
+    changed_payload = json.loads(json.dumps(payload))
+    changed_payload["changed_fields"]["amount"] = "6,00"
+    collision = send(changed_payload, "terminal-rejected-collision")
+    assert collision.status_code == 409
+    assert collision.json()["error"]["code"] == "GOOGLE_SYNC_EVENT_IDEMPOTENCY_CONFLICT"
+    assert asyncio.run(event_state()) == first_state
+
+    closure = client.get("/api/v1/month-close/2026/7", headers=headers)
+    assert closure.status_code == 200, closure.text
+    reopened = client.post(
+        "/api/v1/month-close/2026/7/reopen",
+        headers={**headers, "X-Idempotency-Key": f"reopen-google-{uuid.uuid4()}"},
+        json={
+            "version": closure.json()["version"],
+            "reason": "Verify terminal Google event replay",
+        },
+    )
+    assert reopened.status_code == 200, reopened.text
+    before_open_retry = asyncio.run(event_state())
+
+    # System state has changed, but E1 remains terminally rejected.
+    after_reopen = send(payload, "terminal-rejected-after-reopen")
+    assert after_reopen.status_code == 409
+    assert semantic_error(after_reopen) == semantic_error(first)
+    assert asyncio.run(event_state()) == before_open_retry
+
+    # A genuinely new user edit gets a new event ID and may now be applied.
+    new_payload = json.loads(json.dumps(payload))
+    new_payload["event_id"] = str(uuid.uuid4())
+    applied = send(new_payload, "terminal-new-event-after-reopen")
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["status"] == "applied"
+    final_state = asyncio.run(event_state())
+    assert final_state["status"] == "rejected"
+    assert final_state["inbox_id"] == first_state["inbox_id"]
+    assert final_state["transactions"] == int(first_state["transactions"]) + 1
+    assert final_state["financial_audits"] == int(first_state["financial_audits"]) + 1
+    assert final_state["financial_outbox"] == int(first_state["financial_outbox"]) + 1
+
+    # A server/transport-class failure is rolled back instead of becoming a
+    # terminal rejected inbox, so the same business event remains retryable.
+    transient_payload = json.loads(json.dumps(payload))
+    transient_event_id = str(uuid.uuid4())
+    transient_payload["event_id"] = transient_event_id
+    original_create = sync_webhook.transaction_service.create_transaction
+
+    async def fail_transiently(*_args: object, **_kwargs: object) -> object:
+        raise ApiError(
+            status_code=503,
+            code="GOOGLE_SYNC_TEST_TRANSIENT",
+            message="Injected transient failure",
+        )
+
+    monkeypatch.setattr(
+        sync_webhook.transaction_service,
+        "create_transaction",
+        fail_transiently,
+    )
+    transient = send(transient_payload, "transient-event-first")
+    assert transient.status_code == 503
+
+    async def transient_inbox_count() -> int:
+        async with AsyncSessionFactory() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(SyncInbox)
+                    .where(
+                        SyncInbox.binding_id == uuid.UUID(str(binding["id"])),
+                        SyncInbox.source_event_id == transient_event_id,
+                    )
+                )
+                or 0
+            )
+
+    assert asyncio.run(transient_inbox_count()) == 0
+    monkeypatch.setattr(
+        sync_webhook.transaction_service,
+        "create_transaction",
+        original_create,
+    )
+    transient_retry = send(transient_payload, "transient-event-retry")
+    assert transient_retry.status_code == 200, transient_retry.text
+    assert transient_retry.json()["status"] == "applied"
+    assert asyncio.run(transient_inbox_count()) == 1
     app.dependency_overrides.clear()
 
 

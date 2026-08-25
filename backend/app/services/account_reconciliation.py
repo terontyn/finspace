@@ -28,6 +28,7 @@ from app.schemas.account_reconciliation import (
 )
 from app.schemas.transactions import TransactionStatus, TransactionType
 from app.services.audit import record_audit, snapshot
+from app.services.financial_period_guard import get_or_create_control
 from app.services.sync_outbox import enqueue_entity
 
 MONEY_STEP = Decimal("0.0001")
@@ -371,6 +372,11 @@ async def confirm_reconciliation(
         return existing
 
     try:
+        # A reconciliation is allowed after month close because confirmed and
+        # reconciled transactions are financially equivalent.  Taking the
+        # control-row lock still serializes it with close confirmation and
+        # ledger writes, so the close fingerprint cannot observe a torn state.
+        await get_or_create_control(session, context.workspace.id, for_update=True)
         account = await _account(session, context, account_id, for_update=True)
         preview, candidates = await _build_preview(session, context, account, data, for_update=True)
         if preview.preview_token != data.preview_token:

@@ -376,6 +376,25 @@ test('a terminal failure for the first item does not remove an unconfirmed secon
   assert.equal(harness.sheets.get('Операции').read(3, 17, 1, 1)[0][0], 'PENDING');
 });
 
+test('MONTH_CLOSED is a terminal domain rejection and never marks the row SYNCED', () => {
+  const harness = createHarness((_url, options) => {
+    const event = JSON.parse(options.payload).events[0];
+    return response(200, {
+      results: [{
+        event_id: event.event_id,
+        status: 'rejected',
+        error_code: 'MONTH_CLOSED',
+        error_message: 'Financial history is closed for the affected period',
+      }],
+    });
+  });
+  seedTransaction(harness);
+  const result = harness.context.pushPendingChanges_(false);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { sent: 1, remaining: 0 });
+  assert.equal(harness.context.queuedFinspaceEdits_().length, 0);
+  assert.equal(harness.sheets.get('Операции').read(2, 17, 1, 1)[0][0], 'ERROR');
+});
+
 test('an edit enqueued during HTTP cannot be removed by the older response', () => {
   let harness;
   let replacement;

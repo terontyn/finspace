@@ -299,9 +299,32 @@ async def execute_rule(
         execution.status = "reminder_sent"
         automation_runs.complete_run(run, {"status": "reminder_sent"})
     else:
-        transaction = await _create_transaction_from_rule(
-            session, rule, scheduled, request_id=request_id
-        )
+        try:
+            transaction = await _create_transaction_from_rule(
+                session, rule, scheduled, request_id=request_id
+            )
+        except ApiError as exc:
+            execution.status = "failed"
+            execution.completed_at = datetime.now(UTC)
+            automation_runs.fail_run(run, exc.code, exc.message)
+            await record_audit(
+                session,
+                workspace_id=rule.workspace_id,
+                actor_user_id=initiated_by,
+                entity_type="recurring_rule",
+                entity_id=rule.id,
+                action="recurring.execute",
+                before_data=None,
+                after_data={
+                    "scheduled_for": scheduled.isoformat(),
+                    "status": "failed",
+                    "error_code": exc.code,
+                },
+                request_id=request_id,
+                source="automation" if service_account_id else "api",
+            )
+            await session.commit()
+            raise
         execution.transaction_id = transaction.id
         execution.status = "draft_created" if rule.creation_mode == "draft" else "confirmed_created"
         automation_runs.complete_run(

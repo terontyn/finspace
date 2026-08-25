@@ -455,6 +455,7 @@ class BackupStatusResponse(ApiModel):
 class MonthCloseConfirmRequest(ApiModel):
     version: int = Field(ge=1)
     confirm: bool
+    prepare_token: str = Field(min_length=64, max_length=64)
 
 
 class MonthCloseReopenRequest(ApiModel):
@@ -474,6 +475,13 @@ class MonthClosureResponse(ApiModel):
     summary: dict[str, Any]
     blocking_issues: list[dict[str, Any]] | None
     warning_issues: list[dict[str, Any]] | None
+    info_issues: list[dict[str, Any]] = Field(default_factory=list)
+    prepare_token: str | None = None
+    prepared_fingerprint: str | None = None
+    current_revision_id: uuid.UUID | None = None
+    last_reopened_at: datetime | None = None
+    last_reopened_by: uuid.UUID | None = None
+    last_reopen_reason: str | None = None
     version: int
     created_at: datetime
     updated_at: datetime

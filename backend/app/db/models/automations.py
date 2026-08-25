@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -213,6 +214,66 @@ class MonthClosure(Base, TimestampMixin, VersionMixin):
     summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     blocking_issues: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     warning_issues: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+    prepare_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    prepared_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    last_reopened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_reopened_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    last_reopen_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @property
+    def info_issues(self) -> list[dict[str, Any]]:
+        value = self.summary.get("info_issues", [])
+        return list(value) if isinstance(value, list) else []
+
+
+class MonthCloseControl(Base, TimestampMixin, VersionMixin):
+    __tablename__ = "month_close_controls"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), primary_key=True
+    )
+    closed_through: Mapped[date | None] = mapped_column(Date, nullable=True)
+    backup_policy: Mapped[str] = mapped_column(String(30), nullable=False, default="warn")
+
+
+class MonthCloseRevision(Base):
+    __tablename__ = "month_close_revisions"
+    __table_args__ = (
+        UniqueConstraint("closure_id", "revision_number", name="uq_month_close_revisions_number"),
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_month_close_revisions_workspace_idempotency",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    closure_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("month_closures.id"), nullable=False
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    period_month: Mapped[date] = mapped_column(Date, nullable=False)
+    period_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    financial_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    legacy_unverified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    confirmed_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class NotificationSetting(Base, TimestampMixin):

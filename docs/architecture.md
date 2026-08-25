@@ -60,11 +60,27 @@ refresh; успешный refresh повторяет исходный запро
 - `recurring_rules`, `recurring_rule_executions` — расписания и их уникальные исполнения;
 - `telegram_links`, `telegram_link_codes`, `telegram_intents` — безопасная привязка и
   подтверждаемые команды;
-- `month_closures`, `notification_settings` — контроль периодов и адресная доставка.
+- `month_close_controls`, `month_closures`, `month_close_revisions` — cumulative hard
+  close, current preview и immutable confirmed history;
+- `notification_settings` — адресная доставка.
 
 Деньги — `NUMERIC(20,4)`, время — timezone-aware, идентификаторы — UUID. Soft delete и
 optimistic locking сохранены. `transactions.import_batch_id` связывает импорт с
 операциями и делает rollback точным.
+
+## Hard Month Close и financial write boundary
+
+`month_close_controls` содержит одну coordination row на workspace. Confirm и все
+ledger-affecting writes сначала берут её `FOR UPDATE`; после domain locks mutation,
+revision и audit фиксируются одной транзакцией. Записи с effective date не позднее
+`closed_through` отклоняются как `MONTH_CLOSED`. Auto-reopen отсутствует.
+
+Обычные операции создаются только через transaction domain service. Единственное
+отдельное создание `FinancialTransaction` — атомарный import commit после полного
+preflight. Google inbound, recurring и Telegram используют эти же границы; reconciliation
+может перевести `confirmed` в `reconciled`, поскольку это не меняет финансовый эффект.
+Подробный state machine, mutation matrix и snapshot contract описаны в
+[Hard Month Close](month-close.md).
 
 ## Атомарность
 

@@ -11,10 +11,16 @@ from sqlalchemy import select
 from app.api.routes import recurring_rules as recurring_rules_routes
 from app.core.config import settings
 from app.db.models.audit import AuditLog
-from app.db.models.automations import ServiceApiKey, TelegramIntent, TelegramLinkCode
+from app.db.models.automations import (
+    RecurringRule,
+    ServiceApiKey,
+    TelegramIntent,
+    TelegramLinkCode,
+)
 from app.db.models.google_sync import GoogleSheetBinding, SyncOutbox
 from app.db.models.transactions import FinancialTransaction
 from app.db.session import AsyncSessionFactory
+from app.services import telegram as telegram_service
 
 PASSWORD = "correct horse battery staple"
 
@@ -96,6 +102,22 @@ def _references(client: TestClient, headers: dict[str, str]) -> tuple[dict, dict
     )
     assert account.status_code == target.status_code == category.status_code == 201
     return account.json(), target.json(), category.json()
+
+
+def _close_july(client: TestClient, headers: dict[str, str]) -> None:
+    prepared = client.post("/api/v1/month-close/2026/7/prepare", headers=headers, json={})
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json()["status"] == "ready", prepared.text
+    confirmed = client.post(
+        "/api/v1/month-close/2026/7/confirm",
+        headers={**headers, "X-Idempotency-Key": f"automation-close-{uuid.uuid4()}"},
+        json={
+            "version": prepared.json()["version"],
+            "confirm": True,
+            "prepare_token": prepared.json()["prepare_token"],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
 
 
 def _expense_rule(account_id: str, category_id: str, **updates: object) -> dict[str, object]:
@@ -351,6 +373,55 @@ def test_recurring_rule_validation_execution_confirmation_and_outbox(
     assert asyncio.run(outbox_exists())
 
 
+def test_recurring_backdated_execution_is_rejected_by_month_close(
+    client: TestClient,
+) -> None:
+    _, headers = _register(client, "Recurring Closed")
+    account, _, category = _references(client, headers)
+    created = client.post(
+        "/api/v1/recurring-rules",
+        headers=headers,
+        json=_expense_rule(
+            account["id"],
+            category["id"],
+            creation_mode="confirmed",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    _, service_key = _service_key(client, headers, ["recurring:execute"])
+    scheduled_for = datetime(2026, 7, 15, 7, tzinfo=UTC)
+
+    async def backdate_rule() -> None:
+        async with AsyncSessionFactory() as session:
+            rule = await session.get(
+                RecurringRule,
+                uuid.UUID(created.json()["id"]),
+            )
+            assert rule is not None
+            rule.next_run_at = scheduled_for
+            await session.commit()
+
+    asyncio.run(backdate_rule())
+    _close_july(client, headers)
+    before = client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
+    response = client.post(
+        f"/api/v1/automation/recurring-rules/{created.json()['id']}/execute",
+        headers={
+            "Authorization": f"ServiceKey {service_key}",
+            "X-Idempotency-Key": f"closed-recurring-{uuid.uuid4()}",
+        },
+        json={"scheduled_for": scheduled_for.isoformat()},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "MONTH_CLOSED"
+    assert client.get("/api/v1/transactions", headers=headers).json()["page"]["total"] == before
+    history = client.get(f"/api/v1/recurring-rules/{created.json()['id']}/history", headers=headers)
+    assert history.status_code == 200
+    assert history.json()["page"]["total"] == 1
+    assert history.json()["items"][0]["status"] == "failed"
+    assert history.json()["items"][0]["transaction_id"] is None
+
+
 def test_telegram_link_parser_intent_callback_and_isolation(client: TestClient) -> None:
     _, headers = _register(client, "Telegram")
     _references(client, headers)
@@ -516,6 +587,62 @@ def test_telegram_link_parser_intent_callback_and_isolation(client: TestClient) 
     assert attempts == 0
 
 
+def test_telegram_backdated_confirmation_is_terminal_month_closed(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, headers = _register(client, "Telegram Closed")
+    _references(client, headers)
+    _, key = _service_key(client, headers, ["notifications:send"])
+    service_headers = {"Authorization": f"ServiceKey {key}"}
+    link_code = client.post("/api/v1/settings/telegram/link-code", headers=headers).json()["code"]
+    linked = client.post(
+        "/api/v1/integrations/telegram/link",
+        headers={**service_headers, "X-Idempotency-Key": f"closed-link-{uuid.uuid4()}"},
+        json={
+            "code": link_code,
+            "telegram_user_id": 300001,
+            "telegram_chat_id": 400001,
+            "telegram_username": "closed_test",
+        },
+    )
+    assert linked.status_code == 200, linked.text
+    _close_july(client, headers)
+
+    class ClosedPeriodClock:
+        @classmethod
+        def now(cls, _timezone: object | None = None) -> datetime:
+            return datetime(2026, 7, 20, 10, tzinfo=UTC)
+
+    monkeypatch.setattr(telegram_service, "datetime", ClosedPeriodClock)
+    preview = client.post(
+        "/api/v1/integrations/telegram/message",
+        headers={**service_headers, "X-Idempotency-Key": f"closed-message-{uuid.uuid4()}"},
+        json={
+            "telegram_user_id": 300001,
+            "telegram_chat_id": 400001,
+            "text": "расход 1250,25 groceries main card",
+            "update_id": 10,
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    callback_data = preview.json()["buttons"][0]["callback_data"]
+    before = client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
+    rejected = client.post(
+        "/api/v1/integrations/telegram/callback",
+        headers={**service_headers, "X-Idempotency-Key": f"closed-callback-{uuid.uuid4()}"},
+        json={
+            "telegram_user_id": 300001,
+            "telegram_chat_id": 400001,
+            "opaque_id": callback_data,
+            "update_id": 11,
+        },
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "MONTH_CLOSED"
+    assert client.get("/api/v1/transactions", headers=headers).json()["page"]["total"] == before
+
+
 def _verified_backup() -> None:
     async def create_audit() -> None:
         sha = "a" * 64
@@ -650,7 +777,7 @@ def test_weekly_and_uncategorized_reports_keep_currencies_separate(client: TestC
     assert uncategorized.json()["totals"] == [{"currency": "USD", "amount": "5.5000"}]
 
 
-def test_month_close_blocks_confirms_and_reopens_for_late_transaction(client: TestClient) -> None:
+def test_month_close_blocks_confirms_and_requires_explicit_reopen(client: TestClient) -> None:
     _, headers = _register(client, "Month Close")
     account, _, category = _references(client, headers)
     _verified_backup()
@@ -685,20 +812,32 @@ def test_month_close_blocks_confirms_and_reopens_for_late_transaction(client: Te
 
     stale = client.post(
         "/api/v1/month-close/2026/7/confirm",
-        headers=headers,
-        json={"version": ready.json()["version"] - 1, "confirm": True},
+        headers={**headers, "X-Idempotency-Key": "month-close:stale"},
+        json={
+            "version": ready.json()["version"] - 1,
+            "confirm": True,
+            "prepare_token": ready.json()["prepare_token"],
+        },
     )
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "MONTH_CLOSE_VERSION_CONFLICT"
     closed = client.post(
         "/api/v1/month-close/2026/7/confirm",
-        headers=headers,
-        json={"version": ready.json()["version"], "confirm": True},
+        headers={**headers, "X-Idempotency-Key": "month-close:confirm"},
+        json={
+            "version": ready.json()["version"],
+            "confirm": True,
+            "prepare_token": ready.json()["prepare_token"],
+        },
     )
     repeated = client.post(
         "/api/v1/month-close/2026/7/confirm",
-        headers=headers,
-        json={"version": ready.json()["version"], "confirm": True},
+        headers={**headers, "X-Idempotency-Key": "month-close:confirm"},
+        json={
+            "version": ready.json()["version"],
+            "confirm": True,
+            "prepare_token": ready.json()["prepare_token"],
+        },
     )
     assert closed.status_code == repeated.status_code == 200, closed.text
     assert closed.json()["status"] == "confirmed"
@@ -715,8 +854,17 @@ def test_month_close_blocks_confirms_and_reopens_for_late_transaction(client: Te
             "category_id": category["id"],
         },
     )
-    assert late.status_code == 201, late.text
-    reopened = client.get("/api/v1/month-close/2026/7", headers=headers)
-    assert reopened.status_code == 200
+    assert late.status_code == 409, late.text
+    assert late.json()["error"]["code"] == "MONTH_CLOSED"
+
+    still_closed = client.get("/api/v1/month-close/2026/7", headers=headers)
+    assert still_closed.status_code == 200
+    assert still_closed.json()["status"] == "confirmed"
+
+    reopened = client.post(
+        "/api/v1/month-close/2026/7/reopen",
+        headers={**headers, "X-Idempotency-Key": "month-close:reopen"},
+        json={"version": still_closed.json()["version"], "reason": "Late correction"},
+    )
+    assert reopened.status_code == 200, reopened.text
     assert reopened.json()["status"] == "reopened"
-    assert any(item["code"] == "MONTH_REOPENED" for item in reopened.json()["warning_issues"])
