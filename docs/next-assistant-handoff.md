@@ -20,35 +20,31 @@
 - каталог на сервере: /opt/finspace
 - production Compose wrapper: sudo finspace-compose
 
-Локальная контрольная точка на 2026-08-23:
-- ветка: codex/finspace-ui-integration;
-- функциональная commit series: 2b666cd, ec2e737, 743e171, 8e3cad0;
-- локальные commits не отправлены и не развёрнуты;
-- последний подтверждённый production commit: ec4abe7; не считай его текущим без
-  повторной read-only проверки сервера;
-- baseline этапов 1–6: tag local-v0.6.0, commit cfc8276;
-- новый routed App Shell, Dashboard, Accounts, Categories, Transactions, Reports,
-  account reconciliation, hardened import и durable Apps Script queue реализованы и
-  прошли локальные проверки;
-- frontend: 72 tests; backend: 67 passed, 1 skipped; Apps Script harness: 10 tests;
-- отдельная живая E2E-книга 2026-08-23 доказала безопасный retry после DNS и HTTP 503 и
-  затем была полностью удалена вместе с binding/triggers/тестовыми объектами;
-- frontend: Next.js production, next start, healthy, 127.0.0.1:3000;
-- backend: FastAPI, healthy, 127.0.0.1:8000;
+Production-контрольная точка Finspace v0.9 на 2026-08-26:
+- ветка: main;
+- commit: a2f617cb98c1de7281883fdd9de38c9b7d2062b4;
+- локальный tag: local-v0.9;
+- Alembic: 0008_month_close_invariants;
+- v0.9 полностью развёрнут и принят: routed financial UI, account reconciliation,
+  hardened import и Hard Month Close Stages A+B+C+D работают в production;
+- frontend: Next.js production image, npm run start, healthy, 127.0.0.1:3000;
+- backend: immutable FastAPI image, production uvicorn без --reload, healthy,
+  127.0.0.1:8000;
+- sync-worker работает из image без source mount;
 - PostgreSQL и Redis healthy;
-- sync-worker запущен;
 - frontend доступен внутри tailnet: https://terontyn-pc.tailfcdf00.ts.net/;
 - Apps Script backend опубликован Tailscale Funnel:
   https://terontyn-pc.tailfcdf00.ts.net:8443;
 - браузер использует same-origin /api/* через Next.js, а не прямой backend 8443;
-- cloudflared inactive/disabled; api.terontyn.site оставлен только как резервная
-  Cloudflare-конфигурация и сейчас не является рабочим backend URL;
 - основной Google provider: apps_script_bridge;
-- Google-книга зарегистрирована, triggers каждые 5 минут, heartbeat активен,
-  двусторонняя синхронизация подтверждена;
-- n8n и Adminer на production-сервере не запущены;
-- n8n/Telegram/automation код реализован, но пользовательская production-активация не
-  завершена;
+- Apps Script reliability v0.9 установлена в правильный bound-проект; normal push,
+  terminal rejection, pull/ACK, HMAC/retry harness и cleanup приняты;
+- runtime hardening активен: backend/worker/frontend без source mounts, backend без
+  --reload, frontend без .next/node_modules mounts;
+- канонический override — compose.production.yml; server wrapper обязан проходить
+  backend/scripts/validate_compose_topology.py до build/migration/start;
+- проверенный локальный DB restore point существует;
+- off-host backup не существует и отложен до Homelab;
 - банковские API не подключены и пока не требуются.
 
 Сначала ничего не предполагай по памяти. Выполни локально read-only проверки:
@@ -71,9 +67,10 @@
    не через прямой SQL.
 3. Финансовое изменение, audit и outbox должны быть атомарны.
 4. Тесты запускаются только изолированным test runner и никогда против production DB.
-5. Production frontend использует compose.production.yml/server override, next start,
-   same-origin API и непривилегированного пользователя.
-6. Не запускай next dev на production.
+5. Production backend, sync-worker и frontend используют compose.production.yml/server
+   override и immutable images без source mounts; backend не использует --reload.
+6. Production frontend использует npm run start, same-origin API и непривилегированного
+   пользователя. Не запускай next dev на production.
 7. Не используй docker compose down -v, docker volume rm, git reset --hard или иные
    destructive операции без отдельного точного подтверждения.
 8. Не изменяй Tailscale, Cloudflare, UFW, SSH, systemd, базу данных или server override,
@@ -89,8 +86,9 @@
 - git diff --check
 
 Для изменения backend используй изолированный backend test runner, Ruff, format check,
-mypy и релевантные targeted tests. Для Docker/production изменений дополнительно проверь
-production image/Compose в объёме риска.
+mypy и релевантные targeted tests. Для Docker/production изменений дополнительно запусти
+оба режима через backend/scripts/validate_compose_topology.py и проверь production images
+в объёме риска.
 
 В конце отчёта покажи:
 - подтверждённую причину или результат;

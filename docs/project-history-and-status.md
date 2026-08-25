@@ -14,7 +14,45 @@ Binding ID, идентификатор Google-книги и содержимое
 - **Не активировано** — код существует, но рабочая настройка пользователя или запущенный
   сервис не подтверждены.
 
-## Локальная контрольная точка 2026-08-23
+## Production-контрольная точка Finspace v0.9 — 2026-08-26
+
+Статус: **release полностью развёрнут и принят**.
+
+| Параметр | Подтверждённое значение |
+|---|---|
+| Ветка | `main` |
+| Git commit | `a2f617cb98c1de7281883fdd9de38c9b7d2062b4` (`a2f617c`) |
+| Локальный tag | `local-v0.9` |
+| Alembic | `0008_month_close_invariants` |
+| Backend/frontend | production images, healthy |
+| Sync worker | production image, запущен |
+| Источник финансовой истины | PostgreSQL |
+
+В production работают routed financial UI, account reconciliation и Hard Month Close
+Stages A+B+C+D. Month Close применяет central cutoff, immutable revisions, role-aware
+prepare/confirm/reopen, coverage и as-closed reporting. Apps Script reliability v0.9
+установлена в правильный bound-проект и прошла контролируемую live-приёмку: normal push,
+terminal rejection, pull/ACK и cleanup; fault/retry варианты дополнительно подтверждены
+детерминированным harness.
+
+Runtime hardening подтверждён и теперь кодифицирован в `compose.production.yml`:
+
+- backend не имеет source bind на `/app` и запускает production `uvicorn` без `--reload`;
+- sync-worker не имеет source mount;
+- frontend собирается target `production`, запускает `npm run start` и не имеет source,
+  `.next` или `node_modules` mounts;
+- необходимые runtime/operational paths backend монтируются отдельно с минимально
+  нужным read-write/read-only режимом.
+
+Production Google Spreadsheet ID и bound Apps Script ID находятся только в operational
+inventory [operations-runbook.md](operations-runbook.md); binding secret и Document
+Properties в Git не записываются.
+
+Перед release создан и восстановлением проверен локальный DB restore point. Это не
+off-host backup: внешняя зашифрованная копия отложена до этапа Homelab и не должна
+считаться выполненной.
+
+## Историческая локальная контрольная точка 2026-08-23
 
 Локальная интеграция нового интерфейса и финансовых доменов выполнена в ветке
 `codex/finspace-ui-integration`. Созданы функциональные commits:
@@ -25,9 +63,8 @@ Binding ID, идентификатор Google-книги и содержимое
 - `743e171` — durable Apps Script queue и Google sync;
 - `8e3cad0` — корректная idempotency recurring rules.
 
-Эти commits **не отправлены и не развёрнуты на сервере**. Последняя подтверждённая
-production-контрольная точка остаётся ниже; перед deploy обязательно сравнить server
-`HEAD`, dirty status и migrations.
+На эту дату commits ещё не были отправлены и развёрнуты. Снимок сохранён как история и
+заменён production-контрольной точкой v0.9 выше.
 
 На локальном коде подтверждены:
 
@@ -44,7 +81,7 @@ production-контрольная точка остаётся ниже; пере
 Подробный обезличенный отчёт:
 [Apps Script Bridge acceptance 2026-08-23](reports/apps-script-bridge-acceptance-2026-08-23.md).
 
-## Production-контрольная точка 2026-08-06
+## Историческая production-контрольная точка 2026-08-06
 
 | Параметр | Подтверждённое значение |
 |---|---|
@@ -60,8 +97,9 @@ production-контрольная точка остаётся ниже; пере
 | Основной Google provider | `apps_script_bridge` |
 | Источник финансовой истины | PostgreSQL |
 
-Перед любой новой работой всё равно нужно повторно выполнить `git status`, `git rev-parse
---short HEAD`, проверку контейнеров и health: этот снимок со временем устареет.
+Эта таблица описывает состояние на 2026-08-06 и заменена production-контрольной точкой
+v0.9. Перед любой новой работой всё равно нужно повторно выполнить `git status`,
+`git rev-parse --short HEAD`, проверку контейнеров и health.
 
 ### Запущенные сервисы
 
@@ -246,9 +284,9 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
 История соответствующих commits: `4ce6fdc` → `0eafc5d` → `49d928e` → `c0a8dd4` →
 `de5da7d` → `91b70dc` → `6b1e920` → `8dc8de4` → `682f58f` → `5c78676` → `ec4abe7`.
 
-### Локальная UI/domain integration 2026-08-23
+### UI/domain integration 2026-08-23 → production v0.9
 
-Статус: **реализовано и проверено локально; не развёрнуто**.
+Статус: **реализовано, проверено и развёрнуто в production v0.9**.
 
 - Глобальный screen state заменён на Next.js routes и единый responsive App Shell с
   light/dark themes, sidebar/mobile navigation и command palette.
@@ -269,7 +307,7 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
 
 ### Hard Month Close Stage A/B 2026-08-25
 
-Статус: **реализовано и проверяется локально; не развёрнуто**.
+Статус: **реализовано, проверено и развёрнуто в production v0.9**.
 
 - Добавлены workspace control row, cumulative `closed_through` и immutable confirmed
   revisions с deterministic financial fingerprint.
@@ -285,7 +323,7 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
 
 ### Hard Month Close Stage C/D 2026-08-25
 
-Статус: **реализовано в рабочей ветке и проверяется локально; не развёрнуто**.
+Статус: **реализовано, проверено и развёрнуто в production v0.9**.
 
 - Preview issues приведены к явному безопасному контракту blocker/warning/info с
   корректным closing scope; failed outbox не блокирует, staging не считается ledger.
@@ -329,8 +367,9 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
    отчёты.
 6. Никакой destructive command (`down -v`, reset, удаление volumes/DB) не выполняется без
    отдельного точного подтверждения владельца.
-7. Production frontend запускается только через `compose.production.yml`/server override
-   и `next start`, без bind mounts `node_modules`/`.next`.
+7. Production backend, sync-worker и frontend запускаются только через immutable images и
+   `compose.production.yml`/server override: без source mounts, без backend `--reload`,
+   frontend — через `next start` без bind mounts `node_modules`/`.next`.
 8. `month_close_controls.closed_through` является hard accounting cutoff; никакая
    интеграция или service account не может обойти central guard или автоматически reopen.
 

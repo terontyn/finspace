@@ -1,4 +1,4 @@
-# Production deployment frontend
+# Production deployment and runtime topology
 
 Базовый `docker-compose.yml` остаётся конфигурацией разработки: он собирает target
 `development`, монтирует исходники, `node_modules` и `.next`, затем запускает `next dev`.
@@ -45,33 +45,77 @@ headers. JWT, пароли, Google, n8n и другие секреты нель�
 Production запускается вместе с базовой конфигурацией и override:
 
 ```bash
-docker compose -f docker-compose.yml -f compose.production.yml build frontend
-docker compose -f docker-compose.yml -f compose.production.yml up -d --no-deps frontend
-docker compose -f docker-compose.yml -f compose.production.yml ps frontend
-docker compose -f docker-compose.yml -f compose.production.yml logs --tail 100 frontend
+docker compose -f docker-compose.yml -f compose.production.yml config --quiet
+python3 backend/scripts/validate_compose_topology.py all
+docker compose -f docker-compose.yml -f compose.production.yml build \
+  backend sync-worker frontend
 ```
 
-Override использует Compose tag `!reset`, поэтому у production frontend нет bind mount
-исходников, `/app/node_modules`, `/app/.next` и общего `env_file`. На порту контейнера 3000
-работает `next start`; host binding `127.0.0.1:3000` наследуется из базовой конфигурации.
+`docker-compose.yml` остаётся удобным development base:
+
+- backend и sync-worker монтируют `./backend:/app`;
+- backend запускает `uvicorn --reload`;
+- frontend собирает target `development` и монтирует исходники, `node_modules`, `.next`.
+
+`compose.production.yml` явно удаляет эти development defaults:
+
+- backend получает production-команду без `--reload`, а `/app` остаётся кодом из image;
+- sync-worker не имеет mounts и использует код из того же backend image;
+- frontend собирает target `production`, запускает `npm run start` и не имеет mounts;
+- backend сохраняет только утверждённые runtime bind mounts для imports, acceptance
+  artifacts, backup metadata, Apps Script package и n8n operational package.
+
+Для замены backend volume list используется Compose tag `!override`; для удаления всех
+worker/frontend volumes — `!reset`. Эти теги предотвращают list merge с dev mounts. Host
+bindings и networks наследуются из base Compose.
+
+### Утверждённые backend mounts
+
+| Source | Target | Режим | Назначение |
+|---|---|---|---|
+| `./data/imports` | `/app/data/imports` | read-write | Staging-файлы импорта |
+| `./data/acceptance` | `/app/data/acceptance` | read-write | Ограниченный registry live acceptance |
+| `./backups/acceptance-reports` | `/app/data/acceptance-reports` | read-write | Обезличенные acceptance reports |
+| `./backups` | `/app/backups` | read-only | Статус и metadata проверенных backup |
+| `./google-apps-script` | `/app/google-apps-script` | read-only | Выдаваемый backend Apps Script package |
+| `./n8n` | `/app/n8n` | read-only | Version-controlled operational package |
+
+Ни один из этих mounts не заменяет `/app` целиком. PostgreSQL/Redis data продолжают
+храниться в именованных volumes своих сервисов.
+
+### Детерминированная проверка
+
+```bash
+# Development и repository production merge:
+python3 backend/scripts/validate_compose_topology.py all
+
+# Уже собранный server wrapper без печати environment:
+sudo finspace-compose config --format json |
+  python3 backend/scripts/validate_compose_topology.py production --stdin
+```
+
+Проверка завершается ошибкой при source mount в production backend/worker/frontend,
+`--reload`, неверной frontend-команде, лишнем mount или неверном read-only режиме.
 
 ## Server override
 
 На Ubuntu содержимое `/etc/finspace/compose.server.yml` должно совпадать с
 `compose.production.yml`. Если `finspace-compose` уже вызывает базовый файл и этот server
-override, ручное обновление выполняется так:
+override, обновление выполняется только как часть безопасного release-порядка из
+[operations-runbook.md](operations-runbook.md). Сам шаг установки выглядит так:
 
 ```bash
 sudo cp -a /etc/finspace/compose.server.yml "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
 sudo install -o root -g root -m 0644 /opt/finspace/compose.production.yml /etc/finspace/compose.server.yml
-sudo finspace-compose build --no-cache frontend
-sudo finspace-compose up -d --no-deps frontend
-sudo finspace-compose ps frontend
-sudo finspace-compose logs --tail 100 frontend
+sudo finspace-compose config --quiet
+sudo finspace-compose config --format json |
+  python3 backend/scripts/validate_compose_topology.py production --stdin
 ```
 
-После запуска в логах frontend должна присутствовать строка `next start`, а запросов к
-`/_next/webpack-hmr` быть не должно. Проверка с хоста:
+Не копируйте override и не меняйте checkout в обход полного deploy-порядка, если
+application services продолжают работать из source mounts. После запуска в логах frontend
+должна присутствовать строка `next start`, а запросов к `/_next/webpack-hmr` быть не
+должно. Проверка с хоста:
 
 ```bash
 curl -fsS http://127.0.0.1:3000/login >/dev/null
