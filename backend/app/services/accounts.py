@@ -1,14 +1,21 @@
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ApiError
 from app.db.models.accounts import Account
+from app.db.models.transactions import FinancialTransaction
 from app.dependencies.context import RequestContext
 from app.repositories import accounts as repository
 from app.schemas.accounts import AccountCreate, AccountUpdate
 from app.services.audit import record_audit, snapshot
+from app.services.financial_period_guard import (
+    account_affects_closed_history,
+    assert_dates_open,
+    get_or_create_control,
+)
 from app.services.sync_outbox import enqueue_entity
 
 
@@ -21,6 +28,33 @@ def _validate_credit_limit(account_type: str, credit_limit: object) -> None:
         )
 
 
+async def _assert_currency_change_safe(
+    session: AsyncSession,
+    account: Account,
+    changes: dict[str, object],
+) -> None:
+    next_currency = changes.get("currency")
+    if next_currency is None or next_currency == account.currency:
+        return
+    transaction_id = await session.scalar(
+        select(FinancialTransaction.id)
+        .where(
+            FinancialTransaction.workspace_id == account.workspace_id,
+            or_(
+                FinancialTransaction.account_id == account.id,
+                FinancialTransaction.target_account_id == account.id,
+            ),
+        )
+        .limit(1)
+    )
+    if transaction_id is not None:
+        raise ApiError(
+            status_code=409,
+            code="ACCOUNT_CURRENCY_IMMUTABLE",
+            message="Account currency cannot change after transactions exist",
+        )
+
+
 async def create_account(
     session: AsyncSession,
     context: RequestContext,
@@ -28,6 +62,8 @@ async def create_account(
     *,
     commit: bool = True,
 ) -> Account:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
+    assert_dates_open(control, context.workspace.timezone, [data.opening_balance_at])
     if await repository.find_active_name(session, context.workspace.id, data.name):
         raise ApiError(
             status_code=409, code="DUPLICATE_NAME", message="Account name already exists"
@@ -67,6 +103,7 @@ async def update_account(
     commit: bool = True,
     audit_source: str = "api",
 ) -> Account:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     account = await repository.get_account(
         session, context.workspace.id, account_id, for_update=True
     )
@@ -80,6 +117,16 @@ async def update_account(
             details={"current_version": account.version},
         )
     changes = data.model_dump(exclude_unset=True, exclude={"version"})
+    await _assert_currency_change_safe(session, account, changes)
+    if {"opening_balance", "opening_balance_at", "currency"} & changes.keys():
+        assert_dates_open(
+            control,
+            context.workspace.timezone,
+            [
+                account.opening_balance_at,
+                changes.get("opening_balance_at", account.opening_balance_at),
+            ],
+        )
     next_name = str(changes.get("name", account.name))
     next_archived = bool(changes.get("is_archived", account.is_archived))
     if not next_archived and await repository.find_active_name(
@@ -132,6 +179,7 @@ async def delete_account(
     *,
     commit: bool = True,
 ) -> Account:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     account = await repository.get_account(
         session, context.workspace.id, account_id, for_update=True
     )
@@ -139,6 +187,11 @@ async def delete_account(
         raise ApiError(status_code=404, code="ACCOUNT_NOT_FOUND", message="Account was not found")
     if account.version != version:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
+    assert_dates_open(
+        control,
+        context.workspace.timezone,
+        await account_affects_closed_history(session, control, account, context.workspace.timezone),
+    )
     before = snapshot("account", account)
     changed_at = datetime.now(UTC)
     account.deleted_at = changed_at
@@ -176,6 +229,7 @@ async def restore_account(
     *,
     commit: bool = True,
 ) -> Account:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     account = await repository.get_account(
         session,
         context.workspace.id,
@@ -189,6 +243,11 @@ async def restore_account(
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
     if account.deleted_at is None:
         return account
+    assert_dates_open(
+        control,
+        context.workspace.timezone,
+        await account_affects_closed_history(session, control, account, context.workspace.timezone),
+    )
     if not account.is_archived and await repository.find_active_name(
         session, context.workspace.id, account.name, exclude_id=account.id
     ):

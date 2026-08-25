@@ -12,6 +12,7 @@ from app.db.models.transactions import FinancialTransaction
 from app.dependencies.context import RequestContext
 from app.schemas.google import ConflictResolveRequest, WebhookChangeRequest
 from app.services.audit import record_audit
+from app.services.financial_period_guard import get_or_create_control
 from app.services.google_sheets import require_binding
 from app.services.sync_outbox import enqueue_entity
 from app.services.sync_webhook import apply_change
@@ -114,6 +115,12 @@ async def resolve_conflict(
     conflict_id: uuid.UUID,
     data: ConflictResolveRequest,
 ) -> SyncConflict:
+    candidate = await get_conflict(session, context.workspace.id, conflict_id)
+    if data.resolution != "keep_database" and candidate.entity_type in {"transaction", "account"}:
+        # Financial conflict resolution participates in the same global lock
+        # order as every other ledger write.  The shared account/transaction
+        # services perform the actual closed-period assertion.
+        await get_or_create_control(session, context.workspace.id, for_update=True)
     conflict = await get_conflict(
         session,
         context.workspace.id,

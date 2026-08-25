@@ -7,6 +7,8 @@ from app.db.models.audit import AuditLog
 from app.db.models.auth import AuthSession
 from app.db.models.automations import (
     AutomationRun,
+    MonthCloseControl,
+    MonthCloseRevision,
     MonthClosure,
     NotificationSetting,
     RecurringRule,
@@ -46,6 +48,8 @@ __all__ = [
     "GoogleSheetBinding",
     "ImportBatch",
     "ImportRow",
+    "MonthCloseControl",
+    "MonthCloseRevision",
     "MonthClosure",
     "NotificationSetting",
     "RecurringRule",

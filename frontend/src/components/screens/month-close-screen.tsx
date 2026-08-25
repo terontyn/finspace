@@ -47,11 +47,15 @@ export function MonthCloseScreen({ onError }: { onError: (error: unknown) => voi
   }
 
   async function confirm() {
-    if (!selected || !window.confirm("Подтвердить закрытие месяца? Будет повторно проверен backup и блокировки.")) return;
+    if (!selected?.prepare_token || !window.confirm("Подтвердить закрытие месяца? Будет повторно проверен backup и блокировки.")) return;
     const [year, month] = selected.period_month.slice(0, 7).split("-");
     setBusy(true);
     try {
-      const result = await apiClient.post<MonthClosure>(`/api/v1/month-close/${year}/${Number(month)}/confirm`, { version: selected.version, confirm: true });
+      const result = await apiClient.post<MonthClosure>(
+        `/api/v1/month-close/${year}/${Number(month)}/confirm`,
+        { version: selected.version, confirm: true, prepare_token: selected.prepare_token },
+        { "X-Idempotency-Key": crypto.randomUUID() },
+      );
       setSelected(result);
       await load();
     } catch (error) {
@@ -71,6 +75,7 @@ export function MonthCloseScreen({ onError }: { onError: (error: unknown) => voi
       const result = await apiClient.post<MonthClosure>(
         `/api/v1/month-close/${year}/${Number(month)}/reopen`,
         { version: selected.version, reason: reason.trim() },
+        { "X-Idempotency-Key": crypto.randomUUID() },
       );
       setSelected(result);
       await load();

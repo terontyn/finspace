@@ -94,6 +94,13 @@ export interface MonthClosure {
   summary: Record<string, unknown>;
   blocking_issues: Array<Record<string, unknown>> | null;
   warning_issues: Array<Record<string, unknown>> | null;
+  info_issues: Array<Record<string, unknown>>;
+  prepare_token: string | null;
+  prepared_fingerprint: string | null;
+  current_revision_id: string | null;
+  last_reopened_at: string | null;
+  last_reopened_by: string | null;
+  last_reopen_reason: string | null;
   version: number;
   prepared_at: string | null;
   confirmed_at: string | null;

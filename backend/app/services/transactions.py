@@ -22,6 +22,10 @@ from app.schemas.transactions import (
     TransactionUpdate,
 )
 from app.services.audit import record_audit, snapshot
+from app.services.financial_period_guard import (
+    assert_dates_open,
+    get_or_create_control,
+)
 from app.services.sync_outbox import enqueue_entity
 
 
@@ -225,6 +229,8 @@ async def create_transaction(
     commit: bool = True,
     audit_source: str = "api",
 ) -> FinancialTransaction:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
+    assert_dates_open(control, context.workspace.timezone, [data.occurred_at])
     await _validate_transaction(session, context.workspace.id, data)
     values = data.model_dump(exclude={"splits"})
     transaction = FinancialTransaction(
@@ -255,14 +261,6 @@ async def create_transaction(
         entity_type="transaction",
         entity=transaction,
     )
-    from app.services import month_close
-
-    await month_close.reopen_for_transaction(
-        session,
-        context,
-        transaction.occurred_at,
-        transaction_id=transaction.id,
-    )
     if commit:
         await session.commit()
     return transaction
@@ -277,6 +275,7 @@ async def update_transaction(
     commit: bool = True,
     audit_source: str = "api",
 ) -> FinancialTransaction:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     transaction = await repository.get_transaction(
         session, context.workspace.id, transaction_id, for_update=True
     )
@@ -324,9 +323,13 @@ async def update_transaction(
         )
     current.update(changes)
     merged = TransactionCreate.model_validate(current)
+    assert_dates_open(
+        control,
+        context.workspace.timezone,
+        [transaction.occurred_at, merged.occurred_at],
+    )
     await _validate_transaction(session, context.workspace.id, merged, current_id=transaction.id)
     before = snapshot("transaction", transaction)
-    previous_occurred_at = transaction.occurred_at
     for field, value in changes.items():
         if field != "splits":
             setattr(transaction, field, value)
@@ -354,21 +357,6 @@ async def update_transaction(
         entity_type="transaction",
         entity=transaction,
     )
-    from app.services import month_close
-
-    await month_close.reopen_for_transaction(
-        session,
-        context,
-        previous_occurred_at,
-        transaction_id=transaction.id,
-    )
-    if transaction.occurred_at != previous_occurred_at:
-        await month_close.reopen_for_transaction(
-            session,
-            context,
-            transaction.occurred_at,
-            transaction_id=transaction.id,
-        )
     if commit:
         await session.commit()
     return transaction
@@ -381,6 +369,7 @@ async def _change_lifecycle(
     version: int,
     action: str,
 ) -> FinancialTransaction:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     transaction = await repository.get_transaction(
         session,
         context.workspace.id,
@@ -402,6 +391,7 @@ async def _change_lifecycle(
             code="RECONCILED_TRANSACTION_IMMUTABLE",
             message="A reconciled transaction cannot be changed",
         )
+    assert_dates_open(control, context.workspace.timezone, [transaction.occurred_at])
     before = snapshot("transaction", transaction)
     if action == "delete":
         transaction.deleted_at = datetime.now(UTC)
@@ -459,6 +449,7 @@ async def confirm_transaction(
     transaction_id: uuid.UUID,
     version: int,
 ) -> FinancialTransaction:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     transaction = await repository.get_transaction(
         session, context.workspace.id, transaction_id, for_update=True
     )
@@ -476,6 +467,7 @@ async def confirm_transaction(
             code="VALIDATION_ERROR",
             message="Only a draft transaction can be confirmed",
         )
+    assert_dates_open(control, context.workspace.timezone, [transaction.occurred_at])
     return await update_transaction(
         session,
         context,

@@ -26,6 +26,10 @@ from app.db.models.transactions import FinancialTransaction
 from app.dependencies.context import RequestContext
 from app.schemas.imports import ImportMappingRequest, ImportRowOverrideRequest
 from app.services.audit import record_audit, snapshot
+from app.services.financial_period_guard import (
+    assert_dates_open,
+    get_or_create_control,
+)
 from app.services.sync_outbox import enqueue_entity
 
 MAPPING_FIELDS = {
@@ -747,6 +751,7 @@ async def commit_import(
     confirmation: bool,
     idempotency_key: str | None,
 ) -> tuple[ImportBatch, int]:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if batch.status == "imported" and batch.idempotency_key == idempotency_key:
         imported_count = int(
@@ -770,8 +775,6 @@ async def commit_import(
             code="IMPORT_NOT_READY",
             message="Validated import and explicit confirmation are required",
         )
-    batch.status = "importing"
-    batch.idempotency_key = idempotency_key
     rows = list(
         (
             await session.scalars(
@@ -782,6 +785,12 @@ async def commit_import(
             )
         ).all()
     )
+    affected_dates = [
+        datetime.fromisoformat(str((row.normalized_data or {})["occurred_at"])) for row in rows
+    ]
+    assert_dates_open(control, context.workspace.timezone, affected_dates)
+    batch.status = "importing"
+    batch.idempotency_key = idempotency_key
     for row in rows:
         data = row.normalized_data or {}
         transaction = FinancialTransaction(
@@ -854,6 +863,7 @@ async def rollback_import(
     *,
     force: bool,
 ) -> tuple[ImportBatch, int]:
+    control = await get_or_create_control(session, context.workspace.id, for_update=True)
     batch = await get_batch(session, context.workspace.id, batch_id, for_update=True)
     if batch.status == "rolled_back":
         return batch, 0
@@ -882,6 +892,11 @@ async def rollback_import(
                 "transaction_ids": sorted(str(item.id) for item in reconciled),
             },
         )
+    assert_dates_open(
+        control,
+        context.workspace.timezone,
+        [item.occurred_at for item in transactions],
+    )
     changed = [item for item in transactions if item.version != 1]
     if changed and not force:
         raise ApiError(

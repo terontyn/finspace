@@ -87,6 +87,22 @@ def _mapping() -> dict[str, object]:
     }
 
 
+def _close_july(client: TestClient, headers: dict[str, str]) -> None:
+    prepared = client.post("/api/v1/month-close/2026/7/prepare", headers=headers, json={})
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json()["status"] == "ready", prepared.text
+    confirmed = client.post(
+        "/api/v1/month-close/2026/7/confirm",
+        headers={**headers, "X-Idempotency-Key": f"import-close-{uuid.uuid4()}"},
+        json={
+            "version": prepared.json()["version"],
+            "confirm": True,
+            "prepare_token": prepared.json()["prepare_token"],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+
 def test_csv_staging_validate_commit_duplicate_and_rollback(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -263,6 +279,81 @@ def test_import_rollback_never_removes_reconciled_transaction(
             client.get(f"/api/v1/accounts/{account['id']}/reconciliations", headers=headers).json()
             == history_before
         )
+
+
+def test_import_commit_and_rollback_respect_closed_period_atomically(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    headers, _ = _auth(client, monkeypatch)
+    account_name, category_name = _references(client, headers)
+    mixed = (
+        "Дата;Тип;Сумма;Счёт;Категория;Описание\n"
+        f"22.07.2026;Расход;10;{account_name};{category_name};Closed row\n"
+        f"22.08.2026;Расход;20;{account_name};{category_name};Open row\n"
+    ).encode()
+    batch = _upload(client, headers, mixed, "closed-mixed.csv").json()
+    client.put(f"/api/v1/imports/{batch['id']}/mapping", headers=headers, json=_mapping())
+    validated = client.post(f"/api/v1/imports/{batch['id']}/validate", headers=headers)
+    assert validated.status_code == 200, validated.text
+    assert validated.json()["summary"]["valid"] == 2
+    _close_july(client, headers)
+
+    before = client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
+    rejected = client.post(
+        f"/api/v1/imports/{batch['id']}/commit",
+        headers={**headers, "X-Idempotency-Key": f"closed-import-{uuid.uuid4()}"},
+        json={"confirm": True},
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "MONTH_CLOSED"
+    assert client.get("/api/v1/transactions", headers=headers).json()["page"]["total"] == before
+    assert client.get(f"/api/v1/imports/{batch['id']}", headers=headers).json()["status"] == "ready"
+
+    # A separate workspace proves rollback performs the same preflight before
+    # changing any imported row, audit event, or outbox record.
+    rollback_headers, _ = _auth(client, monkeypatch)
+    rollback_account, rollback_category = _references(client, rollback_headers)
+    rollback_batch = _upload(
+        client,
+        rollback_headers,
+        _csv(rollback_account, rollback_category),
+        "rollback-closed.csv",
+    ).json()
+    client.put(
+        f"/api/v1/imports/{rollback_batch['id']}/mapping",
+        headers=rollback_headers,
+        json=_mapping(),
+    )
+    client.post(f"/api/v1/imports/{rollback_batch['id']}/validate", headers=rollback_headers)
+    committed = client.post(
+        f"/api/v1/imports/{rollback_batch['id']}/commit",
+        headers={**rollback_headers, "X-Idempotency-Key": f"rollback-import-{uuid.uuid4()}"},
+        json={"confirm": True},
+    )
+    assert committed.status_code == 200, committed.text
+    imported = next(
+        item
+        for item in client.get("/api/v1/transactions", headers=rollback_headers).json()["items"]
+        if item["source"] == "import"
+    )
+    _close_july(client, rollback_headers)
+    rollback = client.post(
+        f"/api/v1/imports/{rollback_batch['id']}/rollback",
+        headers=rollback_headers,
+        json={"force": True},
+    )
+    assert rollback.status_code == 409, rollback.text
+    assert rollback.json()["error"]["code"] == "MONTH_CLOSED"
+    imported_after_rejection = client.get(
+        f"/api/v1/transactions/{imported['id']}", headers=rollback_headers
+    )
+    assert imported_after_rejection.status_code == 200
+    assert (
+        client.get(f"/api/v1/imports/{rollback_batch['id']}", headers=rollback_headers).json()[
+            "status"
+        ]
+        == "imported"
+    )
 
 
 def test_import_validation_errors_limits_and_workspace_isolation(

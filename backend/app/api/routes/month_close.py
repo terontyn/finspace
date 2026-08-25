@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Query
+from typing import Annotated
 
-from app.dependencies.context import CurrentContext, OwnerContext
+from fastapi import APIRouter, Header, Query
+
+from app.dependencies.context import CurrentContext, EditorContext, OwnerContext
 from app.dependencies.database import DbSession
 from app.schemas.automations import (
     MonthCloseConfirmRequest,
@@ -47,7 +49,7 @@ async def month_close_get(
 async def month_close_prepare(
     year: int,
     month: int,
-    context: CurrentContext,
+    context: EditorContext,
     session: DbSession,
 ) -> MonthClosureResponse:
     period = service.period_date(year, month)
@@ -69,6 +71,7 @@ async def month_close_confirm(
     data: MonthCloseConfirmRequest,
     context: OwnerContext,
     session: DbSession,
+    idempotency_key: Annotated[str | None, Header(alias="X-Idempotency-Key")] = None,
 ) -> MonthClosureResponse:
     period = service.period_date(year, month)
     return MonthClosureResponse.model_validate(
@@ -78,6 +81,8 @@ async def month_close_confirm(
             period,
             version=data.version,
             explicit=data.confirm,
+            prepare_token=data.prepare_token,
+            idempotency_key=idempotency_key or "",
         )
     )
 
@@ -89,6 +94,7 @@ async def month_close_reopen(
     data: MonthCloseReopenRequest,
     context: OwnerContext,
     session: DbSession,
+    idempotency_key: Annotated[str | None, Header(alias="X-Idempotency-Key")] = None,
 ) -> MonthClosureResponse:
     period = service.period_date(year, month)
     return MonthClosureResponse.model_validate(
@@ -98,5 +104,6 @@ async def month_close_reopen(
             period,
             version=data.version,
             reason=data.reason,
+            idempotency_key=idempotency_key or "",
         )
     )

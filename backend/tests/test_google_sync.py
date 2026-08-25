@@ -98,6 +98,22 @@ def _create_sheet(client: TestClient, headers: dict[str, str]) -> dict[str, obje
     return response.json()
 
 
+def _close_july(client: TestClient, headers: dict[str, str]) -> None:
+    prepared = client.post("/api/v1/month-close/2026/7/prepare", headers=headers, json={})
+    assert prepared.status_code == 200, prepared.text
+    assert prepared.json()["status"] == "ready", prepared.text
+    confirmed = client.post(
+        "/api/v1/month-close/2026/7/confirm",
+        headers={**headers, "X-Idempotency-Key": f"google-close-{uuid.uuid4()}"},
+        json={
+            "version": prepared.json()["version"],
+            "confirm": True,
+            "prepare_token": prepared.json()["prepare_token"],
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+
+
 def test_oauth_state_is_single_use_and_tokens_are_encrypted(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -652,6 +668,126 @@ def test_webhook_hmac_idempotency_transaction_and_conflict(
         client.get("/api/v1/transactions", headers=headers).json()["page"]["total"]
         == transaction_count + 1
     )
+    app.dependency_overrides.clear()
+
+
+def test_google_financial_writes_respect_month_close_and_keep_database_remains_allowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_google(monkeypatch)
+    _, headers = _register(client)
+    fake = FakeGoogleClient()
+    _connect_google(client, headers, fake)
+    binding = _create_sheet(client, headers)
+    account = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={
+            "name": "Closed sheet account",
+            "account_type": "cash",
+            "currency": "RUB",
+            "opening_balance": "100.0000",
+            "opening_balance_at": "2026-01-01T00:00:00Z",
+        },
+    ).json()
+    category = client.post(
+        "/api/v1/categories",
+        headers=headers,
+        json={"name": "Closed sheet expense", "category_type": "expense"},
+    ).json()
+    transaction = client.post(
+        "/api/v1/transactions",
+        headers=headers,
+        json={
+            "occurred_at": "2026-07-10T10:00:00Z",
+            "transaction_type": "expense",
+            "amount": "10.0000",
+            "currency": "RUB",
+            "account_id": account["id"],
+            "category_id": category["id"],
+            "status": "confirmed",
+            "source": "manual",
+        },
+    )
+    assert transaction.status_code == 201, transaction.text
+    transaction = client.patch(
+        f"/api/v1/transactions/{transaction.json()['id']}",
+        headers=headers,
+        json={"version": transaction.json()["version"], "description": "Version two"},
+    )
+    assert transaction.status_code == 200, transaction.text
+    secret = client.post("/api/v1/google-sheets/apps-script/secret", headers=headers).json()
+    _close_july(client, headers)
+
+    def send(payload: dict[str, object], nonce: str):
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        return client.post(
+            "/api/v1/google-sheets/webhook/changes",
+            content=body,
+            headers=_signed_headers(binding["id"], secret["secret"], body, nonce),
+        )
+
+    new_payload: dict[str, object] = {
+        "event_id": str(uuid.uuid4()),
+        "spreadsheet_id": binding["spreadsheet_id"],
+        "sheet_name": "Операции",
+        "row_number": 2,
+        "entity_type": "transaction",
+        "entity_id": None,
+        "expected_version": None,
+        "row_hash": None,
+        "changed_fields": {
+            "occurred_at": "2026-07-20T10:00:00+05:00",
+            "transaction_type": "Расход",
+            "amount": "5,00",
+            "currency": "RUB",
+            "status": "Подтверждена",
+        },
+        "visible_row": {
+            "_account_id": account["id"],
+            "_category_id": category["id"],
+        },
+    }
+    rejected = send(new_payload, "closed-normal-inbound")
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "MONTH_CLOSED"
+
+    conflict_payload = {
+        **new_payload,
+        "event_id": str(uuid.uuid4()),
+        "entity_id": transaction.json()["id"],
+        "expected_version": 1,
+        "changed_fields": {"amount": "12.0000"},
+    }
+    conflict = send(conflict_payload, "closed-conflict")
+    assert conflict.status_code == 200, conflict.text
+    assert conflict.json()["status"] == "conflict"
+    conflict_url = f"/api/v1/google-sheets/conflicts/{conflict.json()['conflict_id']}/resolve"
+
+    keep_sheet = client.post(
+        conflict_url,
+        headers=headers,
+        json={"resolution": "keep_sheet"},
+    )
+    manual_merge = client.post(
+        conflict_url,
+        headers=headers,
+        json={"resolution": "manual_merge", "merged_payload": {"amount": "13.0000"}},
+    )
+    for response in (keep_sheet, manual_merge):
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "MONTH_CLOSED"
+
+    keep_database = client.post(
+        conflict_url,
+        headers=headers,
+        json={"resolution": "keep_database"},
+    )
+    assert keep_database.status_code == 200, keep_database.text
+    assert keep_database.json()["resolution"] == "keep_database"
+    unchanged = client.get(f"/api/v1/transactions/{transaction.json()['id']}", headers=headers)
+    assert unchanged.status_code == 200
+    assert unchanged.json()["amount"] == "10.0000"
     app.dependency_overrides.clear()
 
 

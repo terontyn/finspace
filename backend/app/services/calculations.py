@@ -19,7 +19,10 @@ def _money(value: Decimal) -> Decimal:
 
 
 async def calculate_balances(
-    session: AsyncSession, workspace_id: uuid.UUID
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    *,
+    as_of: datetime | None = None,
 ) -> list[AccountBalance]:
     accounts = list(
         (
@@ -30,20 +33,21 @@ async def calculate_balances(
             )
         ).all()
     )
+    transaction_filters = [
+        FinancialTransaction.workspace_id == workspace_id,
+        FinancialTransaction.status.in_(EFFECTIVE_STATUSES),
+        FinancialTransaction.deleted_at.is_(None),
+    ]
+    if as_of is not None:
+        transaction_filters.append(FinancialTransaction.occurred_at < as_of)
     transactions = list(
-        (
-            await session.scalars(
-                select(FinancialTransaction).where(
-                    FinancialTransaction.workspace_id == workspace_id,
-                    FinancialTransaction.status.in_(EFFECTIVE_STATUSES),
-                    FinancialTransaction.deleted_at.is_(None),
-                )
-            )
-        ).all()
+        (await session.scalars(select(FinancialTransaction).where(*transaction_filters))).all()
     )
     originals = {item.id: item for item in transactions}
     result: list[AccountBalance] = []
     for account in accounts:
+        if as_of is not None and account.opening_balance_at >= as_of:
+            continue
         balance = account.opening_balance
         for item in transactions:
             if item.occurred_at < account.opening_balance_at:

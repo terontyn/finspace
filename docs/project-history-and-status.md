@@ -267,6 +267,22 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
 - Account/category mutation routes формируют response DTO до commit, поэтому commit
   expiration ORM-объекта не превращается в ложный HTTP 500 после успешной записи.
 
+### Hard Month Close Stage A/B 2026-08-25
+
+Статус: **реализовано и проверяется локально; не развёрнуто**.
+
+- Добавлены workspace control row, cumulative `closed_through` и immutable confirmed
+  revisions с deterministic financial fingerprint.
+- Month Close переведён на последовательный hard close без auto-reopen; manual reopen
+  доступен только owner и только для последнего закрытого месяца.
+- Confirm и reopen получили обязательную durable idempotency, prepare/confirm stale
+  detection и единый lock order.
+- Central guard подключён к transaction lifecycle, историческим account mutations,
+  import commit/rollback, Google inbound/conflict resolution, recurring и Telegram.
+- Account reconciliation после close остаётся разрешённым и не меняет fingerprint.
+
+Контракт и mutation matrix: [Hard Month Close](month-close.md).
+
 ## Нереализованное или неподтверждённое
 
 - n8n и Telegram не активированы на production-сервере.
@@ -292,5 +308,7 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
    отдельного точного подтверждения владельца.
 7. Production frontend запускается только через `compose.production.yml`/server override
    и `next start`, без bind mounts `node_modules`/`.next`.
+8. `month_close_controls.closed_through` является hard accounting cutoff; никакая
+   интеграция или service account не может обойти central guard или автоматически reopen.
 
 Практические команды и действия находятся в [эксплуатационной инструкции](operations-runbook.md).
