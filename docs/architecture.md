@@ -82,6 +82,19 @@ preflight. Google inbound, recurring и Telegram используют эти ж�
 Подробный state machine, mutation matrix и snapshot contract описаны в
 [Hard Month Close](month-close.md).
 
+Month Close read model не смешивается с mutation path. Current preview остаётся в
+`month_closures`, а подтверждённая история читается из append-only
+`month_close_revisions`. As-closed report строится исключительно из revision snapshot;
+отдельный comparison endpoint рассчитывает live current view и сопоставляет валюты,
+остатки и категории без суммирования разных валют.
+
+Issue policy формируется backend-ом в виде `blocker|warning|info`; frontend не угадывает
+severity или роль пользователя. `capabilities` в response управляют видимостью действий,
+но route dependencies остаются окончательной проверкой: viewer читает историю, editor
+готовит период, owner подтверждает и открывает последний период повторно. Reconciliation
+остаётся отдельным bounded context: Month Close только читает confirmed evidence и
+сохраняет coverage в snapshot.
+
 ## Атомарность
 
 Регистрация создаёт user/workspace/member/session одной транзакцией. Финансовое изменение,

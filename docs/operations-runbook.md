@@ -266,12 +266,24 @@ Sheets, Telegram, n8n или прямой SQL.
 Безопасный порядок:
 
 1. Выполнить prepare только для завершённого месяца.
-2. Устранить blockers и просмотреть warnings; backup при текущей policy `warn` не
-   запускается автоматически и не блокирует confirm.
-3. Owner подтверждает актуальный preview.
-4. Для поздней корректировки owner вручную открывает только последний closed month и
+2. Проверить три отдельные группы issues: blockers нужно устранить, warnings осознанно
+   принять, info не требует исправления. Отсутствие reconciliation evidence — warning.
+3. Проверить coverage только для счетов с активностью или ненулевым period-end balance;
+   более поздняя statement date может корректно покрывать конец месяца.
+4. Проверить честный backup status. При `warn` missing/unverified/stale не запускают
+   backup автоматически и не блокируют confirm; при `require_healthy` confirm запрещён.
+5. Owner открывает confirm modal, сверяет totals отдельно по валютам, warning count,
+   сокращённый fingerprint и cutoff, затем подтверждает актуальный preview.
+6. Для поздней корректировки owner вручную открывает только последний closed month и
    обязательно указывает причину. Более ранние периоды открываются в обратном порядке.
-5. После исправлений снова выполнить prepare/confirm для каждого месяца по порядку.
+7. После исправлений снова выполнить prepare/confirm для каждого месяца по порядку.
+
+Viewer может читать periods, immutable history и as-closed reports. Editor может также
+выполнять prepare. Только owner видит и выполняет confirm/reopen; backend всё равно
+повторно проверяет permissions. В history `Legacy unverified` означает отсутствие
+доказуемого fingerprint, а не повреждение записи. В drawer не путайте «Текущие данные» с
+«Закрыто в revision N»: первое перечитывает live ledger, второе всегда берётся из
+immutable snapshot.
 
 Никогда не используйте «новый» idempotency key для слепого повтора после сетевого сбоя:
 повторите тот же confirm/reopen с тем же ключом и payload. Reconciliation уже закрытой

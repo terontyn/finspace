@@ -73,8 +73,16 @@ Legacy confirmed closures получают revision с существующим 
 
 ## Issues
 
-Blockers не позволяют confirm: draft transactions в периоде, in-period sync conflicts,
-ошибка последовательности и unhealthy backup только при policy `require_healthy`.
+Каждая issue имеет единый безопасный UI-контракт: `code`, `severity`, `scope`, `count`,
+локализуемое `message` и минимальные `details`. В `details` не попадают exception text,
+секреты или произвольный внешний payload. Severity имеет ровно три значения:
+`blocker`, `warning`, `info`.
+
+Blockers не позволяют confirm: незавершённый период, draft transactions в closing
+interval, sync conflict с финансовым влиянием на cutoff, ошибка последовательности и
+unhealthy backup только при policy `require_healthy`. Если дату предлагаемой финансовой
+mutation из sync conflict безопасно определить нельзя, конфликт консервативно относится
+к closing interval; известный конфликт вне периода не блокирует весь workspace.
 Backup policy по умолчанию — `warn`.
 
 Warnings не блокируют close: uncategorized/possible duplicate transactions, отрицательные
@@ -82,8 +90,77 @@ Warnings не блокируют close: uncategorized/possible duplicate transac
 требующие внимания, и missing/unverified/stale backup при policy `warn`.
 
 Info: staged imports, out-of-period sync conflicts и отсутствие финансовой активности.
-Если период external conflict невозможно определить надёжно, он классифицируется
-консервативно как in-period blocker; система не угадывает дату по неполному payload.
+Failed outbox является warning, а staging сам по себе не является ledger. Credit account
+без statement-cycle metadata также не превращается в blocker.
+
+## Reconciliation coverage
+
+Month Close не подтверждает сверку и не меняет transaction status. Он только читает
+evidence отдельного Account Reconciliation bounded context и сохраняет рассчитанное
+coverage в revision snapshot.
+
+- eligible account имеет эффективную активность в периоде или ненулевой остаток на конец;
+- нулевая активность вместе с нулевым остатком не создаёт ложное предупреждение;
+- `statement_date >= period end` считается достаточным evidence, включая более позднюю
+  дату выписки;
+- archived account остаётся в coverage, если он влияет на исторический баланс;
+- отсутствие достаточного confirmed evidence даёт `ACCOUNT_NOT_RECONCILED` уровня
+  warning, а не blocker.
+
+Coverage содержит display-safe snapshot имени, типа, валюты, period-end balance,
+причину eligibility и даты evidence. Это описание состояния на момент confirm, а не
+команда для reconciliation domain.
+
+## Backup policy и честное состояние
+
+Month Close не запускает и не настраивает backup. API и UI показывают одно из четырёх
+операционных состояний: `missing`, `unverified`, `stale`, `healthy`.
+
+- `backup_policy=warn`: первые три состояния являются warning и допускают осознанный
+  confirm владельцем;
+- `backup_policy=require_healthy`: любое состояние кроме `healthy` является blocker;
+- отсутствие подтверждённой restore-проверки никогда не отображается как защищённый
+  backup.
+
+## Read API, history и reports
+
+`GET /api/v1/month-close?limit=120` остаётся совместимым и дополнительно возвращает
+`closed_through`, `backup_policy` и компактный список периодов текущего года плюс реально
+существующую историю. Элементы содержат status, version, revision, timestamps, counts и
+backend-calculated `capabilities`.
+
+Immutable read API (viewer и выше):
+
+```text
+GET /api/v1/month-close/{year}/{month}/history?order=newest|oldest&limit=&offset=
+GET /api/v1/month-close/{year}/{month}/history/{revision_number}
+GET /api/v1/month-close/{year}/{month}/history/{revision_number}/report
+GET /api/v1/month-close/{year}/{month}/history/{revision_number}/comparison
+```
+
+History детерминированно сортируется и изолируется по workspace. Mutation endpoints для
+revision отсутствуют. Report имеет `mode=as_closed` и строится только из immutable
+`revision.snapshot`: он не перечитывает live ledger. Comparison явно разделяет
+`as_closed` и `current`, сравнивает totals отдельно по валютам, balances и category
+aggregates и никогда не складывает разные валюты.
+
+Legacy revision возвращается с `legacy_unverified=true` и
+`financial_fingerprint=null`. Это исторический snapshot, но не криптографически
+проверенный снимок.
+
+## UI и права
+
+Экран `/month-close` использует только backend-данные и capabilities:
+
+- viewer видит периоды, issues, history, as-closed report и comparison;
+- editor дополнительно выполняет prepare;
+- owner выполняет prepare, confirm и latest-only reopen.
+
+Backend permissions остаются authoritative. Confirm и reopen открывают keyboard-usable
+modal; reopen требует причину. При `MONTH_CLOSE_PREVIEW_STALE` или
+`MONTH_CLOSE_VERSION_CONFLICT` UI не повторяет mutation автоматически, обновляет данные и
+требует новое явное действие. Транспортный retry одного и того же intent сохраняет его
+`X-Idempotency-Key`; новый intent получает новый ключ.
 
 ## Матрица mutations
 

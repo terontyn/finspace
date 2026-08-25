@@ -87,23 +87,127 @@ export interface NotificationSetting {
   timezone: string;
 }
 
+export interface MonthCloseCapabilities {
+  can_prepare: boolean;
+  can_confirm: boolean;
+  can_reopen: boolean;
+  can_view_history: boolean;
+}
+
+export interface MonthCloseIssue {
+  code: string;
+  severity: "blocker" | "warning" | "info";
+  scope: string;
+  count: number;
+  message: string;
+  details: Record<string, unknown>;
+}
+
 export interface MonthClosure {
   id: string;
   period_month: string;
   status: "draft" | "ready" | "blocked" | "confirmed" | "reopened";
   summary: Record<string, unknown>;
-  blocking_issues: Array<Record<string, unknown>> | null;
-  warning_issues: Array<Record<string, unknown>> | null;
-  info_issues: Array<Record<string, unknown>>;
+  blocking_issues: MonthCloseIssue[] | null;
+  warning_issues: MonthCloseIssue[] | null;
+  info_issues: MonthCloseIssue[];
   prepare_token: string | null;
   prepared_fingerprint: string | null;
   current_revision_id: string | null;
   last_reopened_at: string | null;
   last_reopened_by: string | null;
   last_reopen_reason: string | null;
+  current_revision: number | null;
+  capabilities: MonthCloseCapabilities;
   version: number;
   prepared_at: string | null;
   confirmed_at: string | null;
+}
+
+export interface MonthClosePeriodSummary {
+  period_month: string;
+  status: "not_prepared" | MonthClosure["status"];
+  version: number | null;
+  current_revision: number | null;
+  prepared: boolean;
+  blocker_count: number;
+  warning_count: number;
+  confirmed_at: string | null;
+  reopened_at: string | null;
+  capabilities: MonthCloseCapabilities;
+}
+
+export interface MonthClosurePage extends ApiPage<MonthClosure> {
+  periods: MonthClosePeriodSummary[];
+  closed_through: string | null;
+  backup_policy: "warn" | "require_healthy";
+}
+
+export interface MonthCloseActor {
+  id: string;
+  display_name: string;
+  display_name_source: "current_profile";
+}
+
+export interface MonthCloseRevision {
+  id: string;
+  revision_number: number;
+  period_month: string;
+  period_start_at: string;
+  period_end_at: string;
+  confirmed_at: string;
+  confirmed_by: MonthCloseActor;
+  financial_fingerprint: string | null;
+  legacy_unverified: boolean;
+  source: string;
+  snapshot_summary: Record<string, unknown>;
+  reopened: {
+    reopened_at: string;
+    reopened_by: MonthCloseActor | null;
+    reason: string | null;
+  } | null;
+}
+
+export interface MonthCloseHistoryPage extends ApiPage<MonthCloseRevision> {
+  closure: MonthClosure;
+  order: "newest" | "oldest";
+}
+
+export interface MonthCloseAsClosedReport {
+  mode: "as_closed";
+  period: Record<string, unknown>;
+  revision_number: number;
+  confirmed_at: string;
+  confirmed_by: MonthCloseActor;
+  legacy_unverified: boolean;
+  financial_fingerprint: string | null;
+  currencies: Array<Record<string, unknown>> | null;
+  account_balances: Array<Record<string, unknown>> | null;
+  category_aggregates: Array<Record<string, unknown>> | null;
+  transaction_count: number | null;
+  reconciliation_coverage: Array<Record<string, unknown>> | null;
+  issue_summary: {
+    blocker_count: number;
+    warning_count: number;
+    info_count: number;
+    blockers: MonthCloseIssue[];
+    warnings: MonthCloseIssue[];
+    info: MonthCloseIssue[];
+  } | null;
+  unavailable_sections: string[];
+}
+
+export interface MonthCloseComparison {
+  period_month: string;
+  revision_number: number;
+  as_closed: MonthCloseAsClosedReport;
+  current: Record<string, unknown>;
+  differences: {
+    currencies: Array<Record<string, unknown>>;
+    account_balances: Array<Record<string, unknown>>;
+    category_aggregates: Array<Record<string, unknown>>;
+  };
+  unavailable_sections: string[];
 }
 
 export interface ApiPage<T> {
