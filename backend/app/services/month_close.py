@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ApiError
 from app.db.models.account_reconciliation import AccountReconciliation
+from app.db.models.accounts import Account
 from app.db.models.audit import AuditLog
 from app.db.models.automations import (
     MonthCloseControl,
@@ -22,7 +23,7 @@ from app.db.models.automations import (
 from app.db.models.google_sync import SyncConflict, SyncOutbox
 from app.db.models.imports import ImportBatch, ImportRow
 from app.db.models.transactions import FinancialTransaction
-from app.db.models.users import Workspace
+from app.db.models.users import User, Workspace
 from app.dependencies.context import RequestContext
 from app.services.audit import record_audit, request_uuid
 from app.services.backup_status import get_backup_status
@@ -38,6 +39,108 @@ from app.services.month_close_fingerprint import financial_fingerprint, hash_can
 from app.services.reports import financial_report
 
 EFFECTIVE_STATUSES = ("confirmed", "reconciled")
+
+ISSUE_DEFINITIONS: dict[str, tuple[str, str, str]] = {
+    "MONTH_CLOSE_PERIOD_NOT_ENDED": (
+        "blocker",
+        "period",
+        "The closing month has not ended yet.",
+    ),
+    "DRAFT_TRANSACTIONS": (
+        "blocker",
+        "closing_interval",
+        "The closing interval contains draft transactions.",
+    ),
+    "SYNC_CONFLICTS_IN_PERIOD": (
+        "blocker",
+        "closing_interval",
+        "Open sync conflicts may change the closing interval.",
+    ),
+    "MONTH_CLOSE_SEQUENCE_CONFLICT": (
+        "blocker",
+        "sequence",
+        "Months must be closed sequentially.",
+    ),
+    "UNCATEGORIZED_TRANSACTIONS": (
+        "warning",
+        "period",
+        "Some income or expense transactions are uncategorized.",
+    ),
+    "POSSIBLE_DUPLICATES": (
+        "warning",
+        "period",
+        "Transactions with identical key attributes were found.",
+    ),
+    "NEGATIVE_PERIOD_END_BALANCES": (
+        "warning",
+        "period_end_balances",
+        "Non-credit accounts have negative period-end balances.",
+    ),
+    "ACCOUNT_NOT_RECONCILED": (
+        "warning",
+        "reconciliation",
+        "Not all material accounts have reconciliation evidence through period end.",
+    ),
+    "FAILED_RECURRING_EXECUTIONS": (
+        "warning",
+        "period",
+        "Recurring transaction executions failed during the period.",
+    ),
+    "FAILED_SYNC_OUTBOX": (
+        "warning",
+        "workspace_delivery",
+        "The sync delivery queue contains failed events.",
+    ),
+    "IMPORT_ROWS_REQUIRING_ATTENTION": (
+        "warning",
+        "import_staging",
+        "Import staging contains rows that require attention.",
+    ),
+    "STAGED_IMPORTS": (
+        "info",
+        "import_staging",
+        "Unfinished import batches are not yet part of the ledger.",
+    ),
+    "OUT_OF_PERIOD_SYNC_CONFLICTS": (
+        "info",
+        "outside_closing_interval",
+        "Open sync conflicts do not affect the closing interval.",
+    ),
+    "NO_FINANCIAL_ACTIVITY": (
+        "info",
+        "period",
+        "The month has no effective financial activity.",
+    ),
+}
+
+
+def _issue(
+    code: str,
+    *,
+    count: int = 1,
+    details: dict[str, object] | None = None,
+    severity: str | None = None,
+    scope: str | None = None,
+    message: str | None = None,
+    **compatibility: object,
+) -> dict[str, object]:
+    default_severity, default_scope, default_message = ISSUE_DEFINITIONS.get(
+        code,
+        (
+            "blocker" if code.startswith("BACKUP_") else "warning",
+            "backup" if code.startswith("BACKUP_") else "workspace",
+            "The condition requires attention before month close.",
+        ),
+    )
+    return {
+        "code": code,
+        "severity": severity or default_severity,
+        "scope": scope or default_scope,
+        "count": count,
+        "message": message or default_message,
+        "details": details or {},
+        **compatibility,
+    }
 
 
 def period_date(year: int, month: int) -> date:
@@ -57,7 +160,13 @@ def _validate_completed_period(workspace: Workspace, period: date) -> None:
             status_code=409,
             code="MONTH_CLOSE_PERIOD_NOT_ENDED",
             message="The current or a future month cannot be closed",
-            details={"period": period.strftime("%Y-%m")},
+            details={
+                "period": period.strftime("%Y-%m"),
+                "issue": _issue(
+                    "MONTH_CLOSE_PERIOD_NOT_ENDED",
+                    details={"period": period.strftime("%Y-%m")},
+                ),
+            },
         )
 
 
@@ -133,6 +242,114 @@ async def list_closures(
     return items, total
 
 
+async def read_control(session: AsyncSession, workspace_id: uuid.UUID) -> MonthCloseControl:
+    control = await session.get(MonthCloseControl, workspace_id)
+    if control is not None:
+        return control
+    return MonthCloseControl(
+        workspace_id=workspace_id,
+        closed_through=None,
+        backup_policy="warn",
+        version=1,
+    )
+
+
+def capabilities(
+    *,
+    role: str,
+    workspace: Workspace,
+    period: date,
+    status: str,
+    control: MonthCloseControl,
+) -> dict[str, bool]:
+    _, end = period_bounds(period, workspace.timezone)
+    completed = end <= datetime.now(UTC)
+    can_edit = role in {"editor", "owner"}
+    return {
+        "can_prepare": can_edit and completed and status != "confirmed",
+        "can_confirm": role == "owner" and status == "ready",
+        "can_reopen": (
+            role == "owner"
+            and status == "confirmed"
+            and control.closed_through == month_end(period)
+        ),
+        "can_view_history": True,
+    }
+
+
+async def revision_numbers(
+    session: AsyncSession, closure_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, int]:
+    if not closure_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MonthCloseRevision.closure_id,
+                func.max(MonthCloseRevision.revision_number),
+            )
+            .where(MonthCloseRevision.closure_id.in_(closure_ids))
+            .group_by(MonthCloseRevision.closure_id)
+        )
+    ).all()
+    return {closure_id: int(number) for closure_id, number in rows}
+
+
+async def current_revision_number(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    revision_id: uuid.UUID | None,
+) -> int | None:
+    if revision_id is None:
+        return None
+    number = await session.scalar(
+        select(MonthCloseRevision.revision_number).where(
+            MonthCloseRevision.id == revision_id,
+            MonthCloseRevision.workspace_id == workspace_id,
+        )
+    )
+    return int(number) if number is not None else None
+
+
+async def list_period_summaries(
+    session: AsyncSession,
+    workspace: Workspace,
+    role: str,
+    closures: list[MonthClosure],
+    control: MonthCloseControl,
+) -> list[dict[str, object]]:
+    by_period = {item.period_month: item for item in closures}
+    current = datetime.now(ZoneInfo(workspace.timezone)).date().replace(day=1)
+    periods = set(by_period)
+    periods.update(date(current.year, month, 1) for month in range(1, current.month + 1))
+    numbers = await revision_numbers(session, [item.id for item in closures])
+    result: list[dict[str, object]] = []
+    for period in sorted(periods, reverse=True)[:120]:
+        closure = by_period.get(period)
+        status = closure.status if closure is not None else "not_prepared"
+        result.append(
+            {
+                "period_month": period,
+                "status": status,
+                "version": closure.version if closure is not None else None,
+                "current_revision": numbers.get(closure.id) if closure is not None else None,
+                "prepared": closure is not None and closure.prepared_at is not None,
+                "blocker_count": len(closure.blocking_issues or []) if closure else 0,
+                "warning_count": len(closure.warning_issues or []) if closure else 0,
+                "confirmed_at": closure.confirmed_at if closure is not None else None,
+                "reopened_at": closure.last_reopened_at if closure is not None else None,
+                "capabilities": capabilities(
+                    role=role,
+                    workspace=workspace,
+                    period=period,
+                    status=status,
+                    control=control,
+                ),
+            }
+        )
+    return result
+
+
 def _expected_next_period(control: MonthCloseControl) -> date | None:
     if control.closed_through is None:
         return None
@@ -143,11 +360,16 @@ def _sequence_issue(control: MonthCloseControl, period: date) -> dict[str, objec
     expected = _expected_next_period(control)
     if expected is None or period == expected:
         return None
-    return {
-        "code": "MONTH_CLOSE_SEQUENCE_CONFLICT",
+    details: dict[str, object] = {
         "expected_period": expected.strftime("%Y-%m"),
         "requested_period": period.strftime("%Y-%m"),
     }
+    return _issue(
+        "MONTH_CLOSE_SEQUENCE_CONFLICT",
+        details=details,
+        expected_period=details["expected_period"],
+        requested_period=details["requested_period"],
+    )
 
 
 async def _sequence_issue_for_state(
@@ -172,11 +394,16 @@ async def _sequence_issue_for_state(
     )
     if not legacy_confirmed:
         return None
-    return {
-        "code": "MONTH_CLOSE_SEQUENCE_CONFLICT",
+    details: dict[str, object] = {
         "requested_period": period.strftime("%Y-%m"),
         "reason": "legacy_confirmed_history_is_ambiguous",
     }
+    return _issue(
+        "MONTH_CLOSE_SEQUENCE_CONFLICT",
+        details=details,
+        requested_period=details["requested_period"],
+        reason=details["reason"],
+    )
 
 
 def _normalized_issues(items: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -756,7 +983,7 @@ async def collect_preview(
         blocking.append(sequence)
     draft_count = sum(item.status == "draft" for item in closing_transactions)
     if draft_count:
-        blocking.append({"code": "DRAFT_TRANSACTIONS", "count": draft_count})
+        blocking.append(_issue("DRAFT_TRANSACTIONS", count=draft_count))
 
     uncategorized = sum(
         item.status != "cancelled"
@@ -765,15 +992,15 @@ async def collect_preview(
         for item in period_transactions
     )
     if uncategorized:
-        warnings.append({"code": "UNCATEGORIZED_TRANSACTIONS", "count": uncategorized})
+        warnings.append(_issue("UNCATEGORIZED_TRANSACTIONS", count=uncategorized))
 
     in_period_conflicts, out_of_period_conflicts = await _sync_conflict_counts(
         session, workspace, closing_start, end
     )
     if in_period_conflicts:
-        blocking.append({"code": "SYNC_CONFLICTS_IN_PERIOD", "count": in_period_conflicts})
+        blocking.append(_issue("SYNC_CONFLICTS_IN_PERIOD", count=in_period_conflicts))
     if out_of_period_conflicts:
-        infos.append({"code": "OUT_OF_PERIOD_SYNC_CONFLICTS", "count": out_of_period_conflicts})
+        infos.append(_issue("OUT_OF_PERIOD_SYNC_CONFLICTS", count=out_of_period_conflicts))
 
     failed_outbox = await _count(
         session,
@@ -783,7 +1010,7 @@ async def collect_preview(
         ),
     )
     if failed_outbox:
-        warnings.append({"code": "FAILED_SYNC_OUTBOX", "count": failed_outbox})
+        warnings.append(_issue("FAILED_SYNC_OUTBOX", count=failed_outbox))
 
     invalid_import_rows = await _count(
         session,
@@ -795,12 +1022,7 @@ async def collect_preview(
         ),
     )
     if invalid_import_rows:
-        warnings.append(
-            {
-                "code": "IMPORT_ROWS_REQUIRING_ATTENTION",
-                "count": invalid_import_rows,
-            }
-        )
+        warnings.append(_issue("IMPORT_ROWS_REQUIRING_ATTENTION", count=invalid_import_rows))
     staged_imports = await _count(
         session,
         select(ImportBatch.id).where(
@@ -811,7 +1033,7 @@ async def collect_preview(
         ),
     )
     if staged_imports:
-        infos.append({"code": "STAGED_IMPORTS", "count": staged_imports})
+        infos.append(_issue("STAGED_IMPORTS", count=staged_imports))
 
     failed_recurring = await _count(
         session,
@@ -825,14 +1047,23 @@ async def collect_preview(
         ),
     )
     if failed_recurring:
-        warnings.append({"code": "FAILED_RECURRING_EXECUTIONS", "count": failed_recurring})
+        warnings.append(_issue("FAILED_RECURRING_EXECUTIONS", count=failed_recurring))
 
     backup = await get_backup_status(session)
     if backup.status != "healthy":
-        backup_issue: dict[str, object] = {
-            "code": f"BACKUP_{backup.status.upper()}",
-            "status": backup.status,
-        }
+        backup_code = f"BACKUP_{backup.status.upper()}"
+        backup_issue = _issue(
+            backup_code,
+            severity="blocker" if control.backup_policy == "require_healthy" else "warning",
+            scope="backup",
+            message={
+                "missing": "No backup has been registered.",
+                "unverified": "The latest backup has not been restore-verified.",
+                "stale": "The latest verified backup is stale.",
+            }.get(backup.status, "Backup state requires attention."),
+            details={"status": backup.status},
+            status=backup.status,
+        )
         if control.backup_policy == "require_healthy":
             blocking.append(backup_issue)
         else:
@@ -851,18 +1082,51 @@ async def collect_preview(
     )
     duplicate_count = sum(count - 1 for count in duplicate_keys.values() if count > 1)
     if duplicate_count:
-        warnings.append({"code": "POSSIBLE_DUPLICATES", "count": duplicate_count})
+        warnings.append(_issue("POSSIBLE_DUPLICATES", count=duplicate_count))
 
     balances = await calculate_balances(session, workspace.id, as_of=end)
-    negative = [item for item in balances if item.balance < Decimal("0")]
+    account_types = {
+        item.id: item.account_type
+        for item in (
+            list(
+                (
+                    await session.scalars(
+                        select(Account).where(
+                            Account.workspace_id == workspace.id,
+                            Account.id.in_([balance.account_id for balance in balances]),
+                        )
+                    )
+                ).all()
+            )
+            if balances
+            else []
+        )
+    }
+    negative = [
+        item
+        for item in balances
+        if item.balance < Decimal("0") and account_types.get(item.account_id) != "credit_card"
+    ]
     if negative:
-        warnings.append({"code": "NEGATIVE_PERIOD_END_BALANCES", "count": len(negative)})
+        warnings.append(
+            _issue(
+                "NEGATIVE_PERIOD_END_BALANCES",
+                count=len(negative),
+                details={"account_ids": [str(item.account_id) for item in negative]},
+            )
+        )
     reconciliation_coverage = await _reconciliation_coverage(
         session, workspace.id, period, balances, period_transactions
     )
-    unreconciled = [item for item in reconciliation_coverage if not item["covered"]]
+    unreconciled = [item for item in reconciliation_coverage if item["state"] == "not_reconciled"]
     if unreconciled:
-        warnings.append({"code": "ACCOUNT_NOT_RECONCILED", "count": len(unreconciled)})
+        warnings.append(
+            _issue(
+                "ACCOUNT_NOT_RECONCILED",
+                count=len(unreconciled),
+                details={"account_ids": [str(item["account_id"]) for item in unreconciled]},
+            )
+        )
 
     report = await financial_report(
         session,
@@ -874,7 +1138,7 @@ async def collect_preview(
     currencies = [item.model_dump(mode="json") for item in report.groups]
     effective_count = sum(int(item["transactions_count"]) for item in currencies)
     if effective_count == 0:
-        infos.append({"code": "NO_FINANCIAL_ACTIVITY", "count": 0})
+        infos.append(_issue("NO_FINANCIAL_ACTIVITY", count=0))
     fingerprint = await financial_fingerprint(session, workspace.id, end)
     summary: dict[str, object] = {
         "transaction_count": effective_count,
@@ -1005,6 +1269,17 @@ async def _reconciliation_coverage(
     )
     if not active_account_ids:
         return []
+    accounts = {
+        item.id: item
+        for item in (
+            await session.scalars(
+                select(Account).where(
+                    Account.workspace_id == workspace_id,
+                    Account.id.in_(active_account_ids),
+                )
+            )
+        ).all()
+    }
     rows = (
         await session.execute(
             select(
@@ -1014,22 +1289,492 @@ async def _reconciliation_coverage(
             .where(
                 AccountReconciliation.workspace_id == workspace_id,
                 AccountReconciliation.account_id.in_(active_account_ids),
+                AccountReconciliation.status == "confirmed",
             )
             .group_by(AccountReconciliation.account_id)
         )
     ).all()
     latest = {account_id: statement_date for account_id, statement_date in rows}
     required_date = month_end(period)
+    result: list[dict[str, object]] = []
+    transaction_account_ids = {
+        item.account_id for item in period_transactions if item.status in EFFECTIVE_STATUSES
+    } | {
+        item.target_account_id
+        for item in period_transactions
+        if item.status in EFFECTIVE_STATUSES and item.target_account_id is not None
+    }
+    for account_id in sorted(active_account_ids, key=str):
+        account = accounts.get(account_id)
+        statement_date = latest.get(account_id)
+        covered = statement_date is not None and statement_date >= required_date
+        balance = balance_by_account.get(account_id)
+        reason = (
+            "period_activity"
+            if account_id in transaction_account_ids
+            else "non_zero_period_end_balance"
+        )
+        result.append(
+            {
+                "account_id": str(account_id),
+                "account_name": account.name if account is not None else "Счёт",
+                "account_type": account.account_type if account is not None else "other",
+                "currency": (
+                    account.currency
+                    if account is not None
+                    else str(getattr(balance, "currency", ""))
+                ),
+                "period_end_balance": (str(balance.balance) if balance is not None else None),
+                "state": "reconciled" if covered else "not_reconciled",
+                "covered": covered,
+                "required_statement_date": required_date.isoformat(),
+                "latest_statement_date": statement_date.isoformat() if statement_date else None,
+                "eligibility_reason": reason,
+                "archived": bool(account.is_archived) if account is not None else False,
+            }
+        )
+    return result
+
+
+def _public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in snapshot.items() if not key.startswith("_")}
+
+
+def _snapshot_optional_list(snapshot: dict[str, Any], key: str) -> list[dict[str, Any]] | None:
+    value = snapshot.get(key)
+    return _as_dict_list(value) if isinstance(value, list) else None
+
+
+def _snapshot_optional_int(snapshot: dict[str, Any], key: str) -> int | None:
+    value = snapshot.get(key)
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_dict_list(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _as_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _actor(user: User | None, user_id: uuid.UUID) -> dict[str, object]:
+    return {
+        "id": user_id,
+        "display_name": user.display_name if user is not None else "Finspace user",
+        "display_name_source": "current_profile",
+    }
+
+
+async def _revision_rows(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    period: date,
+    *,
+    order: str,
+    limit: int,
+    offset: int,
+) -> tuple[MonthClosure, list[MonthCloseRevision], int]:
+    closure = await get_closure(session, workspace_id, period)
+    filters = (
+        MonthCloseRevision.workspace_id == workspace_id,
+        MonthCloseRevision.closure_id == closure.id,
+        MonthCloseRevision.period_month == period,
+    )
+    total = int(
+        await session.scalar(select(func.count()).select_from(MonthCloseRevision).where(*filters))
+        or 0
+    )
+    ordering = (
+        (MonthCloseRevision.revision_number.asc(), MonthCloseRevision.id.asc())
+        if order == "oldest"
+        else (MonthCloseRevision.revision_number.desc(), MonthCloseRevision.id.desc())
+    )
+    rows = list(
+        (
+            await session.scalars(
+                select(MonthCloseRevision)
+                .where(*filters)
+                .order_by(*ordering)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    )
+    return closure, rows, total
+
+
+async def _reopen_metadata(
+    session: AsyncSession,
+    closure: MonthClosure,
+    revisions: list[MonthCloseRevision],
+) -> dict[int, dict[str, object]]:
+    if not revisions:
+        return {}
+    all_revisions = list(
+        (
+            await session.scalars(
+                select(MonthCloseRevision)
+                .where(
+                    MonthCloseRevision.workspace_id == closure.workspace_id,
+                    MonthCloseRevision.closure_id == closure.id,
+                )
+                .order_by(MonthCloseRevision.revision_number.asc())
+            )
+        ).all()
+    )
+    audits = list(
+        (
+            await session.scalars(
+                select(AuditLog)
+                .where(
+                    AuditLog.workspace_id == closure.workspace_id,
+                    AuditLog.entity_id == closure.id,
+                    AuditLog.action == "month_close.reopen",
+                )
+                .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            )
+        ).all()
+    )
+    actor_ids = {item.actor_user_id for item in audits if item.actor_user_id is not None}
+    users = {
+        item.id: item
+        for item in (
+            list((await session.scalars(select(User).where(User.id.in_(actor_ids)))).all())
+            if actor_ids
+            else []
+        )
+    }
+    result: dict[int, dict[str, object]] = {}
+    for index, revision in enumerate(all_revisions):
+        next_confirmed_at = (
+            all_revisions[index + 1].confirmed_at if index + 1 < len(all_revisions) else None
+        )
+        audit = next(
+            (
+                item
+                for item in audits
+                if item.created_at >= revision.confirmed_at
+                and (next_confirmed_at is None or item.created_at < next_confirmed_at)
+            ),
+            None,
+        )
+        if audit is None:
+            continue
+        after = dict(audit.after_data or {})
+        result[revision.revision_number] = {
+            "reopened_at": audit.created_at,
+            "reopened_by": (
+                _actor(users.get(audit.actor_user_id), audit.actor_user_id)
+                if audit.actor_user_id is not None
+                else None
+            ),
+            "reason": str(after["reason"]) if after.get("reason") is not None else None,
+        }
+    return result
+
+
+async def list_history(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    period: date,
+    *,
+    order: str,
+    limit: int,
+    offset: int,
+) -> tuple[MonthClosure, list[dict[str, object]], int]:
+    closure, revisions, total = await _revision_rows(
+        session,
+        workspace_id,
+        period,
+        order=order,
+        limit=limit,
+        offset=offset,
+    )
+    user_ids = {item.confirmed_by for item in revisions}
+    users = {
+        item.id: item
+        for item in (
+            list((await session.scalars(select(User).where(User.id.in_(user_ids)))).all())
+            if user_ids
+            else []
+        )
+    }
+    reopen = await _reopen_metadata(session, closure, revisions)
+    return (
+        closure,
+        [
+            {
+                "id": item.id,
+                "revision_number": item.revision_number,
+                "period_month": item.period_month,
+                "period_start_at": item.period_start_at,
+                "period_end_at": item.period_end_at,
+                "confirmed_at": item.confirmed_at,
+                "confirmed_by": _actor(users.get(item.confirmed_by), item.confirmed_by),
+                "financial_fingerprint": item.financial_fingerprint,
+                "legacy_unverified": item.legacy_unverified,
+                "source": item.source,
+                "snapshot_summary": _public_snapshot(dict(item.snapshot)),
+                "reopened": reopen.get(item.revision_number),
+            }
+            for item in revisions
+        ],
+        total,
+    )
+
+
+async def get_revision(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    period: date,
+    revision_number: int,
+) -> MonthCloseRevision:
+    revision = await session.scalar(
+        select(MonthCloseRevision)
+        .join(MonthClosure, MonthClosure.id == MonthCloseRevision.closure_id)
+        .where(
+            MonthCloseRevision.workspace_id == workspace_id,
+            MonthCloseRevision.period_month == period,
+            MonthCloseRevision.revision_number == revision_number,
+            MonthClosure.workspace_id == workspace_id,
+            MonthClosure.period_month == period,
+        )
+    )
+    if revision is None:
+        raise ApiError(
+            status_code=404,
+            code="MONTH_CLOSE_REVISION_NOT_FOUND",
+            message="Month close revision was not found",
+        )
+    return revision
+
+
+async def revision_detail(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    period: date,
+    revision_number: int,
+) -> dict[str, object]:
+    revision = await get_revision(session, workspace_id, period, revision_number)
+    user = await session.get(User, revision.confirmed_by)
+    closure = await get_closure(session, workspace_id, period)
+    reopen = await _reopen_metadata(session, closure, [revision])
+    return {
+        "id": revision.id,
+        "revision_number": revision.revision_number,
+        "period_month": revision.period_month,
+        "period_start_at": revision.period_start_at,
+        "period_end_at": revision.period_end_at,
+        "confirmed_at": revision.confirmed_at,
+        "confirmed_by": _actor(user, revision.confirmed_by),
+        "financial_fingerprint": revision.financial_fingerprint,
+        "legacy_unverified": revision.legacy_unverified,
+        "source": revision.source,
+        "snapshot_summary": _public_snapshot(dict(revision.snapshot)),
+        "reopened": reopen.get(revision.revision_number),
+    }
+
+
+async def as_closed_report(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    period: date,
+    revision_number: int,
+) -> dict[str, object]:
+    revision = await get_revision(session, workspace_id, period, revision_number)
+    user = await session.get(User, revision.confirmed_by)
+    snapshot = _public_snapshot(dict(revision.snapshot))
+    issue_value = snapshot.get("issues")
+    issues: dict[str, object] | None = None
+    if isinstance(issue_value, dict) and all(
+        isinstance(issue_value.get(key), list) for key in ("blocking", "warnings", "info")
+    ):
+        issues = dict(issue_value)
+    issues_available = issues is not None
+    available_issues = issues or {}
+    blocking = _as_dict_list(available_issues.get("blocking"))
+    warnings = _as_dict_list(available_issues.get("warnings"))
+    infos = _as_dict_list(available_issues.get("info"))
+    period_value = snapshot.get("period")
+    sections: dict[str, object | None] = {
+        "currencies": _snapshot_optional_list(snapshot, "currencies"),
+        "account_balances": _snapshot_optional_list(snapshot, "account_balances"),
+        "category_aggregates": _snapshot_optional_list(snapshot, "category_aggregates"),
+        "transaction_count": _snapshot_optional_int(snapshot, "transaction_count"),
+        "reconciliation_coverage": _snapshot_optional_list(snapshot, "reconciliation_coverage"),
+        "issue_summary": (
+            {
+                "blocker_count": len(blocking),
+                "warning_count": len(warnings),
+                "info_count": len(infos),
+                "blockers": blocking,
+                "warnings": warnings,
+                "info": infos,
+            }
+            if issues_available
+            else None
+        ),
+    }
+    return {
+        "mode": "as_closed",
+        "period": (
+            dict(period_value)
+            if isinstance(period_value, dict)
+            else {
+                "month": period.isoformat(),
+                "start_at": revision.period_start_at.isoformat(),
+                "end_at": revision.period_end_at.isoformat(),
+            }
+        ),
+        "revision_number": revision.revision_number,
+        "confirmed_at": revision.confirmed_at,
+        "confirmed_by": _actor(user, revision.confirmed_by),
+        "legacy_unverified": revision.legacy_unverified,
+        "financial_fingerprint": revision.financial_fingerprint,
+        **sections,
+        "unavailable_sections": [key for key, value in sections.items() if value is None],
+    }
+
+
+def _values_by_key(items: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
+    return {str(item.get(key)): item for item in items}
+
+
+def _comparison_items(
+    closed_items: list[dict[str, Any]],
+    current_items: list[dict[str, Any]],
+    *,
+    key: str,
+) -> list[dict[str, object]]:
+    closed = _values_by_key(closed_items, key)
+    current = _values_by_key(current_items, key)
     return [
         {
-            "account_id": str(account_id),
-            "covered": latest.get(account_id) is not None and latest[account_id] >= required_date,
-            "latest_statement_date": (
-                latest[account_id].isoformat() if latest.get(account_id) else None
-            ),
+            key: item_key,
+            "as_closed": closed.get(item_key),
+            "current": current.get(item_key),
+            "changed": closed.get(item_key) != current.get(item_key),
         }
-        for account_id in sorted(active_account_ids, key=str)
+        for item_key in sorted(set(closed) | set(current))
     ]
+
+
+async def compare_with_current(
+    session: AsyncSession,
+    workspace: Workspace,
+    period: date,
+    revision_number: int,
+) -> dict[str, object]:
+    closed = await as_closed_report(session, workspace.id, period, revision_number)
+    unavailable = set(_as_string_list(closed.get("unavailable_sections")))
+    _, end = period_bounds(period, workspace.timezone)
+    report = await financial_report(
+        session,
+        workspace,
+        date_from=period,
+        date_to=month_end(period),
+        currency=None,
+    )
+    currencies = [item.model_dump(mode="json") for item in report.groups]
+    comparable_currencies = [
+        {
+            key: item[key]
+            for key in (
+                "currency",
+                "income",
+                "expense",
+                "adjustment",
+                "net_cashflow",
+                "transfer_volume",
+                "transactions_count",
+            )
+        }
+        for item in currencies
+    ]
+    balances = await calculate_balances(session, workspace.id, as_of=end)
+    current_balances = [item.model_dump(mode="json") for item in balances]
+    current_categories = [
+        {"currency": item["currency"], "categories": item["spending_by_category"]}
+        for item in currencies
+    ]
+    period_transactions = list(
+        (
+            await session.scalars(
+                select(FinancialTransaction).where(
+                    FinancialTransaction.workspace_id == workspace.id,
+                    FinancialTransaction.occurred_at >= report.period.cutoff_from,
+                    FinancialTransaction.occurred_at < report.period.cutoff_to,
+                    FinancialTransaction.deleted_at.is_(None),
+                )
+            )
+        ).all()
+    )
+    coverage = await _reconciliation_coverage(
+        session, workspace.id, period, balances, period_transactions
+    )
+    current = {
+        "mode": "current",
+        "period": report.period.model_dump(mode="json"),
+        "currencies": currencies,
+        "account_balances": current_balances,
+        "category_aggregates": current_categories,
+        "transaction_count": sum(int(item["transactions_count"]) for item in currencies),
+        "reconciliation_coverage": coverage,
+    }
+    closed_currencies = [
+        {
+            key: item.get(key)
+            for key in (
+                "currency",
+                "income",
+                "expense",
+                "adjustment",
+                "net_cashflow",
+                "transfer_volume",
+                "transactions_count",
+            )
+        }
+        for item in _as_dict_list(closed.get("currencies"))
+    ]
+    closed_balances = _as_dict_list(closed.get("account_balances"))
+    closed_categories = _as_dict_list(closed.get("category_aggregates"))
+    return {
+        "period_month": period,
+        "revision_number": revision_number,
+        "as_closed": closed,
+        "current": current,
+        "differences": {
+            "currencies": (
+                []
+                if "currencies" in unavailable
+                else _comparison_items(closed_currencies, comparable_currencies, key="currency")
+            ),
+            "account_balances": (
+                []
+                if "account_balances" in unavailable
+                else _comparison_items(
+                    closed_balances,
+                    current_balances,
+                    key="account_id",
+                )
+            ),
+            "category_aggregates": (
+                []
+                if "category_aggregates" in unavailable
+                else _comparison_items(
+                    closed_categories,
+                    current_categories,
+                    key="currency",
+                )
+            ),
+        },
+        "unavailable_sections": sorted(unavailable),
+    }
 
 
 async def _count(session: AsyncSession, query: Any) -> int:

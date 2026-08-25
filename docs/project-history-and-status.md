@@ -283,6 +283,29 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
 
 Контракт и mutation matrix: [Hard Month Close](month-close.md).
 
+### Hard Month Close Stage C/D 2026-08-25
+
+Статус: **реализовано в рабочей ветке и проверяется локально; не развёрнуто**.
+
+- Preview issues приведены к явному безопасному контракту blocker/warning/info с
+  корректным closing scope; failed outbox не блокирует, staging не считается ledger.
+- Добавлено reconciliation coverage: поздняя statement date допустима, отсутствие
+  evidence является warning, а zero-activity/zero-balance account не создаёт ложный шум.
+- API публикует current-year/history periods, backend capabilities, immutable revision
+  history/detail, as-closed report только из snapshot и current comparison по валютам,
+  остаткам и категориям.
+- Legacy revisions честно маркируются `legacy_unverified` без вымышленного fingerprint.
+- `/month-close` получил production UI: issues по severity, реальные totals/balances,
+  coverage, role-aware prepare/confirm/reopen, доступные с клавиатуры modals, timeline и
+  as-closed drawer. Stale/version conflict требует нового явного действия, transport retry
+  сохраняет idempotency key.
+- Backup не настраивался: UI только отражает `missing/unverified/stale/healthy` согласно
+  policy `warn` или `require_healthy`.
+- Тяжёлой E2E-инфраструктуры в проекте нет; lifecycle покрыт PostgreSQL/API и frontend
+  interaction tests без добавления нового framework.
+
+Полный продуктовый и API-контракт: [Hard Month Close](month-close.md).
+
 ## Нереализованное или неподтверждённое
 
 - n8n и Telegram не активированы на production-сервере.

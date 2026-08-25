@@ -463,6 +463,13 @@ class MonthCloseReopenRequest(ApiModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class MonthCloseCapabilities(ApiModel):
+    can_prepare: bool = False
+    can_confirm: bool = False
+    can_reopen: bool = False
+    can_view_history: bool = True
+
+
 class MonthClosureResponse(ApiModel):
     id: uuid.UUID
     workspace_id: uuid.UUID
@@ -482,6 +489,8 @@ class MonthClosureResponse(ApiModel):
     last_reopened_at: datetime | None = None
     last_reopened_by: uuid.UUID | None = None
     last_reopen_reason: str | None = None
+    current_revision: int | None = None
+    capabilities: MonthCloseCapabilities = Field(default_factory=MonthCloseCapabilities)
     version: int
     created_at: datetime
     updated_at: datetime
@@ -489,4 +498,80 @@ class MonthClosureResponse(ApiModel):
 
 class MonthClosurePage(ApiModel):
     items: list[MonthClosureResponse]
+    periods: list["MonthClosePeriodSummary"] = Field(default_factory=list)
+    closed_through: date | None = None
+    backup_policy: Literal["warn", "require_healthy"] = "warn"
     page: PageMeta
+
+
+class MonthClosePeriodSummary(ApiModel):
+    period_month: date
+    status: Literal["not_prepared", "draft", "ready", "blocked", "confirmed", "reopened"]
+    version: int | None
+    current_revision: int | None
+    prepared: bool
+    blocker_count: int
+    warning_count: int
+    confirmed_at: datetime | None
+    reopened_at: datetime | None
+    capabilities: MonthCloseCapabilities
+
+
+class MonthCloseActor(ApiModel):
+    id: uuid.UUID
+    display_name: str
+    display_name_source: Literal["current_profile"] = "current_profile"
+
+
+class MonthCloseReopenMetadata(ApiModel):
+    reopened_at: datetime
+    reopened_by: MonthCloseActor | None
+    reason: str | None
+
+
+class MonthCloseRevisionResponse(ApiModel):
+    id: uuid.UUID
+    revision_number: int
+    period_month: date
+    period_start_at: datetime
+    period_end_at: datetime
+    confirmed_at: datetime
+    confirmed_by: MonthCloseActor
+    financial_fingerprint: str | None
+    legacy_unverified: bool
+    source: str
+    snapshot_summary: dict[str, Any]
+    reopened: MonthCloseReopenMetadata | None = None
+
+
+class MonthCloseHistoryPage(ApiModel):
+    closure: MonthClosureResponse
+    items: list[MonthCloseRevisionResponse]
+    page: PageMeta
+    order: Literal["newest", "oldest"]
+
+
+class MonthCloseAsClosedReport(ApiModel):
+    mode: Literal["as_closed"] = "as_closed"
+    period: dict[str, Any]
+    revision_number: int
+    confirmed_at: datetime
+    confirmed_by: MonthCloseActor
+    legacy_unverified: bool
+    financial_fingerprint: str | None
+    currencies: list[dict[str, Any]] | None
+    account_balances: list[dict[str, Any]] | None
+    category_aggregates: list[dict[str, Any]] | None
+    transaction_count: int | None
+    reconciliation_coverage: list[dict[str, Any]] | None
+    issue_summary: dict[str, Any] | None
+    unavailable_sections: list[str] = Field(default_factory=list)
+
+
+class MonthCloseComparisonResponse(ApiModel):
+    period_month: date
+    revision_number: int
+    as_closed: MonthCloseAsClosedReport
+    current: dict[str, Any]
+    differences: dict[str, Any]
+    unavailable_sections: list[str] = Field(default_factory=list)
