@@ -62,6 +62,19 @@ STATUS_VALUES = {
     "Отменена": "cancelled",
 }
 
+LEGACY_REJECTION_STATUS_CODES = {
+    "ACCOUNT_CURRENCY_IMMUTABLE": 409,
+    "ACCOUNT_NOT_FOUND": 422,
+    "CATEGORY_NOT_FOUND": 422,
+    "INVALID_REFUND": 422,
+    "INVALID_TRANSFER": 422,
+    "MONTH_CLOSED": 409,
+    "RECONCILED_TRANSACTION_IMMUTABLE": 409,
+    "TRANSACTION_NOT_FOUND": 404,
+    "VALIDATION_ERROR": 422,
+    "WORKSPACE_ACCESS_DENIED": 403,
+}
+
 
 async def authenticate_webhook(
     session: AsyncSession,
@@ -373,6 +386,71 @@ async def _normalized_row(
     return {str(index): value for index, value in enumerate(row)}, str(row[24])
 
 
+def _canonical_event_payload(payload: WebhookChangeRequest) -> dict[str, Any]:
+    return canonical_value(payload.model_dump(mode="json"))
+
+
+def _assert_event_identity(inbox: SyncInbox, canonical_payload: dict[str, Any]) -> None:
+    if canonical_value(inbox.payload) == canonical_payload:
+        return
+    raise ApiError(
+        status_code=409,
+        code="GOOGLE_SYNC_EVENT_IDEMPOTENCY_CONFLICT",
+        message="Google synchronization event ID was already used for another payload",
+    )
+
+
+async def _persist_rejected_response(
+    session: AsyncSession,
+    inbox: SyncInbox,
+    error: ApiError,
+) -> None:
+    if error.status_code >= 500:
+        # Infrastructure/server failures are not terminal business outcomes.
+        # Roll back the provisional inbox row so the same event can be retried.
+        await session.rollback()
+        return
+    result: dict[str, Any] = {
+        "terminal": True,
+        "status_code": error.status_code,
+        "code": error.code,
+        "message": error.message,
+    }
+    if error.details is not None:
+        result["details"] = canonical_value(error.details)
+    inbox.status = "rejected"
+    inbox.validation_errors = [result]
+    inbox.last_error_code = error.code
+    inbox.processed_at = datetime.now(UTC)
+    await session.commit()
+
+
+def _raise_rejected_response(inbox: SyncInbox) -> None:
+    result = inbox.validation_errors[0] if inbox.validation_errors else {}
+    code = result.get("code") or inbox.last_error_code
+    message = result.get("message")
+    status_code = result.get("status_code")
+    details = result.get("details")
+    if not isinstance(status_code, int) and isinstance(code, str):
+        status_code = LEGACY_REJECTION_STATUS_CODES.get(code)
+    if not isinstance(status_code, int) or not isinstance(code, str):
+        raise ApiError(
+            status_code=409,
+            code="GOOGLE_SYNC_TERMINAL_RESULT_UNAVAILABLE",
+            message="Stored terminal synchronization result cannot be replayed safely",
+        )
+    raise ApiError(
+        status_code=status_code,
+        code=code,
+        message=(
+            message
+            if isinstance(message, str)
+            else "Google synchronization event was terminally rejected"
+        ),
+        details=details if isinstance(details, dict) else None,
+    )
+
+
 async def _duplicate_response(
     session: AsyncSession,
     binding: GoogleSheetBinding,
@@ -587,14 +665,13 @@ async def _apply_reference_change(
     context: RequestContext,
 ) -> WebhookChangeResponse:
     if payload.entity_id is None:
-        inbox.status = "rejected"
-        inbox.last_error_code = "VALIDATION_ERROR"
-        await session.commit()
-        raise ApiError(
+        error = ApiError(
             status_code=422,
             code="VALIDATION_ERROR",
             message="New rows are currently supported only for transactions",
         )
+        await _persist_rejected_response(session, inbox, error)
+        raise error
     if payload.entity_type == "account":
         entity: Account | Category | None = await session.scalar(
             select(Account).where(
@@ -612,14 +689,13 @@ async def _apply_reference_change(
             )
         )
     if entity is None:
-        inbox.status = "rejected"
-        inbox.last_error_code = "WORKSPACE_ACCESS_DENIED"
-        await session.commit()
-        raise ApiError(
+        error = ApiError(
             status_code=403,
             code="WORKSPACE_ACCESS_DENIED",
             message="Entity does not belong to the binding workspace",
         )
+        await _persist_rejected_response(session, inbox, error)
+        raise error
     if payload.expected_version != entity.version:
         return await _reference_conflict(
             session, binding, inbox, payload, entity, context.request_id
@@ -709,16 +785,19 @@ async def _apply_reference_change(
             normalized = category_row(entity, parent_name=parent.name if parent else None)
             normalized_hash = str(normalized[13])
     except (ApiError, ValueError) as exc:
-        code = exc.code if isinstance(exc, ApiError) else "VALIDATION_ERROR"
-        message = exc.message if isinstance(exc, ApiError) else "Field value is invalid"
-        inbox.status = "rejected"
-        inbox.validation_errors = [{"code": code, "message": message}]
-        inbox.last_error_code = code
-        inbox.processed_at = datetime.now(UTC)
-        await session.commit()
+        error = (
+            exc
+            if isinstance(exc, ApiError)
+            else ApiError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Field value is invalid",
+            )
+        )
+        await _persist_rejected_response(session, inbox, error)
         if isinstance(exc, ApiError):
             raise
-        raise ApiError(status_code=422, code=code, message=message) from exc
+        raise error from exc
     inbox.status = "applied"
     inbox.entity_id = entity.id
     inbox.processed_at = datetime.now(UTC)
@@ -745,6 +824,30 @@ async def apply_change(
     *,
     request_id: str,
 ) -> WebhookChangeResponse:
+    idempotency_key = f"{binding.id}:{payload.event_id}"
+    canonical_payload = _canonical_event_payload(payload)
+    existing_inbox = await session.scalar(
+        select(SyncInbox).where(SyncInbox.idempotency_key == idempotency_key)
+    )
+    if existing_inbox is not None:
+        _assert_event_identity(existing_inbox, canonical_payload)
+        if existing_inbox.status == "conflict":
+            return await _conflict_response(
+                session,
+                binding,
+                existing_inbox,
+                payload.event_id,
+            )
+        if existing_inbox.status == "rejected":
+            _raise_rejected_response(existing_inbox)
+        if existing_inbox.status == "applied":
+            return await _duplicate_response(session, binding, existing_inbox, payload.event_id)
+        if existing_inbox.status != "received":
+            raise ApiError(
+                status_code=500,
+                code="GOOGLE_SYNC_INBOX_STATE_INVALID",
+                message="Stored synchronization event has an invalid state",
+            )
     if payload.spreadsheet_id != binding.spreadsheet_id:
         raise ApiError(
             status_code=403,
@@ -780,32 +883,8 @@ async def apply_change(
             code="GOOGLE_SHEET_TEMPLATE_INVALID",
             message="Technical fields are read-only",
         )
-    idempotency_key = f"{binding.id}:{payload.event_id}"
-    existing_inbox = await session.scalar(
-        select(SyncInbox).where(SyncInbox.idempotency_key == idempotency_key)
-    )
-    if existing_inbox is not None and existing_inbox.status != "rejected":
-        if existing_inbox.status == "conflict":
-            return await _conflict_response(
-                session,
-                binding,
-                existing_inbox,
-                payload.event_id,
-            )
-        return await _duplicate_response(session, binding, existing_inbox, payload.event_id)
     if existing_inbox is not None:
         inbox = existing_inbox
-        inbox.sheet_name = payload.sheet_name
-        inbox.source_row_number = payload.row_number
-        inbox.entity_type = payload.entity_type
-        inbox.entity_id = payload.entity_id
-        inbox.expected_version = payload.expected_version
-        inbox.payload = canonical_value(payload.model_dump(mode="json"))
-        inbox.row_hash = payload.row_hash
-        inbox.status = "received"
-        inbox.validation_errors = None
-        inbox.last_error_code = None
-        inbox.processed_at = None
     else:
         inbox = SyncInbox(
             workspace_id=binding.workspace_id,
@@ -816,7 +895,7 @@ async def apply_change(
             entity_type=payload.entity_type,
             entity_id=payload.entity_id,
             expected_version=payload.expected_version,
-            payload=canonical_value(payload.model_dump(mode="json")),
+            payload=canonical_payload,
             row_hash=payload.row_hash,
             idempotency_key=idempotency_key,
             status="received",
@@ -839,12 +918,11 @@ async def apply_change(
             include_deleted=True,
         )
         if transaction is None:
-            inbox.status = "rejected"
-            inbox.last_error_code = "TRANSACTION_NOT_FOUND"
-            await session.commit()
-            raise ApiError(
+            error = ApiError(
                 status_code=404, code="TRANSACTION_NOT_FOUND", message="Transaction was not found"
             )
+            await _persist_rejected_response(session, inbox, error)
+            raise error
         if payload.expected_version != transaction.version:
             conflict = SyncConflict(
                 workspace_id=binding.workspace_id,
@@ -912,11 +990,7 @@ async def apply_change(
                 audit_source="google_sheets",
             )
     except ApiError as exc:
-        inbox.status = "rejected"
-        inbox.validation_errors = [{"code": exc.code, "message": exc.message}]
-        inbox.last_error_code = exc.code
-        inbox.processed_at = datetime.now(UTC)
-        await session.commit()
+        await _persist_rejected_response(session, inbox, exc)
         raise
     inbox.status = "applied"
     inbox.entity_id = transaction.id
