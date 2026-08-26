@@ -76,7 +76,8 @@ systemctl is-active cloudflared
 - Serve: frontend `127.0.0.1:3000` на HTTPS 443 внутри tailnet;
 - Funnel: backend `127.0.0.1:8000` на публичном HTTPS 8443;
 - cloudflared: `inactive`, автозапуск `disabled`;
-- n8n отсутствует в списке, пока автоматизации не настроены.
+- n8n запущен и healthy, остаётся локальным и изолированным от прямого доступа к
+  PostgreSQL/Redis.
 
 ### Health без вывода данных
 
@@ -191,6 +192,10 @@ read-only backup/data mounts, которые на Docker Desktop могут во
 denied`, но не содержат исходного Python-кода.
 
 ### Проверка Compose перед deploy
+
+Production topology требует Docker Compose 2.24.4+, потому что
+`compose.production.yml` использует `!override`. До будущего deploy validator обязан
+завершиться с PASS.
 
 Локально проверяются оба режима без вывода полного rendered config:
 
@@ -401,8 +406,12 @@ secret. Secret не записывайте в cells и не отправляйт
 
 ## 10. n8n и Telegram
 
-Сейчас функциональность реализована, но production n8n не запущен. Не включайте его до
-выполнения всех условий:
+Production n8n запущен и healthy на `127.0.0.1:5678`. Он остаётся изолированным от прямого
+доступа к PostgreSQL/Redis и работает только через ограниченный Backend Automation API.
+Обычный Finspace application deploy не должен останавливать, пересоздавать или менять n8n,
+если release не содержит n8n-specific changes.
+
+Сохраняются обязательные инварианты:
 
 1. создан настоящий случайный `N8N_ENCRYPTION_KEY` и сохранён вне Git;
 2. продуман отдельный backup volume `finspace_n8n_data` вместе с этим ключом;
@@ -412,7 +421,8 @@ secret. Secret не записывайте в cells и не отправляйт
 6. workflows импортированы, credentials назначены и каждый workflow вручную проверен;
 7. n8n остаётся на `127.0.0.1:5678` и не публикуется через Funnel/Cloudflare.
 
-После этого используются инструкции [n8n.md](n8n.md), [Telegram](telegram.md) и
+Для n8n-specific изменений используются инструкции [n8n.md](n8n.md),
+[Telegram](telegram.md) и
 [automation security](automation-security.md).
 
 ## 11. Типовые неисправности

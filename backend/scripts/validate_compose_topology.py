@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_COMPOSE = PROJECT_ROOT / "docker-compose.yml"
 PRODUCTION_COMPOSE = PROJECT_ROOT / "compose.production.yml"
+MINIMUM_COMPOSE_VERSION = (2, 24, 4)
 
 PRODUCTION_BACKEND_MOUNTS = {
     "/app/data/imports": (PROJECT_ROOT / "data" / "imports", False),
@@ -26,6 +28,41 @@ PRODUCTION_BACKEND_MOUNTS = {
 
 class TopologyError(RuntimeError):
     pass
+
+
+def parse_compose_version(raw_version: str) -> tuple[int, int, int]:
+    version = raw_version.strip()
+    match = re.fullmatch(
+        r"v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?",
+        version,
+    )
+    if match is None:
+        raise TopologyError("Unable to determine Docker Compose version")
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def require_supported_compose_version(raw_version: str) -> tuple[int, int, int]:
+    version = parse_compose_version(raw_version)
+    if version < MINIMUM_COMPOSE_VERSION:
+        raise TopologyError("Docker Compose >= 2.24.4 is required for !override")
+    return version
+
+
+def _check_compose_version() -> None:
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version", "--short"],
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise TopologyError("Unable to determine Docker Compose version") from error
+    if result.returncode != 0:
+        raise TopologyError("Unable to determine Docker Compose version")
+    require_supported_compose_version(result.stdout)
 
 
 def _compose_config(mode: str) -> dict[str, Any]:
@@ -194,6 +231,9 @@ def main() -> int:
                 validate_production(config)
             print(f"{args.mode} topology: PASS")
             return 0
+
+        if args.mode in ("production", "all"):
+            _check_compose_version()
 
         modes = ("development", "production") if args.mode == "all" else (args.mode,)
         for mode in modes:

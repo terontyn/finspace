@@ -128,7 +128,7 @@ SHA-256 и пробным восстановлением в отдельную �
 Google Sheets поддерживает одну зарегистрированную книгу на workspace; произвольные и
 несколько книг не синхронизируются. Self-hosted production frontend доступен только внутри
 tailnet, а публичный Funnel 8443 используется Apps Script Bridge. Нет OCR, банковских/ИИ
-API, MFA и подтверждённого managed/offsite encrypted backup. Код n8n и Telegram реализован,
-но их production-активация выполняется отдельно; n8n должен оставаться локальным и видеть
-только ограниченный Backend API. Будущие интеграции работают через API/outbox/staging, а
-не напрямую пишут в PostgreSQL.
+API, MFA и подтверждённого managed/offsite encrypted backup. Production n8n запущен и
+healthy, остаётся локальным и видит только ограниченный Backend API; Telegram
+настраивается отдельно. Будущие интеграции работают через API/outbox/staging, а не
+напрямую пишут в PostgreSQL.

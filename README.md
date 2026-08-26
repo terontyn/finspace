@@ -50,7 +50,9 @@ Bootstrap не обходит аутентификацию и недоступе
 Базовый `docker-compose.yml` предназначен для разработки и сохраняет source mounts и
 backend `--reload`. Production обязан использовать `compose.production.yml`: backend,
 sync-worker и frontend работают из собранных images без source mounts, backend — без
-`--reload`, frontend — через `npm run start`. Проверка обоих режимов:
+`--reload`, frontend — через `npm run start`. Production topology требует Docker Compose
+2.24.4+, потому что `compose.production.yml` использует `!override`. Перед deploy validator
+обязан завершиться с PASS:
 
 ```bash
 python3 backend/scripts/validate_compose_topology.py all

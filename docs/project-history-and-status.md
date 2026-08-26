@@ -249,7 +249,7 @@ evidence-пунктов получили `passed`; применялись тол
 
 ### Этап 6 — n8n, Telegram и автоматизации
 
-Статус: **реализовано в коде; на текущем сервере не активировано**.
+Статус: **реализовано; production n8n запущен и healthy**.
 
 - Добавлены workspace-scoped service accounts и hash-only ServiceKey.
 - n8n изолирован в отдельной сети и не имеет прямого доступа к PostgreSQL/Redis.
@@ -258,9 +258,9 @@ evidence-пунктов получили `passed`; применялись тол
 - Финансовые правила и audit остаются в Backend; n8n — только планировщик и транспорт.
 - Workflow защищены idempotency key; потенциально опасные действия требуют подтверждения.
 
-Для активации нужны отдельный `N8N_ENCRYPTION_KEY`, owner setup n8n, service account,
-ServiceKey credential и Telegram bot credential. До этого нельзя считать Telegram и
-автоматические расписания работающими.
+Production n8n остаётся отдельным operational контуром: обычный Finspace application
+deploy не должен его менять без n8n-specific release. Статус Telegram и отдельных
+расписаний проверяется независимо от health самого n8n.
 
 Подробности: [ADR 0007](decisions/0007-n8n-automation-boundary.md), [n8n](n8n.md),
 [Telegram](telegram.md).
@@ -346,7 +346,8 @@ ServiceKey credential и Telegram bot credential. До этого нельзя �
 
 ## Нереализованное или неподтверждённое
 
-- n8n и Telegram не активированы на production-сервере.
+- Production-статус Telegram и отдельных n8n workflows не подтверждён текущей
+  code-only проверкой; сам n8n запущен и healthy.
 - Не подтверждена регулярная внешняя зашифрованная копия backup вне сервера.
 - MFA отсутствует.
 - Банковские интеграции отсутствуют. На будущее рассмотрен только официальный BCS Trade
