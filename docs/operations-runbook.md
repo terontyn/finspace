@@ -16,9 +16,23 @@
 | Локальный frontend на сервере | `http://127.0.0.1:3000` |
 | Локальный backend на сервере | `http://127.0.0.1:8000` |
 | Production Compose wrapper | `sudo finspace-compose` |
+| Version-controlled production override | `/opt/finspace/compose.production.yml` |
 
 Production UI доступен устройствам, вошедшим в нужный tailnet. Порт 8443 публичен только
 для Apps Script Bridge. Не публикуйте PostgreSQL, Redis, Adminer или n8n.
+
+### Production Google inventory
+
+Эти идентификаторы не являются секретами, но относятся только к действующему production
+контуру и не должны переноситься в runtime-код:
+
+| Объект | Активное значение |
+|---|---|
+| Spreadsheet ID | `1Iw2lyS69SV6UAPsACmwu5kw-hCb4MpjhqEDryhh3j1s` |
+| Bound Apps Script ID | `1tRKP3LLs7R16uws0KX6nwPk70JvbJYUXYPzL-GygdC0NkuZo12O_gDXD` |
+
+Script ID `1Ldrqn4OW62A-iK3R-mPkvftMsCLnXshVtvV12LSBMqd94DevwXDpdkah` — старый
+недоступный проект. Не выполняйте для него `clasp push`, deploy или изменение manifest.
 
 ## 2. Ежедневная работа
 
@@ -62,7 +76,8 @@ systemctl is-active cloudflared
 - Serve: frontend `127.0.0.1:3000` на HTTPS 443 внутри tailnet;
 - Funnel: backend `127.0.0.1:8000` на публичном HTTPS 8443;
 - cloudflared: `inactive`, автозапуск `disabled`;
-- n8n отсутствует в списке, пока автоматизации не настроены.
+- n8n запущен и healthy, остаётся локальным и изолированным от прямого доступа к
+  PostgreSQL/Redis.
 
 ### Health без вывода данных
 
@@ -132,6 +147,12 @@ restart проверьте `/login` и восстановление сессии
 Deploy не должен быть первым способом диагностики. Сначала зафиксируйте симптом, commit,
 status и логи. Не deploy-те dirty server worktree.
 
+Production application code запускается из собранных Docker images. В итоговой
+конфигурации backend и sync-worker не имеют bind mount исходников, backend не использует
+`--reload`, frontend запускает `npm run start` и также не монтирует исходники или cache
+volumes. Базовый `docker-compose.yml` остаётся development-конфигурацией и сам по себе на
+production не используется.
+
 ### Перед изменением локально
 
 ```powershell
@@ -170,43 +191,97 @@ docker compose exec backend mypy app
 read-only backup/data mounts, которые на Docker Desktop могут возвращать `Permission
 denied`, но не содержат исходного Python-кода.
 
-### Frontend-only deploy на Ubuntu
+### Проверка Compose перед deploy
 
-Commit/push выполняются только после разрешения владельца. Затем на сервере:
+Production topology требует Docker Compose 2.24.4+, потому что
+`compose.production.yml` использует `!override`. До будущего deploy validator обязан
+завершиться с PASS.
+
+Локально проверяются оба режима без вывода полного rendered config:
 
 ```bash
-ssh finspace
-cd /opt/finspace
-git status --short
-git pull --ff-only
-sudo finspace-compose build frontend
-sudo finspace-compose up -d --no-deps frontend
-sudo finspace-compose ps frontend
-sudo finspace-compose logs --tail 100 frontend
-curl -fsS -o /dev/null -w 'login: HTTP %{http_code}\n' http://127.0.0.1:3000/login
+python3 backend/scripts/validate_compose_topology.py all
 ```
 
-Frontend должен запускать `next start`, иметь production healthcheck и не иметь bind
-mount исходников, `/app/.next` или `/app/node_modules`. Server override должен
-соответствовать `compose.production.yml`.
+На сервере проверяется именно merged config production wrapper:
 
-### Deploy с backend/migration
+```bash
+sudo finspace-compose config --quiet
+sudo finspace-compose config --format json |
+  python3 backend/scripts/validate_compose_topology.py production --stdin
+```
 
-Сначала создайте и проверьте backup. Затем, только после просмотра новой migration:
+Validator печатает только PASS/FAIL и не выводит environment. Полный `compose config` не
+прикладывайте к отчёту: он может содержать secrets после интерполяции.
+
+### Полный deploy на Ubuntu
+
+Commit/push и deploy выполняются только после разрешения владельца. `release_ref` должен
+быть точным проверенным tag или commit, а не плавающей веткой. Безопасная
+последовательность обязательна:
+
+1. Проверить clean worktree, текущую ревизию, backup policy и создать проверяемую точку
+   восстановления.
+2. Остановить только application services; PostgreSQL и Redis оставить работающими.
+3. Получить и выбрать точный release.
+4. Установить version-controlled production override и проверить merged Compose.
+5. Собрать images target release.
+6. Выполнить migration из нового backend image.
+7. Запустить backend.
+8. Дождаться readiness.
+9. Запустить sync-worker и frontend.
+10. Выполнить smoke tests и проверить логи.
 
 ```bash
 ssh finspace
 cd /opt/finspace
+
 git status --short
-git pull --ff-only
+git rev-parse HEAD
+sudo finspace-compose --profile tools run --rm backup \
+  sh /scripts/verify-backup.sh --create
+
+sudo finspace-compose stop frontend sync-worker backend
+
+git fetch --tags origin
+release_ref="EXACT_TAG_OR_COMMIT"
+git switch --detach "$release_ref"
+git rev-parse HEAD
+git status --short
+
+sudo cp -a /etc/finspace/compose.server.yml \
+  "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
+sudo install -o root -g root -m 0644 \
+  /opt/finspace/compose.production.yml /etc/finspace/compose.server.yml
+sudo finspace-compose config --quiet
+sudo finspace-compose config --format json |
+  python3 backend/scripts/validate_compose_topology.py production --stdin
+
 sudo finspace-compose build backend sync-worker frontend
-sudo finspace-compose run --rm backend alembic upgrade head
-sudo finspace-compose up -d backend sync-worker frontend
+sudo finspace-compose run --rm --no-deps backend alembic upgrade head
+
+sudo finspace-compose up -d --no-deps --force-recreate backend
+curl -fsS http://127.0.0.1:8000/api/v1/health/ready
+
+sudo finspace-compose up -d --no-deps --force-recreate sync-worker frontend
 sudo finspace-compose ps
+curl -fsS -o /dev/null -w 'login: HTTP %{http_code}\n' \
+  http://127.0.0.1:3000/login
+docker exec finspace-backend-1 python scripts/google_config_check.py
 ```
 
-После deploy выполните health/readiness, frontend login, Google config check и проверьте
-heartbeat. Никогда не делайте автоматический downgrade production DB.
+Нельзя выполнять `git pull` поверх работающего source-mounted backend: изменение checkout
+немедленно меняет исполняемый код и обходит build/restart boundary. В корректной
+production-топологии source mounts отсутствуют, но application services всё равно
+останавливаются до смены release, чтобы порядок deploy оставался однозначным. Никогда не
+делайте автоматический downgrade production DB.
+
+### Frontend-only release
+
+Для доказанно frontend-only изменения допустимо остановить только frontend, но до build
+всё равно нужно выбрать точный release, установить/проверить production override и
+подтвердить отсутствие mounts. После запуска проверьте `/login`, hydration и отсутствие
+`/_next/webpack-hmr`.
 
 Подробности production frontend: [frontend-production.md](frontend-production.md).
 
@@ -331,8 +406,12 @@ secret. Secret не записывайте в cells и не отправляйт
 
 ## 10. n8n и Telegram
 
-Сейчас функциональность реализована, но production n8n не запущен. Не включайте его до
-выполнения всех условий:
+Production n8n запущен и healthy на `127.0.0.1:5678`. Он остаётся изолированным от прямого
+доступа к PostgreSQL/Redis и работает только через ограниченный Backend Automation API.
+Обычный Finspace application deploy не должен останавливать, пересоздавать или менять n8n,
+если release не содержит n8n-specific changes.
+
+Сохраняются обязательные инварианты:
 
 1. создан настоящий случайный `N8N_ENCRYPTION_KEY` и сохранён вне Git;
 2. продуман отдельный backup volume `finspace_n8n_data` вместе с этим ключом;
@@ -342,7 +421,8 @@ secret. Secret не записывайте в cells и не отправляйт
 6. workflows импортированы, credentials назначены и каждый workflow вручную проверен;
 7. n8n остаётся на `127.0.0.1:5678` и не публикуется через Funnel/Cloudflare.
 
-После этого используются инструкции [n8n.md](n8n.md), [Telegram](telegram.md) и
+Для n8n-specific изменений используются инструкции [n8n.md](n8n.md),
+[Telegram](telegram.md) и
 [automation security](automation-security.md).
 
 ## 11. Типовые неисправности

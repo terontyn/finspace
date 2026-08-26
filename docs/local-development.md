@@ -2,12 +2,24 @@
 
 ## Жизненный цикл
 
+Обычный `docker compose` читает только `docker-compose.yml`. Это намеренный development
+режим: backend/sync-worker используют source mounts, backend запускается с `--reload`, а
+frontend использует development target и cache volumes. Не добавляйте
+`compose.production.yml` к локальной команде разработки.
+
 1. Скопируйте `.env.example` в `.env` и замените пароль PostgreSQL/JWT secret.
 2. Запустите `docker compose up -d --build`.
 3. Выполните `docker compose exec backend alembic upgrade head`.
 4. Зарегистрируйтесь через `/register` или задайте пароль dev-пользователю через `/login`.
 5. Перед передачей изменений запустите все проверки.
 6. Остановите среду через `docker compose down` без `--volumes`.
+
+После изменения Compose проверьте, что development удобство сохранено, а production не
+унаследовал dev defaults:
+
+```bash
+python3 backend/scripts/validate_compose_topology.py all
+```
 
 ## Auth в development
 

@@ -21,6 +21,25 @@ Google API никогда не вызывается внутри финансо�
 n8n находится в отдельной сети только с Backend; PostgreSQL и Redis остаются только в
 `finspace`. Workflow не являются источником финансовой истины и не выполняют SQL.
 
+## Development и production runtime
+
+Compose намеренно имеет два режима. Базовый `docker-compose.yml` — development: backend
+и sync-worker получают bind mount исходников, backend использует `uvicorn --reload`, а
+frontend использует development image, source mount и cache volumes. Это обеспечивает
+быстрый локальный цикл и не является production-конфигурацией.
+
+Production всегда объединяет base с `compose.production.yml`. Override полностью заменяет
+backend mounts утверждённым набором runtime data, удаляет mounts worker/frontend, задаёт
+backend-команду без `--reload` и production target/`npm run start` для frontend. Поэтому
+application code backend, worker и frontend поступает только из собранных immutable
+images; изменение server checkout само по себе не меняет работающий код.
+
+Итоговая топология проверяется
+`backend/scripts/validate_compose_topology.py`: validator не печатает rendered environment
+и прекращает deploy при утечке dev mount/command в production. Канонический server
+override хранится в Git как `compose.production.yml`, а root-owned копия подключается
+production wrapper из `/etc/finspace/compose.server.yml`.
+
 ## Backend-слои
 
 ```text
@@ -109,7 +128,7 @@ SHA-256 и пробным восстановлением в отдельную �
 Google Sheets поддерживает одну зарегистрированную книгу на workspace; произвольные и
 несколько книг не синхронизируются. Self-hosted production frontend доступен только внутри
 tailnet, а публичный Funnel 8443 используется Apps Script Bridge. Нет OCR, банковских/ИИ
-API, MFA и подтверждённого managed/offsite encrypted backup. Код n8n и Telegram реализован,
-но их production-активация выполняется отдельно; n8n должен оставаться локальным и видеть
-только ограниченный Backend API. Будущие интеграции работают через API/outbox/staging, а
-не напрямую пишут в PostgreSQL.
+API, MFA и подтверждённого managed/offsite encrypted backup. Production n8n запущен и
+healthy, остаётся локальным и видит только ограниченный Backend API; Telegram
+настраивается отдельно. Будущие интеграции работают через API/outbox/staging, а не
+напрямую пишут в PostgreSQL.

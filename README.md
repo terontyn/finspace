@@ -44,8 +44,22 @@ docker compose ps
 либо на странице входа подготовьте development-пользователя и задайте ему пароль.
 Bootstrap не обходит аутентификацию и недоступен вне development.
 
-Текущая вершина миграций — `0006_automations_telegram`. Миграции `0001`–`0005`
-сохранены без изменений.
+Текущая вершина миграций — `0008_month_close_invariants`. Применённые миграции
+`0001`–`0008` не редактируются задним числом.
+
+Базовый `docker-compose.yml` предназначен для разработки и сохраняет source mounts и
+backend `--reload`. Production обязан использовать `compose.production.yml`: backend,
+sync-worker и frontend работают из собранных images без source mounts, backend — без
+`--reload`, frontend — через `npm run start`. Production topology требует Docker Compose
+2.24.4+, потому что `compose.production.yml` использует `!override`. Перед deploy validator
+обязан завершиться с PASS:
+
+```bash
+python3 backend/scripts/validate_compose_topology.py all
+```
+
+Безопасный production release-порядок описан в
+[эксплуатационной инструкции](docs/operations-runbook.md#6-безопасный-deploy).
 
 ## Автоматизации и Telegram
 
@@ -130,9 +144,9 @@ make backup-cleanup
 
 ## Проверки
 
-Backend работает с отдельной `TEST_DATABASE_URL` и проверяет миграционный цикл
-вплоть до `0006_automations_telegram`, проверяет цикл `0005 → 0006 → 0005 → 0006`, затем
-удаляет только уникальную тестовую БД.
+Backend работает с отдельной `TEST_DATABASE_URL` и проверяет миграционный цикл вплоть до
+`0008_month_close_invariants`, включая повторный downgrade до
+`0005_apps_script_bridge` и upgrade до head, затем удаляет только уникальную тестовую БД.
 
 ```powershell
 make test

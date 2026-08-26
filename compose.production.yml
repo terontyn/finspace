@@ -1,4 +1,23 @@
 services:
+  backend:
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    volumes: !override
+      - ./data/imports:/app/data/imports
+      - ./data/acceptance:/app/data/acceptance
+      - ./backups/acceptance-reports:/app/data/acceptance-reports
+      - ./backups:/app/backups:ro
+      - ./google-apps-script:/app/google-apps-script:ro
+      - ./n8n:/app/n8n:ro
+
+  sync-worker:
+    volumes: !reset []
+
   frontend:
     build:
       target: production
