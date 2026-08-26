@@ -19,6 +19,7 @@ from app.db.models.automations import (
     TelegramLink,
     TelegramLinkCode,
 )
+from app.db.models.budgets import BudgetAllocation, BudgetPeriod, BudgetPlanRevision
 from app.db.models.categories import Category
 from app.db.models.google_sync import (
     GoogleConnection,
@@ -41,6 +42,9 @@ __all__ = [
     "AuditLog",
     "AuthSession",
     "AutomationRun",
+    "BudgetAllocation",
+    "BudgetPeriod",
+    "BudgetPlanRevision",
     "Category",
     "FinancialTransaction",
     "GoogleConnection",
