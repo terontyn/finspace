@@ -35,11 +35,13 @@ unallocated = planning_capacity - allocated
 actual_net_cashflow = actual_income - actual_expense + adjustment
 ```
 
-`rollover_in` is a planning allowance, not account cash. The current period's rollover policy
-chooses how its predecessor's remaining amount enters the plan: `none` carries zero,
-`positive_only` carries only the positive part, and `full` carries the signed amount. Live
-rollover is marked provisional while its predecessor can still change. Negative `remaining` and
-`unallocated` values are valid.
+`rollover_in` is a planning allowance, not account cash. `rollover_policy` is the outgoing
+policy owned by this BudgetPeriod: it determines how this period's remaining amount enters the
+next month. `rollover.source_policy` is the predecessor policy actually used to calculate the
+current incoming rollover. `none` carries zero, `positive_only` carries only the positive part,
+and `full` carries the signed amount. Live rollover is marked provisional while its predecessor
+can still be created, restored, or changed. A frozen predecessor is read only from its immutable
+Month Close revision. Negative `remaining` and `unallocated` values are valid.
 
 ## Commands, history, and permissions
 
@@ -52,6 +54,8 @@ Delete is a soft delete of the period. Allocations remain as restore and audit e
 keeps the same period ID and rejects plans whose categories are no longer valid. Immutable plan
 revisions and aggregate audit snapshots include all allocations. Viewers can read budgets and
 history; editors and owners can mutate them. Service accounts have no Stage A Budget endpoint.
+Copy revisions retain the domain action `copy`; aggregate audit uses the existing `create` or
+`update` action and records `budget_operation=copy` plus source-period provenance.
 
 ## Month Close
 

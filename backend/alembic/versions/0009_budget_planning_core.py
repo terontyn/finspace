@@ -20,34 +20,8 @@ UUID = postgresql.UUID(as_uuid=True)
 JSONB = postgresql.JSONB(astext_type=sa.Text())
 TIMESTAMP = sa.DateTime(timezone=True)
 
-STAGE6_AUDIT_ACTIONS = (
-    "'create', 'update', 'archive', 'delete', 'restore', 'cancel', 'reconcile', "
-    "'user.register', 'user.login', 'user.logout', 'auth.session.revoked', "
-    "'import.upload', 'import.mapping', 'import.validate', 'import.commit', "
-    "'import.rollback', 'backup.created', 'backup.verified', 'restore.verified', "
-    "'google.connect', 'google.disconnect', 'google.revoke', 'sheet.create', "
-    "'sheet.initialize', 'sheet.pause', 'sheet.resume', 'sheet.full_export', "
-    "'sheet.reconcile', 'sheet.webhook_secret.rotate', 'sync.push', 'sync.pull', "
-    "'sync.conflict', 'sync.conflict.resolve', 'sync.error', 'template.upgrade', "
-    "'sheet.bridge.create', 'sheet.bridge.register', 'sheet.bridge.secret.rotate', "
-    "'sheet.bridge.delete', 'sync.ack', 'sync.heartbeat', "
-    "'service_account.create', 'service_account.key.rotate', 'service_account.revoke', "
-    "'automation.run', 'recurring.create', 'recurring.update', 'recurring.execute', "
-    "'recurring.pause', 'recurring.resume', 'telegram.link', 'telegram.unlink', "
-    "'telegram.intent.create', 'telegram.intent.confirm', 'telegram.intent.cancel', "
-    "'report.weekly.generate', 'report.uncategorized.generate', "
-    "'month_close.prepare', 'month_close.confirm', 'month_close.reopen', "
-    "'backup.remote.copy'"
-)
-
 
 def upgrade() -> None:
-    op.drop_constraint("ck_audit_log_action", "audit_log", type_="check")
-    op.create_check_constraint(
-        "ck_audit_log_action",
-        "audit_log",
-        f"action IN ({STAGE6_AUDIT_ACTIONS}, 'copy')",
-    )
     op.create_table(
         "budget_periods",
         sa.Column("id", UUID, nullable=False),
@@ -162,8 +136,3 @@ def downgrade() -> None:
     op.drop_table("budget_plan_revisions")
     op.drop_table("budget_allocations")
     op.drop_table("budget_periods")
-    op.drop_constraint("ck_audit_log_action", "audit_log", type_="check")
-    op.execute(sa.text("DELETE FROM audit_log WHERE action = 'copy'"))
-    op.create_check_constraint(
-        "ck_audit_log_action", "audit_log", f"action IN ({STAGE6_AUDIT_ACTIONS})"
-    )

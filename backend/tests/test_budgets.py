@@ -2,6 +2,7 @@ import asyncio
 import uuid
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -250,6 +251,14 @@ def test_canonical_budget_snapshot_is_stable_and_allocation_sorted() -> None:
         "1.2000",
         "2.3456",
     ]
+
+
+def test_budget_migration_does_not_change_global_audit_contract() -> None:
+    migration = (
+        Path(__file__).parents[1] / "alembic/versions/0009_budget_planning_core.py"
+    ).read_text(encoding="utf-8")
+    assert "ck_audit_log_action" not in migration
+    assert "DELETE FROM audit_log" not in migration
 
 
 def test_actual_projection_exact_categories_refunds_statuses_and_currency(
@@ -534,7 +543,7 @@ def test_partial_split_refund_rounding_exactly_matches_reports(client: TestClien
     assert report_actuals == actuals
 
 
-def test_rollover_policies_missing_deleted_currency_and_negative_values(
+def test_live_predecessor_owns_rollover_policy_and_missing_is_provisional(
     client: TestClient,
 ) -> None:
     _, headers = _register(client, "Budget rollover")
@@ -565,47 +574,19 @@ def test_rollover_policies_missing_deleted_currency_and_negative_values(
         "2026-07",
         "RUB",
         planned_income="10",
-        rollover_policy="positive_only",
+        rollover_policy="none",
         allocations=[{"category_id": category["id"], "planned_amount": "55"}],
     ).json()
     assert july["rollover"] == {
         "amount": "40.0000",
-        "policy": "positive_only",
+        "source_policy": "positive_only",
         "provisional": True,
     }
+    assert july["rollover_policy"] == "none"
     assert july["planning_capacity"] == "50.0000"
     assert july["unallocated"] == "-5.0000"
 
-    august_none = _budget(
-        client,
-        headers,
-        "2026-08",
-        "RUB",
-        rollover_policy="none",
-    ).json()
-    assert august_none["rollover"] == {
-        "amount": "0.0000",
-        "policy": "none",
-        "provisional": False,
-    }
-
-    updated = _budget(
-        client,
-        headers,
-        "2026-06",
-        "RUB",
-        rollover_policy="full",
-        allocations=[{"category_id": category["id"], "planned_amount": "50"}],
-        version=int(june["version"]),
-    )
-    assert updated.status_code == 200, updated.text
-    assert updated.json()["remaining"] == "-10.0000"
-    july_live = client.get("/api/v1/budgets/2026-07/RUB", headers=headers).json()
-    assert july_live["rollover"]["amount"] == "0.0000"
-    assert july_live["rollover"]["policy"] == "positive_only"
-    assert july_live["remaining"] == "55.0000"
-
-    july_full_response = _budget(
+    july_changed = _budget(
         client,
         headers,
         "2026-07",
@@ -613,22 +594,63 @@ def test_rollover_policies_missing_deleted_currency_and_negative_values(
         planned_income="10",
         rollover_policy="full",
         allocations=[{"category_id": category["id"], "planned_amount": "55"}],
-        version=july_live["version"],
+        version=july["version"],
     )
-    assert july_full_response.status_code == 200, july_full_response.text
-    july_full = july_full_response.json()
-    assert july_full["rollover"]["amount"] == "-10.0000"
-    assert july_full["rollover"]["policy"] == "full"
+    assert july_changed.status_code == 200, july_changed.text
+    assert july_changed.json()["rollover"] == {
+        "amount": "40.0000",
+        "source_policy": "positive_only",
+        "provisional": True,
+    }
+    assert july_changed.json()["rollover_policy"] == "full"
+
+    june_none = _budget(
+        client,
+        headers,
+        "2026-06",
+        "RUB",
+        rollover_policy="none",
+        allocations=allocation,
+        version=int(june["version"]),
+    )
+    assert june_none.status_code == 200, june_none.text
+    assert june_none.json()["remaining"] == "40.0000"
+    july_live = client.get("/api/v1/budgets/2026-07/RUB", headers=headers).json()
+    assert july_live["rollover"]["amount"] == "0.0000"
+    assert july_live["rollover"]["source_policy"] == "none"
+    assert july_live["rollover_policy"] == "full"
+    assert july_live["remaining"] == "55.0000"
+
+    june_full = _budget(
+        client,
+        headers,
+        "2026-06",
+        "RUB",
+        rollover_policy="full",
+        allocations=[{"category_id": category["id"], "planned_amount": "50"}],
+        version=june_none.json()["version"],
+    )
+    assert june_full.status_code == 200, june_full.text
+    assert june_full.json()["remaining"] == "-10.0000"
+    july_after_predecessor_change = client.get(
+        "/api/v1/budgets/2026-07/RUB", headers=headers
+    ).json()
+    assert july_after_predecessor_change["rollover"] == {
+        "amount": "-10.0000",
+        "source_policy": "full",
+        "provisional": True,
+    }
+    assert july_after_predecessor_change["rollover_policy"] == "full"
 
     deleted = client.delete(
-        f"/api/v1/budgets/2026-06/RUB?version={updated.json()['version']}",
+        f"/api/v1/budgets/2026-06/RUB?version={june_full.json()['version']}",
         headers={**headers, "X-Idempotency-Key": f"delete-{uuid.uuid4()}"},
     )
     assert deleted.status_code == 200
     without_predecessor = client.get("/api/v1/budgets/2026-07/RUB", headers=headers).json()
     assert without_predecessor["rollover"] == {
         "amount": "0.0000",
-        "policy": "full",
+        "source_policy": "none",
         "provisional": True,
     }
     usd = _budget(
@@ -641,38 +663,115 @@ def test_rollover_policies_missing_deleted_currency_and_negative_values(
     ).json()
     assert usd["rollover"] == {
         "amount": "0.0000",
-        "policy": "full",
+        "source_policy": "none",
         "provisional": True,
     }
 
 
 def test_frozen_predecessor_rollover_uses_close_snapshot(client: TestClient) -> None:
-    _, headers = _register(client, "Budget frozen predecessor")
+    cases = (
+        ("full", "50", "60", "none", "-10.0000"),
+        ("positive_only", "50", "60", "none", "0.0000"),
+        ("none", "100", "60", "full", "0.0000"),
+    )
+    for index, (june_policy, planned, expense, july_policy, expected) in enumerate(cases):
+        _, headers = _register(client, f"Budget frozen predecessor {index}")
+        account = _account(client, headers)
+        category = _category(client, headers)
+        _budget(
+            client,
+            headers,
+            "2026-06",
+            "RUB",
+            rollover_policy=june_policy,
+            allocations=[{"category_id": category["id"], "planned_amount": planned}],
+        )
+        _transaction(
+            client,
+            headers,
+            account_id=str(account["id"]),
+            transaction_type="expense",
+            amount=expense,
+            category_id=str(category["id"]),
+            occurred_at="2026-06-10T10:00:00Z",
+        )
+        june_close = _prepare(client, headers, "2026-06")
+        _confirm(client, headers, "2026-06", june_close)
+
+        july = _budget(
+            client,
+            headers,
+            "2026-07",
+            "RUB",
+            rollover_policy=july_policy,
+            allocations=[{"category_id": category["id"], "planned_amount": "50"}],
+        )
+        assert july.status_code == 200, july.text
+        assert july.json()["rollover"] == {
+            "amount": expected,
+            "source_policy": june_policy,
+            "provisional": False,
+        }
+        assert july.json()["rollover_policy"] == july_policy
+
+    _, empty_headers = _register(client, "Budget frozen missing predecessor")
+    empty_close = _prepare(client, empty_headers, "2026-06")
+    _confirm(client, empty_headers, "2026-06", empty_close)
+    after_empty_close = _budget(
+        client,
+        empty_headers,
+        "2026-07",
+        "RUB",
+        rollover_policy="full",
+    )
+    assert after_empty_close.status_code == 200, after_empty_close.text
+    assert after_empty_close.json()["rollover"] == {
+        "amount": "0.0000",
+        "source_policy": "none",
+        "provisional": False,
+    }
+
+
+def test_copy_preserves_outgoing_policy_but_not_incoming_policy(client: TestClient) -> None:
+    _, headers = _register(client, "Budget copy rollover ownership")
+    account = _account(client, headers)
     category = _category(client, headers)
+    _budget(
+        client,
+        headers,
+        "2026-05",
+        "RUB",
+        rollover_policy="full",
+        allocations=[{"category_id": category["id"], "planned_amount": "10"}],
+    )
     _budget(
         client,
         headers,
         "2026-06",
         "RUB",
-        rollover_policy="full",
+        rollover_policy="none",
         allocations=[{"category_id": category["id"], "planned_amount": "100"}],
     )
-    june_close = _prepare(client, headers, "2026-06")
-    _confirm(client, headers, "2026-06", june_close)
-
-    july = _budget(
+    _transaction(
         client,
         headers,
-        "2026-07",
-        "RUB",
-        rollover_policy="full",
-        allocations=[{"category_id": category["id"], "planned_amount": "50"}],
+        account_id=str(account["id"]),
+        transaction_type="expense",
+        amount="60",
+        category_id=str(category["id"]),
+        occurred_at="2026-06-10T10:00:00Z",
     )
-    assert july.status_code == 200, july.text
-    assert july.json()["rollover"] == {
-        "amount": "100.0000",
-        "policy": "full",
-        "provisional": False,
+    copied = client.post(
+        "/api/v1/budgets/2026-07/RUB/copy",
+        headers={**headers, "X-Idempotency-Key": f"copy-{uuid.uuid4()}"},
+        json={"source_period": "2026-05"},
+    )
+    assert copied.status_code == 200, copied.text
+    assert copied.json()["rollover_policy"] == "full"
+    assert copied.json()["rollover"] == {
+        "amount": "0.0000",
+        "source_policy": "none",
+        "provisional": True,
     }
 
 
@@ -1034,12 +1133,17 @@ def test_lifecycle_idempotency_revisions_audit_permissions_and_no_google_outbox(
         headers=owner,
     )
     assert copy_audit.status_code == 200
-    copy_items = [item for item in copy_audit.json()["items"] if item["action"] == "copy"]
+    copy_items = [
+        item
+        for item in copy_audit.json()["items"]
+        if item["after_data"].get("budget_operation") == "copy"
+    ]
     assert len(copy_items) == 2
+    assert {item["action"] for item in copy_items} == {"create", "update"}
     assert all(item["after_data"]["copy_source_period"] == "2026-07" for item in copy_items)
     assert all(item["after_data"]["copy_source_budget_id"] == created["id"] for item in copy_items)
 
-    async def original_revision_response() -> dict[str, object]:
+    async def revision_evidence() -> tuple[dict[str, object], list[str]]:
         async with AsyncSessionFactory() as session:
             revision = await session.scalar(
                 select(BudgetPlanRevision).where(
@@ -1048,9 +1152,24 @@ def test_lifecycle_idempotency_revisions_audit_permissions_and_no_google_outbox(
                 )
             )
             assert revision is not None
-            return dict(revision.response_snapshot)
+            copy_revision_actions = list(
+                (
+                    await session.scalars(
+                        select(BudgetPlanRevision.action)
+                        .where(
+                            BudgetPlanRevision.workspace_id
+                            == uuid.UUID(str(identity["workspace"]["id"])),
+                            BudgetPlanRevision.budget_period_id == uuid.UUID(str(copied["id"])),
+                        )
+                        .order_by(BudgetPlanRevision.revision_number)
+                    )
+                ).all()
+            )
+            return dict(revision.response_snapshot), copy_revision_actions
 
-    assert asyncio.run(original_revision_response()) == created
+    original_response, copy_revision_actions = asyncio.run(revision_evidence())
+    assert original_response == created
+    assert copy_revision_actions == ["copy", "copy"]
     _, other_workspace = _register(client, "Other budget workspace")
     assert client.get("/api/v1/budgets/2026-07", headers=other_workspace).json()["groups"] == []
     assert client.get("/api/v1/budgets/2026-07/RUB", headers=other_workspace).status_code == 404

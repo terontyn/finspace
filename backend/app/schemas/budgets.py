@@ -36,7 +36,7 @@ class BudgetCopyRequest(ApiModel):
 
 class BudgetRolloverResponse(ApiModel):
     amount: Money
-    policy: RolloverPolicy
+    source_policy: RolloverPolicy
     provisional: bool
 
 

@@ -268,23 +268,9 @@ async def _previous_rollover(
     workspace: Workspace,
     period: date,
     currency: str,
-    policy: RolloverPolicy,
 ) -> BudgetRolloverResponse:
     predecessor_month = previous_month(period)
-    if policy == "none":
-        return BudgetRolloverResponse(amount=ZERO, policy=policy, provisional=False)
-
     predecessor_frozen = await _is_frozen(session, workspace.id, predecessor_month)
-    predecessor = await repository.get_period(
-        session, workspace.id, predecessor_month, currency, include_deleted=False
-    )
-    if predecessor is None:
-        return BudgetRolloverResponse(
-            amount=ZERO,
-            policy=policy,
-            provisional=not predecessor_frozen,
-        )
-
     if predecessor_frozen:
         snapshot = await _frozen_snapshot(session, workspace.id, predecessor_month)
         if snapshot is not None:
@@ -299,11 +285,30 @@ async def _previous_rollover(
             )
             if isinstance(group, dict):
                 previous_remaining = Decimal(str(group["remaining"]))
+                source_policy = cast(
+                    RolloverPolicy,
+                    str(group.get("rollover_policy", "none")),
+                )
                 return BudgetRolloverResponse(
-                    amount=_apply_rollover(policy, previous_remaining),
-                    policy=policy,
+                    amount=_apply_rollover(source_policy, previous_remaining),
+                    source_policy=source_policy,
                     provisional=False,
                 )
+        return BudgetRolloverResponse(
+            amount=ZERO,
+            source_policy="none",
+            provisional=False,
+        )
+
+    predecessor = await repository.get_period(
+        session, workspace.id, predecessor_month, currency, include_deleted=False
+    )
+    if predecessor is None:
+        return BudgetRolloverResponse(
+            amount=ZERO,
+            source_policy="none",
+            provisional=True,
+        )
 
     predecessor_allocations = (await repository.allocations_for_periods(session, [predecessor.id]))[
         predecessor.id
@@ -314,10 +319,11 @@ async def _previous_rollover(
     )
     actual_expense = actuals.get(currency, BudgetActual()).expense
     previous_remaining = money(allocated - actual_expense)
+    source_policy = cast(RolloverPolicy, predecessor.rollover_policy)
     return BudgetRolloverResponse(
-        amount=_apply_rollover(policy, previous_remaining),
-        policy=policy,
-        provisional=not predecessor_frozen,
+        amount=_apply_rollover(source_policy, previous_remaining),
+        source_policy=source_policy,
+        provisional=True,
     )
 
 
@@ -360,7 +366,6 @@ async def _live_group(
         workspace,
         budget.period_month,
         budget.currency,
-        cast(RolloverPolicy, budget.rollover_policy),
     )
     allocation_rows: list[BudgetAllocationProjection] = []
     for item in allocations:
@@ -514,6 +519,7 @@ async def _record_success(
     allocations: list[BudgetAllocation],
     *,
     action: Literal["create", "update", "delete", "restore", "copy"],
+    audit_action: Literal["create", "update", "delete", "restore"] | None = None,
     key: str,
     request_hash: str,
     before: dict[str, object] | None,
@@ -521,6 +527,9 @@ async def _record_success(
     audit_metadata: dict[str, object] | None = None,
 ) -> None:
     plan = budget_plan_snapshot(budget, allocations)
+    resolved_audit_action = audit_action or cast(
+        Literal["create", "update", "delete", "restore"], action
+    )
     revision = BudgetPlanRevision(
         workspace_id=context.workspace.id,
         budget_period_id=budget.id,
@@ -541,7 +550,7 @@ async def _record_success(
         actor_user_id=context.user.id,
         entity_type="budget_period",
         entity_id=budget.id,
-        action=action,
+        action=resolved_audit_action,
         before_data=before,
         after_data={**plan, **(audit_metadata or {})},
         request_id=context.request_id,
@@ -885,11 +894,13 @@ async def copy_period(
         budget,
         allocations,
         action="copy",
+        audit_action="create" if before is None else "update",
         key=key,
         request_hash=request_hash,
         before=before,
         response=response,
         audit_metadata={
+            "budget_operation": "copy",
             "copy_source_budget_id": str(source.id),
             "copy_source_period": source_period.strftime("%Y-%m"),
         },
