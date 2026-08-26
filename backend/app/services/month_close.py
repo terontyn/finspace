@@ -32,6 +32,7 @@ from app.schemas.common import Money
 from app.schemas.financial_reports import FinancialReportCategory, FinancialReportGroup
 from app.services.audit import record_audit, request_uuid
 from app.services.backup_status import get_backup_status
+from app.services.budgets import planning_snapshot_for_close
 from app.services.calculations import calculate_balances
 from app.services.financial_period_guard import (
     get_or_create_control,
@@ -421,6 +422,7 @@ def _prepare_token(
     *,
     generation: int,
     financial_hash: str,
+    budget_plan_hash: str,
     summary: dict[str, object],
     blocking: list[dict[str, object]],
     warnings: list[dict[str, object]],
@@ -433,6 +435,7 @@ def _prepare_token(
             "generation": generation,
             "period": closure.period_month.isoformat(),
             "financial_fingerprint": financial_hash,
+            "budget_plan_fingerprint": budget_plan_hash,
             "summary": summary,
             "blocking": _normalized_issues(blocking),
             "warnings": _normalized_issues(warnings),
@@ -451,6 +454,7 @@ async def prepare(
     source: str,
 ) -> MonthClosure:
     _validate_completed_period(workspace, period)
+    control = await get_or_create_control(session, workspace.id, for_update=True)
     closure = await _get_or_create_closure(session, workspace.id, period)
     if closure.status == "confirmed":
         raise ApiError(
@@ -458,15 +462,21 @@ async def prepare(
             code="MONTH_ALREADY_CLOSED",
             message="Month is already closed",
         )
-    control = await get_or_create_control(session, workspace.id, for_update=False)
-    summary, blocking, warnings, infos, fingerprint = await collect_preview(
-        session, workspace, period, control
-    )
+    (
+        summary,
+        blocking,
+        warnings,
+        infos,
+        fingerprint,
+        _,
+        budget_plan_fingerprint,
+    ) = await collect_preview(session, workspace, period, control)
     generation = closure.version + 1
     token = _prepare_token(
         closure,
         generation=generation,
         financial_hash=fingerprint,
+        budget_plan_hash=budget_plan_fingerprint,
         summary=summary,
         blocking=blocking,
         warnings=warnings,
@@ -498,6 +508,7 @@ async def prepare(
             "status": closure.status,
             "version": closure.version,
             "financial_fingerprint": fingerprint,
+            "budget_plan_fingerprint": budget_plan_fingerprint,
             "blocking_count": len(blocking),
             "warning_count": len(warnings),
             "info_count": len(infos),
@@ -708,13 +719,20 @@ async def confirm(
             message="Months must be closed sequentially",
             details=sequence,
         )
-    summary, blocking, warnings, infos, fingerprint = await collect_preview(
-        session, context.workspace, period, control
-    )
+    (
+        summary,
+        blocking,
+        warnings,
+        infos,
+        fingerprint,
+        _,
+        budget_plan_fingerprint,
+    ) = await collect_preview(session, context.workspace, period, control)
     actual_token = _prepare_token(
         closure,
         generation=closure.version,
         financial_hash=fingerprint,
+        budget_plan_hash=budget_plan_fingerprint,
         summary=summary,
         blocking=blocking,
         warnings=warnings,
@@ -825,6 +843,7 @@ async def confirm(
             "revision_id": str(revision.id),
             "revision_number": revision_number,
             "financial_fingerprint": fingerprint,
+            "budget_plan_fingerprint": budget_plan_fingerprint,
             "idempotency_key": key,
         },
         request_id=context.request_id,
@@ -950,6 +969,8 @@ async def collect_preview(
     list[dict[str, object]],
     list[dict[str, object]],
     list[dict[str, object]],
+    str,
+    dict[str, object],
     str,
 ]:
     start, end = period_bounds(period, workspace.timezone)
@@ -1146,6 +1167,9 @@ async def collect_preview(
     if effective_count == 0:
         infos.append(_issue("NO_FINANCIAL_ACTIVITY", count=0))
     fingerprint = await financial_fingerprint(session, workspace.id, end)
+    planning_budget, budget_plan_fingerprint = await planning_snapshot_for_close(
+        session, workspace, period, control
+    )
     summary: dict[str, object] = {
         "transaction_count": effective_count,
         "draft_count": draft_count,
@@ -1167,6 +1191,8 @@ async def collect_preview(
             }
             for item in currencies
         ],
+        "planning_budget": planning_budget,
+        "budget_plan_fingerprint": budget_plan_fingerprint,
     }
     return (
         summary,
@@ -1174,6 +1200,8 @@ async def collect_preview(
         _normalized_issues(warnings),
         _normalized_issues(infos),
         fingerprint,
+        planning_budget,
+        budget_plan_fingerprint,
     )
 
 
