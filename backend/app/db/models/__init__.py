@@ -21,6 +21,7 @@ from app.db.models.automations import (
 )
 from app.db.models.budgets import BudgetAllocation, BudgetPeriod, BudgetPlanRevision
 from app.db.models.categories import Category
+from app.db.models.goals import Goal, GoalCommandResult, GoalContribution
 from app.db.models.google_sync import (
     GoogleConnection,
     GoogleOAuthFlow,
@@ -47,6 +48,9 @@ __all__ = [
     "BudgetPlanRevision",
     "Category",
     "FinancialTransaction",
+    "Goal",
+    "GoalCommandResult",
+    "GoalContribution",
     "GoogleConnection",
     "GoogleOAuthFlow",
     "GoogleSheetBinding",

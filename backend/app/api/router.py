@@ -8,6 +8,7 @@ from app.api.routes import (
     budgets,
     categories,
     dev,
+    goals,
     google_oauth,
     google_sheets,
     health,
@@ -45,6 +46,7 @@ api_router.include_router(users.router, tags=["users", "workspaces"])
 api_router.include_router(accounts.router, prefix="/accounts", tags=["accounts"])
 api_router.include_router(categories.router, prefix="/categories", tags=["categories"])
 api_router.include_router(budgets.router, prefix="/budgets", tags=["budgets"])
+api_router.include_router(goals.router, prefix="/goals", tags=["goals"])
 api_router.include_router(
     recurring_rules.router, prefix="/recurring-rules", tags=["recurring-rules"]
 )
