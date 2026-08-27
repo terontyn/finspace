@@ -1792,3 +1792,157 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .action-dialog > footer { position: sticky; bottom: -20px; margin-inline: -16px; padding: 13px 16px 20px; background: var(--surface-2); }
   .action-dialog > footer button { flex: 1; }
 }
+
+/* ─── Budget product ─────────────────────────────────── */
+.budget-screen .notice--warning { border-color: color-mix(in srgb, var(--warning) 30%, var(--border)); background: var(--warning-bg); color: var(--warning); }
+.budget-field-error { color: var(--negative) !important; font-size: 9px !important; line-height: 1.4; }
+.budget-screen { min-width: 0; }
+.budget-screen-header { gap: 22px; }
+.budget-period-toolbar { display: grid; grid-template-columns: 40px minmax(190px, 1fr) 40px auto; gap: 10px; align-items: center; margin-bottom: 12px; padding: 13px 16px; }
+.budget-period-toolbar > button:not(.text-button) { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-3); color: var(--text-primary); }
+.budget-period-toolbar label { display: grid; grid-template-columns: auto minmax(130px, 180px); gap: 2px 14px; align-items: center; }
+.budget-period-toolbar label span { grid-row: 1; color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.budget-period-toolbar label input { grid-column: 2; grid-row: 1 / span 2; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; outline: none; background: var(--surface-1); color: var(--text-primary); color-scheme: dark; }
+.budget-period-toolbar label input:focus { border-color: var(--accent); }
+.budget-period-toolbar label strong { font-family: var(--font-display); font-size: 14px; text-transform: capitalize; }
+[data-theme="light"] .budget-period-toolbar label input { color-scheme: light; }
+.budget-loading { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.budget-loading i { min-height: 118px; border-radius: var(--radius-lg); background: linear-gradient(90deg, var(--surface-2) 20%, var(--surface-3) 50%, var(--surface-2) 80%); background-size: 220% 100%; animation: shimmer 1.5s infinite; }
+.budget-loading i:last-child { grid-column: 1 / -1; min-height: 280px; }
+.budget-load-error { display: flex; align-items: center; gap: 12px; padding: 22px; }
+.budget-load-error span { flex: 1; color: var(--text-secondary); }
+.budget-empty-state, .budget-deleted-state { display: grid; min-height: 360px; place-items: center; align-content: center; gap: 10px; padding: 38px; text-align: center; }
+.budget-empty-state h2, .budget-deleted-state h2 { margin: 0; font-family: var(--font-display); font-size: clamp(23px, 3vw, 34px); letter-spacing: -.05em; text-transform: capitalize; }
+.budget-empty-state p, .budget-deleted-state p { max-width: 580px; margin: 0; color: var(--text-secondary); font-size: 11px; }
+.budget-empty-symbol { display: grid; width: 62px; height: 62px; place-items: center; border: 1px solid var(--border-accent); border-radius: 20px; background: var(--accent-soft); color: var(--accent); font-size: 27px; }
+.budget-empty-state > label { display: grid; gap: 5px; margin-top: 8px; color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.budget-empty-state > label input { width: 120px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px; outline: none; background: var(--surface-1); color: var(--text-primary); text-align: center; text-transform: uppercase; }
+.budget-empty-state > div:last-child { display: flex; gap: 8px; margin-top: 8px; }
+.budget-currency-bar { display: flex; gap: 7px; max-width: 100%; margin-bottom: 12px; overflow-x: auto; scrollbar-width: thin; }
+.budget-currency-bar button { display: grid; min-width: 92px; gap: 1px; padding: 9px 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-2); color: var(--text-primary); text-align: left; }
+.budget-currency-bar button.is-active { border-color: var(--border-accent); background: var(--accent-soft); box-shadow: inset 0 -2px var(--accent); }
+.budget-currency-bar strong { font-family: var(--font-display); font-size: 12px; }
+.budget-currency-bar small { color: var(--text-muted); font-size: 8px; }
+.budget-status-strip { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; padding: 13px 15px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); }
+.budget-status-strip > div:first-child { display: grid; grid-template-columns: auto auto; gap: 3px 10px; align-items: center; }
+.budget-status-strip > div:first-child small { grid-column: 2; color: var(--text-muted); font-size: 8px; }
+.budget-status-badge { display: inline-flex; align-items: center; width: max-content; padding: 5px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-3); color: var(--text-secondary); font-size: 8px; font-weight: 850; letter-spacing: .06em; text-transform: uppercase; }
+.budget-status-badge--success { border-color: color-mix(in srgb, var(--positive) 35%, var(--border)); background: var(--positive-bg); color: var(--positive); }
+.budget-status-badge--warning { border-color: color-mix(in srgb, var(--warning) 35%, var(--border)); background: var(--warning-bg); color: var(--warning); }
+.budget-readonly-note { padding: 7px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--text-secondary); font-size: 9px; }
+.budget-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+.budget-summary-card { display: grid; min-width: 0; min-height: 112px; align-content: center; gap: 4px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-2); }
+.budget-summary-card > span { color: var(--text-secondary); font-size: 8px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.budget-summary-card > strong { overflow: hidden; font-family: var(--font-display); font-size: clamp(17px, 2vw, 23px); font-variant-numeric: tabular-nums; letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; }
+.budget-summary-card > small { color: var(--text-muted); font-size: 8px; }
+.budget-summary-card--negative { border-color: color-mix(in srgb, var(--negative) 30%, var(--border)); background: linear-gradient(145deg, var(--surface-2), var(--negative-bg)); }
+.budget-summary-card--negative > strong, .budget-summary-card--negative > small { color: var(--negative); }
+.budget-detail-grid { display: grid; grid-template-columns: 1fr 1fr .9fr; gap: 12px; margin-bottom: 12px; }
+.budget-rollover-card, .budget-secondary-facts { display: grid; align-content: start; gap: 9px; padding: 19px; }
+.budget-rollover-card h2 { margin: 0; font-family: var(--font-display); font-size: 15px; letter-spacing: -.035em; }
+.budget-rollover-card > strong:not(.budget-policy-value) { font-family: var(--font-display); font-size: 23px; font-variant-numeric: tabular-nums; }
+.budget-policy-value { color: var(--accent); font-size: 13px; }
+.budget-rollover-card > p { margin: 0; color: var(--text-secondary); font-size: 9px; line-height: 1.5; }
+.budget-provisional { display: flex; align-items: center; gap: 9px; padding: 9px; border: 1px solid color-mix(in srgb, var(--info) 28%, var(--border)); border-radius: 9px; background: var(--info-bg); color: var(--info); }
+.budget-provisional > div { display: grid; gap: 2px; }
+.budget-provisional small { font-size: 8px; }
+.budget-final-rollover { width: max-content; padding: 6px 8px; border-radius: 8px; background: var(--positive-bg); color: var(--positive); font-size: 8px; font-weight: 750; }
+.budget-secondary-facts dl { display: grid; gap: 0; margin: 0; }
+.budget-secondary-facts dl > div { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); }
+.budget-secondary-facts dt { color: var(--text-secondary); font-size: 8px; }
+.budget-secondary-facts dd { margin: 0; font-size: 9px; font-weight: 750; font-variant-numeric: tabular-nums; text-align: right; }
+.budget-unbudgeted { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border)); border-radius: var(--radius-md); background: var(--warning-bg); color: var(--warning); }
+.budget-unbudgeted > span { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-weight: 900; }
+.budget-unbudgeted div { display: grid; gap: 3px; }
+.budget-unbudgeted p { margin: 0; font-size: 9px; }
+.budget-allocation-panel { margin-bottom: 12px; padding: 20px; }
+.budget-allocation-table { min-width: 0; }
+.budget-allocation-row { display: grid; grid-template-columns: minmax(190px, 1.5fr) repeat(3, minmax(105px, .7fr)) minmax(140px, .9fr); gap: 12px; align-items: center; min-width: 0; padding: 13px 4px; border-top: 1px solid var(--border); }
+.budget-allocation-row--head { padding-block: 7px; border-top: 0; color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.budget-allocation-row:not(.budget-allocation-row--head) > span { font-size: 10px; font-variant-numeric: tabular-nums; }
+.budget-allocation-row--over { background: linear-gradient(90deg, transparent, var(--negative-bg)); }
+.budget-allocation-row .money--negative { display: grid; color: var(--negative); }
+.budget-allocation-row .money--negative small { font-size: 7px; font-weight: 800; text-transform: uppercase; }
+.budget-allocation-category { display: grid; min-width: 0; gap: 2px; }
+.budget-allocation-category strong { overflow-wrap: anywhere; }
+.budget-allocation-category small { color: var(--text-muted); font-size: 8px; overflow-wrap: anywhere; }
+.budget-allocation-category em { width: max-content; margin-top: 3px; color: var(--warning); font-size: 7px; font-style: normal; font-weight: 800; text-transform: uppercase; }
+.budget-usage { display: grid; gap: 4px; }
+.budget-usage > div { height: 5px; overflow: hidden; border-radius: 999px; background: var(--surface-4); }
+.budget-usage > div > i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.budget-usage > span, .budget-usage-empty { color: var(--text-secondary); font-size: 8px; }
+.budget-usage--over > div > i { background: var(--negative); }
+.budget-usage--over > span { color: var(--negative); font-weight: 800; }
+.budget-management { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 19px; }
+.budget-management h2 { margin: 4px 0; font-family: var(--font-display); font-size: 16px; }
+.budget-management p { margin: 0; color: var(--text-secondary); font-size: 9px; }
+.budget-management > div:last-child { display: flex; gap: 8px; }
+.budget-editor-form { display: grid; gap: 16px; }
+.budget-editor-form label { display: grid; gap: 5px; color: var(--text-secondary); font-size: 9px; font-weight: 750; }
+.budget-editor-form label > input, .budget-editor-form label > select { min-width: 0; width: 100%; padding: 10px 11px; border: 1px solid var(--border); border-radius: 9px; outline: none; background: var(--surface-1); color: var(--text-primary); }
+.budget-editor-form label > input:focus, .budget-editor-form label > select:focus { border-color: var(--accent); }
+.budget-editor-form label > small { color: var(--text-muted); font-size: 8px; font-weight: 500; }
+.budget-form-grid { display: grid; grid-template-columns: .7fr 1.3fr; gap: 10px; }
+.budget-form-allocations { display: grid; gap: 10px; }
+.budget-form-allocations > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.budget-form-allocations h3 { margin: 4px 0 0; font-family: var(--font-display); font-size: 15px; }
+.budget-form-allocations > p { margin: 0; color: var(--text-secondary); font-size: 8px; line-height: 1.5; }
+.budget-form-allocation-list { display: grid; gap: 8px; }
+.budget-form-allocation-list article { display: grid; grid-template-columns: minmax(150px, 1.3fr) minmax(90px, .7fr) auto; gap: 8px; padding: 11px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-1); }
+.budget-form-allocation-list .budget-allocation-note { grid-column: 1 / 3; }
+.budget-form-allocation-list article > button { align-self: end; }
+.budget-form-empty { padding: 16px; border: 1px dashed var(--border); border-radius: 10px; color: var(--text-muted); font-size: 9px; text-align: center; }
+.budget-editor-form > footer { position: sticky; bottom: -26px; display: flex; justify-content: flex-end; gap: 8px; margin: 4px -26px -26px; padding: 14px 26px 24px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.budget-dialog-warning { display: grid; gap: 4px; margin-top: 18px; padding: 14px; border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border)); border-radius: 10px; background: var(--warning-bg); color: var(--warning); }
+.budget-dialog-warning span { font-size: 9px; }
+.budget-dialog-warning--danger { border-color: color-mix(in srgb, var(--negative) 32%, var(--border)); background: var(--negative-bg); color: var(--negative); }
+.budget-history-list { display: grid; gap: 0; }
+.budget-history-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 11px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.budget-history-number { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--border-accent); border-radius: 50%; color: var(--accent); font-size: 9px; font-weight: 850; }
+.budget-history-list article > div { display: grid; gap: 2px; }
+.budget-history-list article span, .budget-history-list article small { color: var(--text-secondary); font-size: 8px; overflow-wrap: anywhere; }
+.budget-history-loading { padding: 22px; color: var(--text-secondary); text-align: center; }
+
+@media (max-width: 1120px) {
+  .budget-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .budget-detail-grid { grid-template-columns: 1fr 1fr; }
+  .budget-secondary-facts { grid-column: 1 / -1; }
+  .budget-allocation-row { grid-template-columns: minmax(170px, 1.4fr) repeat(3, minmax(90px, .7fr)) minmax(120px, .8fr); gap: 8px; }
+}
+
+@media (max-width: 760px) {
+  .budget-screen-header .screen-header-actions { flex-wrap: wrap; }
+  .budget-period-toolbar { grid-template-columns: 36px minmax(0, 1fr) 36px; padding: 11px; }
+  .budget-period-toolbar > .text-button { grid-column: 1 / -1; justify-self: center; }
+  .budget-period-toolbar label { grid-template-columns: 1fr; }
+  .budget-period-toolbar label span { grid-row: auto; }
+  .budget-period-toolbar label input { grid-column: 1; grid-row: auto; }
+  .budget-period-toolbar label strong { display: none; }
+  .budget-empty-state, .budget-deleted-state { min-height: 310px; padding: 26px 16px; }
+  .budget-empty-state > div:last-child { width: 100%; flex-direction: column; }
+  .budget-status-strip { align-items: flex-start; flex-direction: column; }
+  .budget-status-strip > div:first-child { grid-template-columns: 1fr; }
+  .budget-status-strip > div:first-child small { grid-column: 1; }
+  .budget-summary-grid, .budget-detail-grid { grid-template-columns: 1fr 1fr; }
+  .budget-secondary-facts { grid-column: 1 / -1; }
+  .budget-allocation-row--head { display: none; }
+  .budget-allocation-table { display: grid; gap: 9px; }
+  .budget-allocation-row:not(.budget-allocation-row--head) { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-1); }
+  .budget-allocation-category { grid-column: 1 / -1; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .budget-allocation-row [data-label]::before { content: attr(data-label); display: block; margin-bottom: 3px; color: var(--text-muted); font-size: 7px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+  .budget-allocation-row > div:last-child { grid-column: 1 / -1; }
+  .budget-management { align-items: stretch; flex-direction: column; }
+  .budget-management > div:last-child { flex-direction: column; }
+  .budget-form-allocation-list article { grid-template-columns: 1fr; }
+  .budget-form-allocation-list .budget-allocation-note { grid-column: 1; }
+  .budget-editor-form > footer { bottom: -20px; margin: 4px -16px -20px; padding: 13px 16px 20px; }
+}
+
+@media (max-width: 460px) {
+  .budget-summary-grid, .budget-detail-grid { grid-template-columns: 1fr; }
+  .budget-secondary-facts { grid-column: 1; }
+  .budget-summary-card { min-height: 96px; }
+  .budget-allocation-panel { padding: 14px 10px; }
+  .budget-form-grid { grid-template-columns: 1fr; }
+  .budget-editor-form > footer button { flex: 1; }
+}
