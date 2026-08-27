@@ -63,6 +63,8 @@ jobs:
     steps:
       - name: Checkout temporary validation branch
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Expose Apps Script package at the runtime path
         run: |
@@ -472,4 +474,4 @@ jobs:
 
       - name: Validate temporary commit diff
         working-directory: .
-        run: git diff HEAD^ --check
+        run: git diff 7b4fd624564861e8fd87850982be6412930b2460 HEAD --check
