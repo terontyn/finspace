@@ -7,6 +7,7 @@ import { useAuth } from "@/components/auth-provider";
 import { AccountDetailsScreen } from "@/components/screens/account-details-screen";
 import { AccountsScreen } from "@/components/screens/accounts-screen";
 import { AutomationsScreen } from "@/components/screens/automations-screen";
+import { BudgetScreen } from "@/components/screens/budget-screen";
 import { CategoriesScreen } from "@/components/screens/categories-screen";
 import { ComingSoonScreen } from "@/components/screens/coming-soon-screen";
 import { GoogleSheetsScreen } from "@/components/screens/google-sheets-screen";
@@ -70,7 +71,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       {screen === "recurring" && <RecurringRulesScreen onError={showError} />}
       {screen === "telegram" && <TelegramScreen onError={showError} />}
       {screen === "month-close" && <MonthCloseScreen onError={showError} />}
-      {screen === "budget" && <ComingSoonScreen description="Полноценный бюджет требует отдельных сущностей месяца, плана, переноса остатка и доступной суммы." requiresApi title="Бюджет" />}
+      {screen === "budget" && <BudgetScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} timezone={auth.session.workspace.timezone} />}
       {screen === "reports" && <ReportsScreen onError={showError} timezone={auth.session.workspace.timezone} />}
       {screen === "payees" && <ComingSoonScreen description="Получатели будут спроектированы поверх текущего поля counterparty с aliases и обратной совместимостью." requiresApi title="Получатели" />}
       {screen === "rules" && <ComingSoonScreen description="Правила категоризации — отдельный механизм и не заменяют recurring rules." requiresApi title="Правила" />}
