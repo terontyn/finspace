@@ -79,6 +79,18 @@ AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
         "version",
         "deleted_at",
     ),
+    "goal": (
+        "id",
+        "workspace_id",
+        "name",
+        "description",
+        "currency",
+        "target_amount",
+        "target_date",
+        "status",
+        "version",
+        "deleted_at",
+    ),
 }
 
 

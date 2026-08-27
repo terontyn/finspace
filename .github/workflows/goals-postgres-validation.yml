@@ -1,0 +1,464 @@
+name: Temporary Goals PostgreSQL validation
+
+on:
+  push:
+    branches:
+      - codex/goals-postgres-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-goals-postgresql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: finspace_test
+          POSTGRES_USER: finspace_test
+          POSTGRES_PASSWORD: temporary-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finspace_test -d finspace_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: finspace_test
+      POSTGRES_PASSWORD: temporary-test-password
+      POSTGRES_BASE_DB: finspace_test
+      DATABASE_URL: postgresql+asyncpg://finspace_test:temporary-test-password@127.0.0.1:5432/finspace_test
+      TEST_DATABASE_URL: postgresql+asyncpg://finspace_test:temporary-test-password@127.0.0.1:5432/finspace_test
+      REDIS_URL: redis://127.0.0.1:6379/15
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      ENVIRONMENT: test
+      TESTING: "true"
+      JWT_SECRET_KEY: temporary-ci-jwt-secret-with-at-least-32-characters
+      CORS_ORIGINS: http://localhost:3000
+      ALLOW_REGISTRATION: "true"
+      ALLOW_DEV_AUTH_HEADERS: "false"
+
+    defaults:
+      run:
+        working-directory: backend
+        shell: bash
+
+    steps:
+      - name: Checkout temporary validation branch
+        uses: actions/checkout@v4
+
+      - name: Set up repository-supported Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend with existing development contract
+        run: |
+          python -m pip install --editable ".[dev]"
+
+      - name: Prove ephemeral CI environment
+        run: |
+          python --version
+          python - <<'PY'
+          import asyncio
+          import os
+
+          import asyncpg
+
+
+          async def main() -> None:
+              connection = await asyncpg.connect(
+                  host=os.environ["POSTGRES_HOST"],
+                  port=int(os.environ["POSTGRES_PORT"]),
+                  user=os.environ["POSTGRES_USER"],
+                  password=os.environ["POSTGRES_PASSWORD"],
+                  database=os.environ["POSTGRES_BASE_DB"],
+              )
+              try:
+                  row = await connection.fetchrow(
+                      "SELECT current_database() AS database_name, "
+                      "current_user AS database_user, "
+                      "host(inet_server_addr()) AS database_host, "
+                      "version() AS server_version"
+                  )
+                  print(f"database={row['database_name']}")
+                  print(f"host={row['database_host']}")
+                  print(f"user={row['database_user']}")
+                  print(f"postgres={row['server_version']}")
+                  assert row["database_name"] == "finspace_test"
+                  assert row["database_user"] == "finspace_test"
+              finally:
+                  await connection.close()
+
+
+          asyncio.run(main())
+          PY
+
+      - name: Create isolated migration-proof database
+        run: |
+          run_id="$(python -c 'import uuid; print(uuid.uuid4().hex)')"
+          database_name="finspace_test_${run_id}"
+          export MIGRATION_DATABASE_NAME="$database_name"
+          python - <<'PY'
+          import asyncio
+          import os
+
+          import asyncpg
+
+
+          async def main() -> None:
+              connection = await asyncpg.connect(
+                  host=os.environ["POSTGRES_HOST"],
+                  port=int(os.environ["POSTGRES_PORT"]),
+                  user=os.environ["POSTGRES_USER"],
+                  password=os.environ["POSTGRES_PASSWORD"],
+                  database="postgres",
+              )
+              try:
+                  database_name = os.environ["MIGRATION_DATABASE_NAME"]
+                  assert database_name.startswith("finspace_test_")
+                  await connection.execute(f'CREATE DATABASE "{database_name}"')
+                  print(f"created={database_name}")
+              finally:
+                  await connection.close()
+
+
+          asyncio.run(main())
+          PY
+          {
+            echo "MIGRATION_TEST_RUN_ID=$run_id"
+            echo "MIGRATION_DATABASE_NAME=$database_name"
+            echo "MIGRATION_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${database_name}"
+          } >> "$GITHUB_ENV"
+
+      - name: Real migration roundtrip 0009 to 0010
+        env:
+          DATABASE_URL: ${{ env.MIGRATION_DATABASE_URL }}
+          TEST_RUN_ID: ${{ env.MIGRATION_TEST_RUN_ID }}
+        run: |
+          alembic upgrade 0009_budget_planning_core
+          python scripts/test_seed.py --test-run-id "$TEST_RUN_ID"
+          export MIGRATION_TEST_CYCLE=true
+          alembic upgrade 0010_goals
+          echo "migration_0009_to_0010=PASS"
+          alembic downgrade 0009_budget_planning_core
+          echo "migration_0010_to_0009=PASS"
+          alembic upgrade 0010_goals
+          echo "migration_second_0009_to_0010=PASS"
+          alembic current
+          alembic heads
+          test "$(alembic heads | wc -l)" -eq 1
+
+      - name: Inspect pg_catalog and prove composite constraints
+        env:
+          DATABASE_URL: ${{ env.MIGRATION_DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          import uuid
+          from datetime import UTC, datetime
+          from decimal import Decimal
+
+          import asyncpg
+          from sqlalchemy.engine import make_url
+
+
+          TABLES = {"goals", "goal_contributions", "goal_command_results"}
+
+
+          async def expect_fk_rejection(
+              connection: asyncpg.Connection,
+              label: str,
+              query: str,
+              *arguments: object,
+          ) -> None:
+              try:
+                  async with connection.transaction():
+                      await connection.execute(query, *arguments)
+              except asyncpg.ForeignKeyViolationError as exc:
+                  assert exc.sqlstate == "23503"
+                  print(f"{label}=PASS sqlstate={exc.sqlstate} constraint={exc.constraint_name}")
+              else:
+                  raise AssertionError(f"{label} was not rejected by PostgreSQL")
+
+
+          async def main() -> None:
+              parsed = make_url(os.environ["DATABASE_URL"])
+              connection = await asyncpg.connect(
+                  host=str(parsed.host),
+                  port=int(parsed.port or 5432),
+                  user=str(parsed.username),
+                  password=str(parsed.password),
+                  database=str(parsed.database),
+              )
+              try:
+                  tables = {
+                      row["table_name"]
+                      for row in await connection.fetch(
+                          "SELECT table_name FROM information_schema.tables "
+                          "WHERE table_schema = 'public' AND table_name = ANY($1::text[]) "
+                          "ORDER BY table_name",
+                          sorted(TABLES),
+                      )
+                  }
+                  assert tables == TABLES
+                  print("tables=" + ",".join(sorted(tables)))
+
+                  constraints = await connection.fetch(
+                      "SELECT c.conrelid::regclass::text AS table_name, c.conname, c.contype, "
+                      "pg_get_constraintdef(c.oid, true) AS definition, c.confdeltype "
+                      "FROM pg_constraint AS c "
+                      "WHERE c.conrelid::regclass::text = ANY($1::text[]) "
+                      "ORDER BY table_name, c.contype, c.conname",
+                      sorted(TABLES),
+                  )
+                  for row in constraints:
+                      print(
+                          "constraint "
+                          f"table={row['table_name']} type={row['contype']} "
+                          f"name={row['conname']} delete={row['confdeltype']} "
+                          f"definition={row['definition']}"
+                      )
+
+                  indexes = await connection.fetch(
+                      "SELECT tablename, indexname, indexdef FROM pg_indexes "
+                      "WHERE schemaname = 'public' AND tablename = ANY($1::text[]) "
+                      "ORDER BY tablename, indexname",
+                      sorted(TABLES),
+                  )
+                  for row in indexes:
+                      print(
+                          f"index table={row['tablename']} name={row['indexname']} "
+                          f"definition={row['indexdef']}"
+                      )
+
+                  by_table: dict[str, list[asyncpg.Record]] = {table: [] for table in TABLES}
+                  for row in constraints:
+                      by_table[row["table_name"]].append(row)
+
+                  goal_definitions = [row["definition"] for row in by_table["goals"]]
+                  assert any("target_amount >" in item for item in goal_definitions)
+                  assert any("version >= 1" in item for item in goal_definitions)
+                  assert any("currency ~" in item for item in goal_definitions)
+                  assert any(
+                      "status" in item
+                      and all(
+                          value in item
+                          for value in ("active", "paused", "completed", "cancelled")
+                      )
+                      for item in goal_definitions
+                  )
+                  assert any("UNIQUE (id, workspace_id)" in item for item in goal_definitions)
+                  assert any(
+                      "UNIQUE (id, workspace_id, currency)" in item
+                      for item in goal_definitions
+                  )
+
+                  contribution_constraints = by_table["goal_contributions"]
+                  contribution_definitions = [row["definition"] for row in contribution_constraints]
+                  assert any("amount <>" in item or "amount !=" in item for item in contribution_definitions)
+                  assert any(
+                      "correction_of_id IS NOT NULL" in item and "amount >" in item
+                      for item in contribution_definitions
+                  )
+                  goal_currency_fk = next(
+                      row
+                      for row in contribution_constraints
+                      if row["contype"] == "f"
+                      and "FOREIGN KEY (goal_id, workspace_id, currency)" in row["definition"]
+                  )
+                  correction_fk = next(
+                      row
+                      for row in contribution_constraints
+                      if row["contype"] == "f"
+                      and "FOREIGN KEY (correction_of_id, goal_id, workspace_id)"
+                      in row["definition"]
+                  )
+                  assert goal_currency_fk["confdeltype"] == "r"
+                  assert correction_fk["confdeltype"] == "r"
+
+                  command_definitions = [
+                      row["definition"] for row in by_table["goal_command_results"]
+                  ]
+                  assert any(
+                      "UNIQUE (workspace_id, idempotency_key)" in item
+                      for item in command_definitions
+                  )
+                  assert any("request_hash" in item for item in command_definitions)
+                  assert any(
+                      "FOREIGN KEY (goal_id, workspace_id)" in item
+                      for item in command_definitions
+                  )
+                  print("pg_catalog_constraints=PASS")
+
+                  now = datetime.now(UTC)
+                  user_a, user_b = uuid.uuid4(), uuid.uuid4()
+                  workspace_a, workspace_b = uuid.uuid4(), uuid.uuid4()
+                  goal_a, goal_b, goal_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+                  contribution_a = uuid.uuid4()
+
+                  await connection.executemany(
+                      "INSERT INTO users "
+                      "(id, email, normalized_email, display_name, locale, timezone, "
+                      "is_active, email_verified, failed_login_attempts, version) "
+                      "VALUES ($1, $2, $2, $3, 'ru-RU', 'UTC', true, true, 0, 1)",
+                      [
+                          (user_a, f"catalog-{user_a}@test.local", "Catalog A"),
+                          (user_b, f"catalog-{user_b}@test.local", "Catalog B"),
+                      ],
+                  )
+                  await connection.executemany(
+                      "INSERT INTO workspaces "
+                      "(id, name, base_currency, timezone, owner_user_id, version) "
+                      "VALUES ($1, $2, 'RUB', 'UTC', $3, 1)",
+                      [
+                          (workspace_a, "Catalog workspace A", user_a),
+                          (workspace_b, "Catalog workspace B", user_b),
+                      ],
+                  )
+                  await connection.executemany(
+                      "INSERT INTO goals "
+                      "(id, workspace_id, name, currency, target_amount, created_by, updated_by) "
+                      "VALUES ($1, $2, $3, 'RUB', 1000, $4, $4)",
+                      [
+                          (goal_a, workspace_a, "Catalog goal A", user_a),
+                          (goal_b, workspace_a, "Catalog goal B", user_a),
+                          (goal_c, workspace_b, "Catalog goal C", user_b),
+                      ],
+                  )
+                  await connection.execute(
+                      "INSERT INTO goal_contributions "
+                      "(id, workspace_id, goal_id, currency, amount, contributed_at, "
+                      "created_by, created_at) VALUES ($1, $2, $3, 'RUB', $4, $5, $6, $5)",
+                      contribution_a,
+                      workspace_a,
+                      goal_a,
+                      Decimal("100.0000"),
+                      now,
+                      user_a,
+                  )
+
+                  insert_event = (
+                      "INSERT INTO goal_contributions "
+                      "(id, workspace_id, goal_id, currency, amount, contributed_at, "
+                      "correction_of_id, created_by, created_at) "
+                      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $6)"
+                  )
+                  await expect_fk_rejection(
+                      connection,
+                      "mismatched_currency_db_rejected",
+                      insert_event,
+                      uuid.uuid4(),
+                      workspace_a,
+                      goal_a,
+                      "USD",
+                      Decimal("1.0000"),
+                      now,
+                      None,
+                      user_a,
+                  )
+                  await expect_fk_rejection(
+                      connection,
+                      "cross_goal_correction_db_rejected",
+                      insert_event,
+                      uuid.uuid4(),
+                      workspace_a,
+                      goal_b,
+                      "RUB",
+                      Decimal("-1.0000"),
+                      now,
+                      contribution_a,
+                      user_a,
+                  )
+                  await expect_fk_rejection(
+                      connection,
+                      "cross_workspace_correction_db_rejected",
+                      insert_event,
+                      uuid.uuid4(),
+                      workspace_b,
+                      goal_c,
+                      "RUB",
+                      Decimal("-1.0000"),
+                      now,
+                      contribution_a,
+                      user_b,
+                  )
+              finally:
+                  await connection.close()
+
+
+          asyncio.run(main())
+          PY
+
+      - name: Remove isolated migration-proof database
+        env:
+          DATABASE_URL: ${{ env.MIGRATION_DATABASE_URL }}
+          TEST_RUN_ID: ${{ env.MIGRATION_TEST_RUN_ID }}
+        run: |
+          python scripts/test_database_cleanup.py \
+            --database-url "$DATABASE_URL" \
+            --test-run-id "$TEST_RUN_ID" \
+            --execute
+
+      - name: Run focused Goals PostgreSQL tests
+        run: |
+          python scripts/test_runner.py -- tests/test_goals.py -vv --tb=short
+
+      - name: Run full backend PostgreSQL suite
+        run: |
+          python scripts/test_runner.py -- -q
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Ruff format check
+        run: python -m ruff format --check .
+
+      - name: Goals mypy gate
+        run: python -m mypy app tests/test_goals.py
+
+      - name: Prove full mypy baseline without failing on known legacy errors
+        run: |
+          set +e
+          python -m mypy app tests 2>&1 | tee /tmp/finspace-full-mypy.txt
+          mypy_status=${PIPESTATUS[0]}
+          set -e
+          error_count="$(grep -c ': error:' /tmp/finspace-full-mypy.txt || true)"
+          echo "full_mypy_exit=$mypy_status"
+          echo "full_mypy_errors=$error_count"
+          grep ': error:' /tmp/finspace-full-mypy.txt \
+            | sed -E 's#:[0-9]+: error:.*##' \
+            | sort \
+            | uniq -c
+          test "$mypy_status" -eq 1
+          test "$error_count" -eq 254
+          if grep ': error:' /tmp/finspace-full-mypy.txt \
+            | grep -Eq '(^|/)(app/.*/?goals\.py|tests/test_goals\.py):'; then
+            echo "Goals files appeared in full mypy errors" >&2
+            exit 1
+          fi
+          echo "new_goals_mypy_regressions=0"
+
+      - name: Validate temporary commit diff
+        working-directory: .
+        run: git diff HEAD^ --check
