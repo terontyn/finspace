@@ -64,6 +64,12 @@ jobs:
       - name: Checkout temporary validation branch
         uses: actions/checkout@v4
 
+      - name: Expose Apps Script package at the runtime path
+        run: |
+          sudo install -d -m 0755 /app
+          sudo ln -s "$GITHUB_WORKSPACE/google-apps-script" /app/google-apps-script
+          test -f /app/google-apps-script/Template.gs
+
       - name: Set up repository-supported Python
         uses: actions/setup-python@v5
         with:
