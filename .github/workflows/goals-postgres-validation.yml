@@ -225,8 +225,10 @@ jobs:
                   print("tables=" + ",".join(sorted(tables)))
 
                   constraints = await connection.fetch(
-                      "SELECT c.conrelid::regclass::text AS table_name, c.conname, c.contype, "
-                      "pg_get_constraintdef(c.oid, true) AS definition, c.confdeltype "
+                      "SELECT c.conrelid::regclass::text AS table_name, c.conname, "
+                      "c.contype::text AS contype, "
+                      "pg_get_constraintdef(c.oid, true) AS definition, "
+                      "c.confdeltype::text AS confdeltype "
                       "FROM pg_constraint AS c "
                       "WHERE c.conrelid::regclass::text = ANY($1::text[]) "
                       "ORDER BY table_name, c.contype, c.conname",
@@ -259,7 +261,10 @@ jobs:
                   goal_definitions = [row["definition"] for row in by_table["goals"]]
                   assert any("target_amount >" in item for item in goal_definitions)
                   assert any("version >= 1" in item for item in goal_definitions)
-                  assert any("currency ~" in item for item in goal_definitions)
+                  assert any(
+                      "currency" in item and "^[A-Z]{3}$" in item
+                      for item in goal_definitions
+                  )
                   assert any(
                       "status" in item
                       and all(
