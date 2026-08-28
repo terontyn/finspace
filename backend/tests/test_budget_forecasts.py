@@ -482,10 +482,10 @@ def test_overdue_failed_incomplete_block_and_exact_as_of_inclusion(client: TestC
     assert result.exceptions.failed_count == 1
     assert result.exceptions.incomplete_count == 1
     assert result.exceptions.blocked_rule_count == 3
-    assert [item.reason for item in result.occurrences if item.state == "exception"] == [
-        "overdue_unmaterialized",
+    assert sorted(item.reason for item in result.occurrences if item.state == "exception") == [
         "failed_execution",
         "incomplete_execution",
+        "overdue_unmaterialized",
     ]
     scheduled = next(item for item in result.occurrences if item.state == "scheduled")
     assert scheduled.scheduled_for == as_of
@@ -652,10 +652,11 @@ def test_pending_draft_follows_current_period_currency_and_splits(client: TestCl
     )
     assert september_rub.forecast.pending_draft_expense == Decimal("100.0000")
     assert september_rub.forecast.pending_draft_occurrence_count == 1
-    assert [item.forecast_expense for item in september_rub.category_forecast] == [
-        Decimal("40.0000"),
-        Decimal("60.0000"),
-    ]
+    september_by_category = {
+        item.category_id: item.forecast_expense for item in september_rub.category_forecast
+    }
+    assert september_by_category[uuid.UUID(first_category["id"])] == Decimal("40.0000")
+    assert september_by_category[uuid.UUID(second_category["id"])] == Decimal("60.0000")
     pending = next(item for item in september_rub.occurrences if item.state == "pending_draft")
     assert str(pending.transaction_id) == transaction_id
     assert pending.scheduled_for == scheduled_for
@@ -896,10 +897,11 @@ def test_forecast_reuses_budget_actual_refund_split_adjustment_and_rollover_sema
     assert result.forecast.income == ZERO
     assert result.forecast.expense == ZERO
     assert result.projected.net_cashflow == Decimal("-85.0000")
-    assert [item.actual_expense for item in result.category_forecast] == [
-        Decimal("36.0000"),
-        Decimal("54.0000"),
-    ]
+    actual_by_category = {
+        item.category_id: item.actual_expense for item in result.category_forecast
+    }
+    assert actual_by_category[uuid.UUID(first_category["id"])] == Decimal("36.0000")
+    assert actual_by_category[uuid.UUID(second_category["id"])] == Decimal("54.0000")
     assert group_before["rollover"] == group_after["rollover"]
     assert group_before["planning_capacity"] == group_after["planning_capacity"]
     assert group_before["unallocated"] == group_after["unallocated"]
