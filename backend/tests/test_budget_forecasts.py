@@ -265,6 +265,10 @@ def test_forecast_transaction_is_configured_first_and_sessions_are_released() ->
     assert statements[0].upper() == "SET TRANSACTION READ ONLY"
     assert checkouts == 4
     assert checkins == checkouts
+    print(
+        "forecast_session_proof "
+        f"first_statement={statements[0]!r} checkouts={checkouts} checkins={checkins}"
+    )
 
 
 def test_current_forecast_modes_advisory_transfer_currency_and_categories(
@@ -1348,6 +1352,7 @@ def test_successful_forecast_has_no_writes_and_query_count_is_occurrence_bounded
     assert dense.forecast.scheduled_occurrence_count == 24 * 31
     assert dense_queries == sparse_queries
     assert asyncio.run(table_counts()) == before_dense
+    print(f"forecast_query_count sparse={sparse_queries} dense={dense_queries}")
 
 
 def test_repeatable_read_snapshot_never_mixes_new_actual_with_old_schedule(
@@ -1450,3 +1455,4 @@ def test_repeatable_read_snapshot_never_mixes_new_actual_with_old_schedule(
     assert old.forecast.income == Decimal("10.0000")
     assert new.actual.income == Decimal("10.0000")
     assert new.forecast.income == ZERO
+    print("forecast_snapshot_race before=old_actual+scheduled after=new_actual+excluded")
