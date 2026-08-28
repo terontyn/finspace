@@ -11,6 +11,7 @@ import { BudgetScreen } from "@/components/screens/budget-screen";
 import { CategoriesScreen } from "@/components/screens/categories-screen";
 import { ComingSoonScreen } from "@/components/screens/coming-soon-screen";
 import { GoogleSheetsScreen } from "@/components/screens/google-sheets-screen";
+import { GoalsScreen } from "@/components/screens/goals-screen";
 import { ImportScreen } from "@/components/screens/import-screen";
 import { MonthCloseScreen } from "@/components/screens/month-close-screen";
 import { RecurringRulesScreen } from "@/components/screens/recurring-rules-screen";
@@ -75,7 +76,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       {screen === "reports" && <ReportsScreen onError={showError} timezone={auth.session.workspace.timezone} />}
       {screen === "payees" && <ComingSoonScreen description="Получатели будут спроектированы поверх текущего поля counterparty с aliases и обратной совместимостью." requiresApi title="Получатели" />}
       {screen === "rules" && <ComingSoonScreen description="Правила категоризации — отдельный механизм и не заменяют recurring rules." requiresApi title="Правила" />}
-      {screen === "goals" && <ComingSoonScreen description="Финансовые цели требуют отдельной доменной модели и не имитируются локальными данными." requiresApi title="Цели" />}
+      {screen === "goals" && <GoalsScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} />}
       {screen === "settings" && <ComingSoonScreen description="Настройки пространства будут перенесены после завершения интеграции рабочих финансовых экранов." title="Настройки" />}
     </AppShell>
   );
