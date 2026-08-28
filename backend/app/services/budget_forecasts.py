@@ -723,13 +723,16 @@ async def get_forecast(
         assert rule.next_run_at is not None
         cursor = rule.next_run_at.astimezone(UTC).replace(microsecond=0)
         if cursor < as_of:
+            overdue_record = execution_map.get((rule.id, cursor))
             _classify_overdue_cursor(
                 rule,
                 cursor,
-                execution_map.get((rule.id, cursor)),
+                overdue_record,
                 exception_counts,
                 occurrence_values,
             )
+            if overdue_record is not None:
+                processed_execution_ids.add(overdue_record.execution.id)
             continue
         if cursor >= period_end:
             continue

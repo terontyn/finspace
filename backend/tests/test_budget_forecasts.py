@@ -866,6 +866,7 @@ def test_forecast_reuses_budget_actual_refund_split_adjustment_and_rollover_sema
         transaction_type="adjustment",
         amount="5.0000",
         occurred_at="2026-08-07T10:00:00Z",
+        comment="Forecast actual-semantics correction",
     )
 
     async def reconcile_original() -> None:
