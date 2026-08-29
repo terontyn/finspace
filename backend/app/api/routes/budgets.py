@@ -1,9 +1,11 @@
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Header, Query
 
 from app.dependencies.context import CurrentContext, EditorContext
-from app.dependencies.database import DbSession
+from app.dependencies.database import DbSession, ForecastDbSession
+from app.schemas.budget_forecasts import BudgetForecastResponse
 from app.schemas.budgets import (
     BudgetCopyRequest,
     BudgetGroupResponse,
@@ -13,6 +15,7 @@ from app.schemas.budgets import (
     BudgetVersionRequest,
 )
 from app.schemas.common import CurrencyCode, PageMeta
+from app.services import budget_forecasts as forecast_service
 from app.services import budgets as service
 
 router = APIRouter()
@@ -48,6 +51,24 @@ async def budget_get(
         service.parse_period(period),
         currency,
         include_deleted=include_deleted,
+    )
+
+
+@router.get("/{period}/{currency}/forecast", response_model=BudgetForecastResponse)
+async def budget_forecast(
+    period: str,
+    currency: CurrencyCode,
+    context: CurrentContext,
+    session: ForecastDbSession,
+    include_occurrences: bool = False,
+) -> BudgetForecastResponse:
+    return await forecast_service.get_forecast(
+        session,
+        context.workspace,
+        service.parse_period(period),
+        currency,
+        as_of=datetime.now(UTC).replace(microsecond=0),
+        include_occurrences=include_occurrences,
     )
 
 
