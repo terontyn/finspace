@@ -1,4 +1,5 @@
 from calendar import monthrange
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -15,6 +16,16 @@ SUPPORTED_PARTS = {
     "BYMINUTE",
     "UNTIL",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class OccurrenceExpansion:
+    occurrences: tuple[datetime, ...]
+    generated_count: int
+
+
+class OccurrenceExpansionLimitExceeded(ValueError):
+    pass
 
 
 def timezone(value: str) -> ZoneInfo:
@@ -93,6 +104,42 @@ def next_occurrence(
                     return None
                 return candidate
     raise _invalid_rrule("RRULE does not produce an occurrence within 20 years")
+
+
+def occurrences_between(
+    value: str,
+    timezone_name: str,
+    *,
+    first_occurrence: datetime,
+    start: datetime,
+    end: datetime,
+    anchor: datetime,
+    limit: int,
+) -> OccurrenceExpansion:
+    """Advance from the persisted cursor with the executor's recurrence semantics."""
+    if limit < 1:
+        raise OccurrenceExpansionLimitExceeded
+    current = first_occurrence.astimezone(UTC).replace(microsecond=0)
+    start_utc = start.astimezone(UTC)
+    end_utc = end.astimezone(UTC)
+    occurrences: list[datetime] = []
+    generated_count = 0
+    while current < end_utc:
+        generated_count += 1
+        if generated_count > limit:
+            raise OccurrenceExpansionLimitExceeded
+        if current >= start_utc:
+            occurrences.append(current)
+        following = next_occurrence(
+            value,
+            timezone_name,
+            after=current,
+            anchor=anchor,
+        )
+        if following is None:
+            break
+        current = following.astimezone(UTC).replace(microsecond=0)
+    return OccurrenceExpansion(tuple(occurrences), generated_count)
 
 
 def _date_matches(candidate: date, anchor: date, parts: dict[str, str]) -> bool:
