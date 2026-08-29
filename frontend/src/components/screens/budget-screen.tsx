@@ -1,8 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { ActionDialog } from "@/components/ui/action-dialog";
+import {
+  BudgetForecastOccurrencesDrawer,
+  BudgetForecastPanel,
+  type BudgetForecastDetailsState,
+  type BudgetForecastViewState,
+} from "@/components/screens/budget-forecast-panel";
 import { EntityDrawer } from "@/components/ui/entity-drawer";
 import {
   copyBudget,
@@ -12,6 +19,15 @@ import {
   putBudget,
   restoreBudget,
 } from "@/lib/budget-api";
+import { getBudgetForecast } from "@/lib/budget-forecast-api";
+import {
+  forecastErrorMessage,
+  isBudgetForecastNotFound,
+  isForecastAbort,
+  isForecastAuthError,
+  isForecastCapabilityUnavailable,
+  visualForecastPercentage,
+} from "@/lib/budget-forecast";
 import {
   allowedBudgetCategories,
   budgetErrorMessage,
@@ -40,6 +56,7 @@ import type {
   BudgetRevisionPage,
   BudgetRolloverPolicy,
 } from "@/types/budget";
+import type { BudgetCategoryForecast } from "@/types/budget-forecast";
 import type { Category, Paged } from "@/types/finance";
 
 interface BudgetScreenProps {
@@ -57,6 +74,22 @@ type PendingCommand = "copy" | "delete" | "history" | "restore" | "save" | null;
 type ConfirmDialog = "copy" | "delete" | null;
 
 const HISTORY_LIMIT = 20;
+
+const initialForecastState: BudgetForecastViewState = {
+  data: null,
+  error: null,
+  key: null,
+  loading: false,
+  stale: false,
+  unavailable: false,
+};
+
+const initialForecastDetailsState: BudgetForecastDetailsState = {
+  data: null,
+  error: null,
+  key: null,
+  loading: false,
+};
 
 function moneyState(value: string): "negative" | "neutral" | "positive" {
   if (isNegativeMoney(value)) return "negative";
@@ -163,8 +196,22 @@ function AllocationUsage({ allocation }: { allocation: BudgetAllocation }) {
   return <div className={`budget-usage ${over ? "budget-usage--over" : ""}`}><div aria-label="Использование бюджета" aria-valuemax={100} aria-valuemin={0} aria-valuenow={width} aria-valuetext={valueText} role="progressbar"><i style={{ width: `${width}%` }}/></div><span>{valueText}</span></div>;
 }
 
-function AllocationList({ group }: { group: BudgetGroup }) {
-  return <section className="panel budget-allocation-panel"><div className="panel-heading"><div><span className="kicker">Exact-category semantics</span><h2>План по категориям</h2><p>Родители и подкатегории показаны отдельно, без скрытого объединения.</p></div><span className="count-badge">{group.allocations.length}</span></div>{group.allocations.length ? <div className="budget-allocation-table" role="table" aria-label={`Распределения бюджета ${group.currency}`}><div className="budget-allocation-row budget-allocation-row--head" role="row"><span>Категория</span><span>План</span><span>Факт</span><span>Осталось</span><span>Использование</span></div>{group.allocations.map((allocation) => <div className={`budget-allocation-row ${isNegativeMoney(allocation.remaining) ? "budget-allocation-row--over" : ""}`} key={allocation.id} role="row"><div className="budget-allocation-category" data-label="Категория"><strong>{allocation.category_name}</strong><small>{allocation.parent_id ? "Точная дочерняя категория" : "Точная категория"}{allocation.note ? ` · ${allocation.note}` : ""}</small>{allocation.category_archived || allocation.category_deleted ? <em>Категория больше недоступна</em> : null}</div><span data-label="План">{formatBudgetMoney(allocation.planned, group.currency)}</span><span data-label="Факт">{formatBudgetMoney(allocation.actual, group.currency)}</span><span className={`money--${moneyState(allocation.remaining)}`} data-label="Осталось">{formatBudgetMoney(allocation.remaining, group.currency)}{isNegativeMoney(allocation.remaining) ? <small>перерасход</small> : null}</span><div data-label="Использование"><AllocationUsage allocation={allocation}/></div></div>)}</div> : <div className="empty-state"><strong>Распределений нет</strong><span>Плановый доход пока не назначен точным категориям.</span></div>}</section>;
+function ForecastAllocationUsage({ category }: { category: BudgetCategoryForecast }) {
+  const width = visualForecastPercentage(category.projected_usage_percent);
+  if (width === null) return <span className="budget-usage-empty">Процент недоступен</span>;
+  const over = isNegativeMoney(category.projected_remaining);
+  const valueText = `${category.projected_usage_percent}%${over ? " · ожидается перерасход" : ""}`;
+  return <div className={`budget-usage ${over ? "budget-usage--over" : ""}`}><div aria-label="Ожидаемое использование бюджета" aria-valuemax={100} aria-valuemin={0} aria-valuenow={width} aria-valuetext={valueText} role="progressbar"><i style={{ width: `${width}%` }}/></div><span>{valueText}</span></div>;
+}
+
+function AllocationList({ forecast, group }: { forecast: BudgetCategoryForecast[] | null; group: BudgetGroup }) {
+  const byCategoryId = new Map(forecast?.map((category) => [category.category_id, category]) ?? []);
+  const withForecast = forecast !== null;
+  return <section className={`panel budget-allocation-panel ${withForecast ? "budget-allocation-panel--forecast" : ""}`}><div className="panel-heading"><div><span className="kicker">Exact-category semantics</span><h2>План по категориям</h2><p>{withForecast ? "Факт и прогноз сопоставлены только по category_id из backend." : "Родители и подкатегории показаны отдельно, без скрытого объединения."}</p></div><span className="count-badge">{group.allocations.length}</span></div>{group.allocations.length ? <div className="budget-allocation-table" role="table" aria-label={`Распределения бюджета ${group.currency}`}><div className="budget-allocation-row budget-allocation-row--head" role="row"><span>Категория</span><span>План</span><span>Факт</span>{withForecast ? <><span>Прогноз</span><span>Ожидается</span><span>Ожидаемый остаток</span></> : <span>Осталось</span>}<span>Использование</span></div>{group.allocations.map((allocation) => {
+    const category = byCategoryId.get(allocation.category_id);
+    const remaining = category?.projected_remaining ?? allocation.remaining;
+    return <div className={`budget-allocation-row ${isNegativeMoney(remaining) ? "budget-allocation-row--over" : ""}`} key={allocation.id} role="row"><div className="budget-allocation-category" data-label="Категория"><strong>{allocation.category_name}</strong><small>{allocation.parent_id ? "Точная дочерняя категория" : "Точная категория"}{allocation.note ? ` · ${allocation.note}` : ""}</small>{allocation.category_archived || allocation.category_deleted ? <em>Категория больше недоступна</em> : null}</div><span data-label="План">{formatBudgetMoney(category?.allocated_amount ?? allocation.planned, group.currency)}</span><span data-label="Факт">{formatBudgetMoney(category?.actual_expense ?? allocation.actual, group.currency)}</span>{withForecast ? <><span data-label="Прогноз">{category ? formatBudgetMoney(category.forecast_expense, group.currency) : "—"}</span><span data-label="Ожидается">{category ? formatBudgetMoney(category.projected_expense, group.currency) : "—"}</span><span className={category && isNegativeMoney(category.projected_remaining) ? "money--negative" : undefined} data-label="Ожидаемый остаток">{category ? formatBudgetMoney(category.projected_remaining, group.currency) : "—"}{category && isNegativeMoney(category.projected_remaining) ? <small>ожидается перерасход</small> : null}</span></> : <span className={`money--${moneyState(allocation.remaining)}`} data-label="Осталось">{formatBudgetMoney(allocation.remaining, group.currency)}{isNegativeMoney(allocation.remaining) ? <small>перерасход</small> : null}</span>}<div data-label="Использование">{category ? <ForecastAllocationUsage category={category}/> : <AllocationUsage allocation={allocation}/>}</div></div>;
+  })}</div> : <div className="empty-state"><strong>Распределений нет</strong><span>Плановый доход пока не назначен точным категориям.</span></div>}</section>;
 }
 
 function HistoryDrawer({
@@ -211,7 +258,15 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyTotal, setHistoryTotal] = useState(0);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [forecast, setForecast] = useState<BudgetForecastViewState>(initialForecastState);
+  const [forecastRefresh, setForecastRefresh] = useState(0);
+  const [forecastDetailsTargetKey, setForecastDetailsTargetKey] = useState<string | null>(null);
+  const [forecastDetails, setForecastDetails] = useState<BudgetForecastDetailsState>(initialForecastDetailsState);
+  const [forecastDetailsRefresh, setForecastDetailsRefresh] = useState(0);
   const requestGeneration = useRef(0);
+  const forecastGeneration = useRef(0);
+  const forecastDetailsGeneration = useRef(0);
+  const forecastDetailsReturnFocus = useRef<HTMLElement | null>(null);
   const saveIdentity = useRef(new MutationIdentity());
   const copyIdentity = useRef(new MutationIdentity());
   const deleteIdentity = useRef(new MutationIdentity());
@@ -223,8 +278,26 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
     () => month?.groups.find((group) => group.currency === selectedCurrency) ?? null,
     [month, selectedCurrency],
   );
+  const forecastRequestKey = selectedGroup && !selectedGroup.deleted_at
+    ? `${period}:${selectedGroup.currency}`
+    : null;
+  const forecastBudgetVersion = selectedGroup?.version ?? null;
+  const visibleForecast: BudgetForecastViewState = forecast.key === forecastRequestKey
+    ? forecast
+    : { ...initialForecastState, key: forecastRequestKey, loading: forecastRequestKey !== null };
+  const forecastDetailsOpen = forecastDetailsTargetKey !== null
+    && forecastDetailsTargetKey === forecastRequestKey;
   const monthFrozen = month?.projection_source === "month_close_revision";
-  const navigationLocked = busy !== null || dialog !== null || editorOpen || historyOpen;
+  const modalNavigationLocked = busy !== null || dialog !== null || editorOpen || historyOpen;
+  const navigationLocked = modalNavigationLocked || forecastDetailsOpen;
+
+  const closeForecastDetails = useCallback(() => {
+    const returnFocus = forecastDetailsReturnFocus.current;
+    forecastDetailsReturnFocus.current = null;
+    setForecastDetailsTargetKey(null);
+    setForecastDetails(initialForecastDetailsState);
+    queueMicrotask(() => returnFocus?.focus());
+  }, []);
 
   const load = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -259,6 +332,77 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
 
   useEffect(() => { queueMicrotask(() => void load()); }, [load]);
 
+  useEffect(() => {
+    const generation = ++forecastGeneration.current;
+    let active = true;
+    if (!forecastRequestKey || !selectedGroup) {
+      return () => { active = false; };
+    }
+
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      if (!active || generation !== forecastGeneration.current) return;
+      setForecast((current) => ({
+        data: current.key === forecastRequestKey ? current.data : null,
+        error: null,
+        key: forecastRequestKey,
+        loading: true,
+        stale: false,
+        unavailable: false,
+      }));
+    });
+
+    void getBudgetForecast(period, selectedGroup.currency, { signal: controller.signal }).then((result) => {
+      if (!active || generation !== forecastGeneration.current) return;
+      setForecast({ data: result, error: null, key: forecastRequestKey, loading: false, stale: false, unavailable: false });
+    }).catch((error: unknown) => {
+      if (!active || generation !== forecastGeneration.current || isForecastAbort(error)) return;
+      if (isBudgetForecastNotFound(error)) {
+        setForecast({ data: null, error: null, key: forecastRequestKey, loading: false, stale: false, unavailable: false });
+        return;
+      }
+      if (isForecastCapabilityUnavailable(error)) {
+        setForecast({ data: null, error: null, key: forecastRequestKey, loading: false, stale: false, unavailable: true });
+        return;
+      }
+      const message = forecastErrorMessage(error);
+      setForecast((current) => current.key === forecastRequestKey && current.data
+        ? { ...current, error: message, loading: false, stale: true }
+        : { data: null, error: message, key: forecastRequestKey, loading: false, stale: false, unavailable: false });
+      if (isForecastAuthError(error)) onError(error);
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [forecastBudgetVersion, forecastRefresh, forecastRequestKey, onError, period, selectedGroup]);
+
+  useEffect(() => {
+    const generation = ++forecastDetailsGeneration.current;
+    let active = true;
+    if (
+      !forecastDetailsOpen
+      || !forecastRequestKey
+      || forecastDetailsTargetKey !== forecastRequestKey
+      || !selectedGroup
+    ) return () => { active = false; };
+    const controller = new AbortController();
+    void getBudgetForecast(period, selectedGroup.currency, { includeOccurrences: true, signal: controller.signal }).then((result) => {
+      if (!active || generation !== forecastDetailsGeneration.current) return;
+      setForecastDetails({ data: result, error: null, key: forecastRequestKey, loading: false });
+    }).catch((error: unknown) => {
+      if (!active || generation !== forecastDetailsGeneration.current || isForecastAbort(error)) return;
+      const message = forecastErrorMessage(error);
+      setForecastDetails({ data: null, error: message, key: forecastRequestKey, loading: false });
+      if (isForecastAuthError(error)) onError(error);
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [forecastDetailsOpen, forecastDetailsRefresh, forecastDetailsTargetKey, forecastRequestKey, onError, period, selectedGroup]);
+
   function applyGroup(group: BudgetGroup) {
     setMonth((current) => current ? {
       ...current,
@@ -268,6 +412,28 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
       projection_source: group.projection_source,
     } : { groups: [group], historical_snapshot_available: group.projection_source === "month_close_revision", period: group.period, projection_source: group.projection_source, timezone });
     setSelectedCurrency(group.currency);
+    setForecastDetailsTargetKey(null);
+    setForecastDetails(initialForecastDetailsState);
+    setForecastRefresh((current) => current + 1);
+  }
+
+  function retryForecast() {
+    setForecastRefresh((current) => current + 1);
+  }
+
+  function openForecastDetails() {
+    if (!forecastRequestKey) return;
+    forecastDetailsReturnFocus.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setForecastDetails({ data: null, error: null, key: forecastRequestKey, loading: true });
+    setForecastDetailsTargetKey(forecastRequestKey);
+  }
+
+  function retryForecastDetails() {
+    if (!forecastRequestKey) return;
+    setForecastDetails({ data: null, error: null, key: forecastRequestKey, loading: true });
+    setForecastDetailsRefresh((current) => current + 1);
   }
 
   function changeForm(next: BudgetFormState) {
@@ -449,7 +615,7 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
   }
 
   function selectPeriod(next: string) {
-    if (navigationLocked) return;
+    if (modalNavigationLocked) return;
     if (!/^\d{4}-\d{2}$/.test(next)) return;
     requestGeneration.current += 1;
     setMonth(null);
@@ -464,11 +630,13 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
     setHistoryOffset(0);
     setHistoryTotal(0);
     setHistoryError(null);
+    setForecastDetailsTargetKey(null);
+    setForecastDetails(initialForecastDetailsState);
     setPeriod(next);
   }
 
   function selectCurrency(currency: string) {
-    if (navigationLocked) return;
+    if (modalNavigationLocked) return;
     saveIdentity.current.reset();
     copyIdentity.current.reset();
     deleteIdentity.current.reset();
@@ -478,8 +646,14 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
     setHistoryOffset(0);
     setHistoryTotal(0);
     setHistoryError(null);
+    setForecastDetailsTargetKey(null);
+    setForecastDetails(initialForecastDetailsState);
     setSelectedCurrency(currency);
   }
+
+  const forecastDetailsDrawer = forecastDetailsOpen
+    ? <BudgetForecastOccurrencesDrawer onClose={closeForecastDetails} onRetry={retryForecastDetails} state={forecastDetails} timezone={forecastDetails.data?.timezone ?? timezone}/>
+    : null;
 
   return <section className="budget-screen">
     <header className="screen-header budget-screen-header"><div><span className="kicker">Планирование без FX</span><h1>Бюджет</h1><p>Каждая валюта и точная категория планируются отдельно. Итоги и фактические значения рассчитывает backend.</p></div><div className="screen-header-actions"><button className="secondary-button" disabled={loading || navigationLocked} onClick={() => void load()} type="button">Обновить</button>{selectedGroup ? <button className="secondary-button" disabled={busy !== null} onClick={openHistory} type="button">История изменений</button> : null}{canMutate && selectedGroup && !selectedGroup.deleted_at && !selectedGroup.frozen ? <button className="primary-button" disabled={busy !== null} onClick={() => openEdit(selectedGroup)} type="button">Изменить план</button> : null}</div></header>
@@ -514,9 +688,11 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
           <article className="panel budget-secondary-facts"><span className="kicker">Backend projection</span><dl><div><dt>Фактический доход</dt><dd>{formatBudgetMoney(selectedGroup.actual_income, selectedGroup.currency)}</dd></div><div><dt>Корректировки</dt><dd>{formatBudgetMoney(selectedGroup.adjustment, selectedGroup.currency)}</dd></div><div><dt>Net cash flow</dt><dd>{formatBudgetMoney(selectedGroup.actual_net_cashflow, selectedGroup.currency)}</dd></div><div><dt>Учтённый расход</dt><dd>{formatBudgetMoney(selectedGroup.budgeted_actual_expense, selectedGroup.currency)}</dd></div></dl></article>
         </section>
 
+        <BudgetForecastPanel currency={selectedGroup.currency} onOpenOccurrences={openForecastDetails} onRetry={retryForecast} state={visibleForecast}/>
+
         {isPositiveMoney(selectedGroup.unbudgeted_actual_expense) ? <section className="budget-unbudgeted" role="status"><span>!</span><div><strong>Расходы вне распределений: {formatBudgetMoney(selectedGroup.unbudgeted_actual_expense, selectedGroup.currency)}</strong><p>Backend обнаружил расходы без Budget allocation. Frontend не распределяет их автоматически.</p></div></section> : null}
 
-        <AllocationList group={selectedGroup}/>
+        <AllocationList forecast={visibleForecast.data?.category_forecast ?? null} group={selectedGroup}/>
 
         {canMutate && !selectedGroup.frozen ? <section className="panel budget-management"><div><span className="kicker">Управление планом</span><h2>Команды aggregate</h2><p>Каждая команда защищена optimistic version и отдельным idempotency key.</p></div><div><button className="secondary-button" disabled={busy !== null} onClick={() => { copyIdentity.current.reset(); setDialogError(null); setDialog("copy"); }} type="button">Скопировать прошлый месяц с заменой</button><button className="danger-button" disabled={busy !== null} onClick={() => { deleteIdentity.current.reset(); setDialogError(null); setDialog("delete"); }} type="button">Удалить план бюджета</button></div></section> : null}
       </> : null}
@@ -529,5 +705,8 @@ export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScr
     {dialog === "delete" && selectedGroup ? <ActionDialog description="План будет помечен удалённым и останется доступен для восстановления. Операции, категории и фактические расходы не удаляются." eyebrow="Soft delete" onClose={() => { if (!busy) { setDialog(null); setDialogError(null); deleteIdentity.current.reset(); } }} title="Удалить план бюджета?">{dialogError ? <div className="notice notice--error" role="alert">{dialogError}</div> : null}<div className="budget-dialog-warning budget-dialog-warning--danger"><strong>Удаляется только план {selectedGroup.currency}</strong><span>{budgetPeriodLabel(selectedGroup.period)} · версия {selectedGroup.version}</span></div><footer><button className="secondary-button" disabled={busy !== null} onClick={() => { setDialog(null); setDialogError(null); deleteIdentity.current.reset(); }} type="button">Отмена</button><button className="danger-button" disabled={busy !== null} onClick={() => void removePlan()} type="button">{busy === "delete" ? "Удаляем…" : dialogError ? "Повторить ту же команду" : "Удалить план бюджета"}</button></footer></ActionDialog> : null}
 
     {historyOpen && selectedGroup ? <HistoryDrawer error={historyError} group={selectedGroup} hasMore={historyOffset < historyTotal} items={history} loading={busy === "history"} onClose={() => setHistoryOpen(false)} onLoadMore={() => void loadHistory(historyOffset)}/> : null}
+    {forecastDetailsDrawer && typeof document !== "undefined" && document.body
+      ? createPortal(forecastDetailsDrawer, document.body)
+      : forecastDetailsDrawer}
   </section>;
 }
