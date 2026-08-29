@@ -1902,15 +1902,59 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .budget-history-list article > div { display: grid; gap: 2px; }
 .budget-history-list article span, .budget-history-list article small { color: var(--text-secondary); font-size: 8px; overflow-wrap: anywhere; }
 .budget-history-loading { padding: 22px; color: var(--text-secondary); text-align: center; }
+.budget-forecast-panel { display: grid; gap: 16px; margin-bottom: 12px; padding: 20px; }
+.budget-forecast-panel--stale { border-color: color-mix(in srgb, var(--warning) 36%, var(--border)); }
+.budget-forecast-heading { align-items: flex-start; }
+.budget-forecast-heading h2 { margin: 3px 0; }
+.budget-forecast-heading > div:last-child { display: grid; justify-items: end; gap: 5px; }
+.budget-forecast-asof { color: var(--text-muted); font-size: 8px; }
+.budget-forecast-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: 13px; }
+.budget-forecast-column { min-width: 0; padding: 15px; background: var(--surface-1); }
+.budget-forecast-column + .budget-forecast-column { border-left: 1px solid var(--border); }
+.budget-forecast-column:last-child { background: linear-gradient(145deg, var(--surface-1), var(--accent-soft)); }
+.budget-forecast-column dl, .budget-forecast-meta-grid dl, .budget-occurrence-card dl { display: grid; gap: 0; margin: 7px 0 0; }
+.budget-forecast-column dl > div, .budget-forecast-meta-grid dl > div, .budget-occurrence-card dl > div { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); }
+.budget-forecast-column dt, .budget-forecast-meta-grid dt, .budget-occurrence-card dt { color: var(--text-secondary); font-size: 8px; }
+.budget-forecast-column dd, .budget-forecast-meta-grid dd, .budget-occurrence-card dd { min-width: 0; margin: 0; font-size: 9px; font-weight: 750; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.budget-forecast-column .money--negative, .budget-occurrence-card .money--negative { color: var(--negative); }
+.budget-forecast-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.budget-forecast-meta-grid > article { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-1); }
+.budget-forecast-meta-grid p { margin: 8px 0 0; color: var(--text-muted); font-size: 9px; }
+.budget-forecast-warning, .budget-forecast-stale, .budget-forecast-period-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border)); border-radius: 10px; background: var(--warning-bg); color: var(--warning); }
+.budget-forecast-warning > div { display: grid; gap: 2px; }
+.budget-forecast-warning span, .budget-forecast-stale, .budget-forecast-period-note { font-size: 8px; }
+.budget-forecast-warning a { color: inherit; font-size: 9px; font-weight: 800; white-space: nowrap; }
+.budget-forecast-period-note { border-color: color-mix(in srgb, var(--info) 30%, var(--border)); background: var(--info-bg); color: var(--info); }
+.budget-forecast-panel > footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.budget-forecast-panel > footer span { color: var(--text-muted); font-size: 8px; }
+.budget-forecast-loading { grid-template-columns: repeat(3, 1fr); }
+.budget-forecast-loading i { min-height: 108px; border-radius: 11px; background: linear-gradient(90deg, var(--surface-2) 20%, var(--surface-3) 50%, var(--surface-2) 80%); background-size: 220% 100%; animation: shimmer 1.5s infinite; }
+.budget-forecast-error { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; padding: 16px 18px; }
+.budget-forecast-error > div { display: grid; gap: 3px; }
+.budget-forecast-error span { color: var(--text-secondary); font-size: 9px; }
+.budget-forecast-unavailable { margin-bottom: 12px; padding: 8px 12px; border: 1px dashed var(--border); border-radius: 9px; color: var(--text-muted); font-size: 8px; }
+.budget-allocation-panel--forecast .budget-allocation-row { grid-template-columns: minmax(150px, 1.4fr) repeat(5, minmax(75px, .65fr)) minmax(115px, .8fr); gap: 8px; }
+.budget-occurrence-drawer { display: grid; gap: 14px; }
+.budget-occurrence-list { display: grid; gap: 9px; }
+.budget-occurrence-card { display: grid; gap: 7px; padding: 13px; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-1); }
+.budget-occurrence-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.budget-occurrence-card > header > div { display: grid; gap: 3px; }
+.budget-occurrence-card > header span { color: var(--accent); font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.budget-occurrence-card > header b { font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.budget-occurrence-card > p { margin: 0; padding: 8px; border-radius: 8px; background: var(--warning-bg); color: var(--warning); font-size: 8px; overflow-wrap: anywhere; }
+.budget-occurrence-card--exception { border-color: color-mix(in srgb, var(--negative) 30%, var(--border)); }
+.budget-occurrence-drawer > footer { position: sticky; bottom: -26px; margin: 0 -26px -26px; padding: 13px 26px 24px; border-top: 1px solid var(--border); background: var(--surface-2); }
+.budget-occurrence-drawer > footer a { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 
 @media (max-width: 1120px) {
   .budget-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .budget-detail-grid { grid-template-columns: 1fr 1fr; }
   .budget-secondary-facts { grid-column: 1 / -1; }
   .budget-allocation-row { grid-template-columns: minmax(170px, 1.4fr) repeat(3, minmax(90px, .7fr)) minmax(120px, .8fr); gap: 8px; }
+  .budget-allocation-panel--forecast .budget-allocation-row { grid-template-columns: minmax(135px, 1.25fr) repeat(5, minmax(68px, .6fr)) minmax(105px, .75fr); }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .budget-screen-header .screen-header-actions { flex-wrap: wrap; }
   .budget-period-toolbar { grid-template-columns: 36px minmax(0, 1fr) 36px; padding: 11px; }
   .budget-period-toolbar > .text-button { grid-column: 1 / -1; justify-self: center; }
@@ -1925,6 +1969,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .budget-status-strip > div:first-child small { grid-column: 1; }
   .budget-summary-grid, .budget-detail-grid { grid-template-columns: 1fr 1fr; }
   .budget-secondary-facts { grid-column: 1 / -1; }
+  .budget-forecast-columns, .budget-forecast-meta-grid { grid-template-columns: 1fr; }
+  .budget-forecast-column + .budget-forecast-column { border-top: 1px solid var(--border); border-left: 0; }
+  .budget-forecast-heading, .budget-forecast-panel > footer, .budget-forecast-warning { align-items: stretch; flex-direction: column; }
+  .budget-forecast-heading > div:last-child { justify-items: start; }
   .budget-allocation-row--head { display: none; }
   .budget-allocation-table { display: grid; gap: 9px; }
   .budget-allocation-row:not(.budget-allocation-row--head) { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-1); }
@@ -1936,6 +1984,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .budget-form-allocation-list article { grid-template-columns: 1fr; }
   .budget-form-allocation-list .budget-allocation-note { grid-column: 1; }
   .budget-editor-form > footer { bottom: -20px; margin: 4px -16px -20px; padding: 13px 16px 20px; }
+  .budget-occurrence-drawer > footer { bottom: -20px; margin: 0 -16px -20px; padding: 13px 16px 20px; }
 }
 
 @media (max-width: 460px) {
@@ -1945,6 +1994,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .budget-allocation-panel { padding: 14px 10px; }
   .budget-form-grid { grid-template-columns: 1fr; }
   .budget-editor-form > footer button { flex: 1; }
+  .budget-forecast-panel { padding: 14px 10px; }
+  .budget-forecast-loading { grid-template-columns: 1fr; }
 }
 
 /* ─── Goals product ──────────────────────────────────── */
