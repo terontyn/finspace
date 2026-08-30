@@ -71,7 +71,7 @@ jobs:
           python -m pip --version
           PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d finspace -c "SELECT version();"
           PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d finspace -c "SHOW server_version;"
-          redis-cli -h 127.0.0.1 ping
+          python -c "import redis; assert redis.Redis.from_url('redis://127.0.0.1:6379/0').ping(); print('redis_ping=PASS')"
 
       - name: Fresh and historical migration proof
         run: python .github/validation/payees_postgres_proof.py
