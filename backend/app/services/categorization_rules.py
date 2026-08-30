@@ -71,6 +71,14 @@ def _category_compatible(transaction_type: str, category_type: str) -> bool:
     return transaction_type != "transfer"
 
 
+def _rule_changed_during_apply() -> ApiError:
+    return ApiError(
+        status_code=409,
+        code="CATEGORIZATION_RULE_CHANGED",
+        message="Categorization rule changed while it was being applied",
+    )
+
+
 def _has_matcher(values: dict[str, object]) -> bool:
     return any(
         values.get(field) is not None
@@ -408,6 +416,32 @@ async def preview_transaction(
     return transaction, await match_transaction(session, workspace_id, transaction)
 
 
+async def _lock_current_match(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    transaction: FinancialTransaction,
+    match: CategorizationMatch,
+) -> None:
+    matched_version = match.rule.version
+    matched_category_id = match.category.id
+    current_rule = await repository.get_rule(
+        session,
+        workspace_id,
+        match.rule.id,
+        include_deleted=True,
+        for_update=True,
+    )
+    if (
+        current_rule is None
+        or current_rule.version != matched_version
+        or current_rule.deleted_at is not None
+        or not current_rule.is_active
+        or current_rule.category_id != matched_category_id
+        or not _matches(current_rule, transaction)
+    ):
+        raise _rule_changed_during_apply()
+
+
 async def apply_to_transaction(
     session: AsyncSession,
     context: RequestContext,
@@ -436,6 +470,12 @@ async def apply_to_transaction(
             applied=False,
             reason="already_categorized",
         )
+    await _lock_current_match(
+        session,
+        context.workspace.id,
+        transaction,
+        match,
+    )
     updated = await transaction_service.update_transaction(
         session,
         context,
