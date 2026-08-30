@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -13,6 +13,7 @@ from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import WorkspaceMember
 from app.db.session import AsyncSessionFactory
 from app.services.categorization_rules import normalize_match_text
+from app.services.financial_period_guard import get_or_create_control
 
 PASSWORD = "correct horse battery staple"
 
@@ -153,6 +154,25 @@ async def _set_role(identity: dict, role: str) -> None:
         await session.commit()
 
 
+async def _set_transaction_status(transaction_id: str, status: str) -> None:
+    async with AsyncSessionFactory() as session:
+        transaction = await session.get(FinancialTransaction, uuid.UUID(transaction_id))
+        assert transaction is not None
+        transaction.status = status
+        await session.commit()
+
+
+async def _close_workspace_through(identity: dict, closed_through: date) -> None:
+    async with AsyncSessionFactory() as session:
+        control = await get_or_create_control(
+            session,
+            uuid.UUID(identity["workspace"]["id"]),
+            for_update=True,
+        )
+        control.closed_through = closed_through
+        await session.commit()
+
+
 async def _categorization_audit(transaction_id: str) -> AuditLog | None:
     async with AsyncSessionFactory() as session:
         return await session.scalar(
@@ -160,7 +180,8 @@ async def _categorization_audit(transaction_id: str) -> AuditLog | None:
             .where(
                 AuditLog.entity_type == "transaction",
                 AuditLog.entity_id == uuid.UUID(transaction_id),
-                AuditLog.source == "categorization_rule",
+                AuditLog.action == "update",
+                AuditLog.source == "api",
             )
             .order_by(AuditLog.created_at.desc())
             .limit(1)
@@ -179,6 +200,7 @@ def test_rule_crud_versioning_and_workspace_isolation(client: TestClient) -> Non
     _, headers = _register(client, "Rules owner")
     _, other_headers = _register(client, "Rules other")
     category = _category(client, headers, "Groceries")
+    other_category = _category(client, other_headers, "Other workspace category")
 
     created = _rule(
         client,
@@ -196,6 +218,18 @@ def test_rule_crud_versioning_and_workspace_isolation(client: TestClient) -> Non
 
     hidden = client.get(f"/api/v1/categorization-rules/{created['id']}", headers=other_headers)
     assert hidden.status_code == 404
+
+    cross_workspace = client.post(
+        "/api/v1/categorization-rules",
+        headers=headers,
+        json={
+            "name": "Foreign category",
+            "category_id": other_category["id"],
+            "counterparty_contains": "foreign",
+        },
+    )
+    assert cross_workspace.status_code == 404
+    assert cross_workspace.json()["error"]["code"] == "CATEGORY_NOT_FOUND"
 
     updated = client.patch(
         f"/api/v1/categorization-rules/{created['id']}",
@@ -279,7 +313,9 @@ def test_rule_validation_rejects_missing_matcher_and_wrong_category_type(
     assert transfer.status_code == 422
 
 
-def test_preview_uses_and_semantics_priority_and_inactive_skip(client: TestClient) -> None:
+def test_preview_uses_and_semantics_priority_and_inactive_deleted_skip(
+    client: TestClient,
+) -> None:
     identity, headers = _register(client, "Rules matching")
     account = _account(client, headers, "Main card")
     first_category = _category(client, headers, "First")
@@ -301,7 +337,7 @@ def test_preview_uses_and_semantics_priority_and_inactive_skip(client: TestClien
         name="Disabled higher priority",
         category_id=first_category["id"],
         priority=2,
-        counterparty_contains="ikea",
+        counterparty_contains="amazon",
     )
     disabled_response = client.patch(
         f"/api/v1/categorization-rules/{disabled['id']}",
@@ -309,6 +345,21 @@ def test_preview_uses_and_semantics_priority_and_inactive_skip(client: TestClien
         json={"version": disabled["version"], "is_active": False},
     )
     assert disabled_response.status_code == 200
+
+    deleted = _rule(
+        client,
+        headers,
+        name="Deleted higher priority",
+        category_id=first_category["id"],
+        priority=3,
+        counterparty_contains="amazon",
+    )
+    deleted_response = client.delete(
+        f"/api/v1/categorization-rules/{deleted['id']}?version={deleted['version']}",
+        headers=headers,
+    )
+    assert deleted_response.status_code == 200
+
     winner = _rule(
         client,
         headers,
@@ -345,6 +396,11 @@ def test_preview_uses_and_semantics_priority_and_inactive_skip(client: TestClien
     assert payload["matched"] is True
     assert payload["rule"]["id"] == winner["id"]
     assert payload["category"]["id"] == winner_category["id"]
+
+    unchanged = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+    assert unchanged.status_code == 200
+    assert unchanged.json()["category"] is None
+    assert unchanged.json()["version"] == 1
 
 
 def test_payee_condition_never_infers_from_counterparty(client: TestClient) -> None:
@@ -393,7 +449,9 @@ def test_payee_condition_never_infers_from_counterparty(client: TestClient) -> N
     assert explicit_preview.json()["matched"] is True
 
 
-def test_apply_is_explicit_versioned_and_does_not_overwrite_category(client: TestClient) -> None:
+def test_apply_is_explicit_versioned_and_does_not_overwrite_category_or_splits(
+    client: TestClient,
+) -> None:
     identity, headers = _register(client, "Rules apply")
     account = _account(client, headers, "Apply card")
     original_category = _category(client, headers, "Original category")
@@ -429,6 +487,8 @@ def test_apply_is_explicit_versioned_and_does_not_overwrite_category(client: Tes
     assert applied_payload["transaction"]["version"] == 2
     audit = asyncio.run(_categorization_audit(transaction_id))
     assert audit is not None
+    assert audit.after_data is not None
+    assert audit.after_data["category_id"] == target_category["id"]
 
     second = client.post(
         f"/api/v1/transactions/{transaction_id}/apply-categorization",
@@ -466,6 +526,56 @@ def test_apply_is_explicit_versioned_and_does_not_overwrite_category(client: Tes
     assert protected.json()["reason"] == "already_categorized"
     assert protected.json()["transaction"]["category"]["id"] == original_category["id"]
 
+    split = client.post(
+        "/api/v1/transactions",
+        headers=headers,
+        json={
+            "occurred_at": "2026-08-17T12:00:00Z",
+            "transaction_type": "expense",
+            "amount": "500.00",
+            "currency": "RUB",
+            "account_id": account["id"],
+            "counterparty": "Shop split categorized",
+            "status": "confirmed",
+            "source": "manual",
+            "splits": [
+                {
+                    "category_id": original_category["id"],
+                    "amount": "500.00",
+                }
+            ],
+        },
+    )
+    assert split.status_code == 201, split.text
+    split_payload = split.json()
+    split_protected = client.post(
+        f"/api/v1/transactions/{split_payload['id']}/apply-categorization",
+        headers=headers,
+        json={"version": split_payload["version"]},
+    )
+    assert split_protected.status_code == 200, split_protected.text
+    assert split_protected.json()["reason"] == "already_categorized"
+    assert split_protected.json()["transaction"]["version"] == split_payload["version"]
+    assert len(split_protected.json()["transaction"]["splits"]) == 1
+
+    no_match_id = asyncio.run(
+        _insert_uncategorized(
+            identity,
+            account["id"],
+            counterparty="Completely unrelated statement",
+        )
+    )
+    no_match = client.post(
+        f"/api/v1/transactions/{no_match_id}/apply-categorization",
+        headers=headers,
+        json={"version": 1},
+    )
+    assert no_match.status_code == 200, no_match.text
+    assert no_match.json()["applied"] is False
+    assert no_match.json()["reason"] == "no_match"
+    assert no_match.json()["transaction"]["category"] is None
+    assert no_match.json()["transaction"]["version"] == 1
+
     stale = client.post(
         f"/api/v1/transactions/{transaction_id}/apply-categorization",
         headers=headers,
@@ -473,6 +583,51 @@ def test_apply_is_explicit_versioned_and_does_not_overwrite_category(client: Tes
     )
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "VERSION_CONFLICT"
+
+
+def test_apply_preserves_reconciled_and_closed_period_guards(client: TestClient) -> None:
+    identity, headers = _register(client, "Rules guards")
+    account = _account(client, headers, "Guard card")
+    category = _category(client, headers, "Guard category")
+    _rule(
+        client,
+        headers,
+        name="Guard rule",
+        category_id=category["id"],
+        counterparty_contains="guard",
+    )
+
+    reconciled_id = asyncio.run(
+        _insert_uncategorized(
+            identity,
+            account["id"],
+            counterparty="guard reconciled",
+        )
+    )
+    asyncio.run(_set_transaction_status(reconciled_id, "reconciled"))
+    reconciled = client.post(
+        f"/api/v1/transactions/{reconciled_id}/apply-categorization",
+        headers=headers,
+        json={"version": 1},
+    )
+    assert reconciled.status_code == 409
+    assert reconciled.json()["error"]["code"] == "RECONCILED_TRANSACTION_IMMUTABLE"
+
+    closed_id = asyncio.run(
+        _insert_uncategorized(
+            identity,
+            account["id"],
+            counterparty="guard closed period",
+        )
+    )
+    asyncio.run(_close_workspace_through(identity, date(2026, 8, 31)))
+    closed = client.post(
+        f"/api/v1/transactions/{closed_id}/apply-categorization",
+        headers=headers,
+        json={"version": 1},
+    )
+    assert closed.status_code == 409
+    assert closed.json()["error"]["code"] == "MONTH_CLOSED"
 
 
 def test_viewer_can_preview_but_cannot_mutate_rules_or_transactions(client: TestClient) -> None:
