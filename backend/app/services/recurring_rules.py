@@ -9,12 +9,15 @@ from app.core.errors import ApiError
 from app.db.models.accounts import Account
 from app.db.models.automations import RecurringRule, RecurringRuleExecution
 from app.db.models.categories import Category
+from app.db.models.payees import Payee
 from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import User, Workspace
 from app.dependencies.context import RequestContext
-from app.schemas.automations import RecurringRuleCreate, RecurringRuleUpdate
-from app.schemas.transactions import TransactionCreate
+from app.repositories import payees as payee_repository
+from app.schemas.automations import RecurringRuleCreate, RecurringRuleResponse, RecurringRuleUpdate
+from app.schemas.transactions import EntityRef, TransactionCreate
 from app.services import automation_runs, recurrence, transactions
+from app.services import payees as payee_service
 from app.services.audit import record_audit, snapshot
 
 
@@ -67,6 +70,36 @@ async def list_rules(
         ).all()
     )
     return items, total
+
+
+async def rule_response(
+    session: AsyncSession,
+    rule: RecurringRule,
+    *,
+    payees_by_id: dict[uuid.UUID, Payee] | None = None,
+) -> RecurringRuleResponse:
+    payee = (
+        (
+            payees_by_id.get(rule.payee_id)
+            if payees_by_id is not None
+            else await session.get(Payee, rule.payee_id)
+        )
+        if rule.payee_id is not None
+        else None
+    )
+    return RecurringRuleResponse.model_validate(rule).model_copy(
+        update={"payee": EntityRef(id=payee.id, name=payee.name) if payee is not None else None}
+    )
+
+
+async def rule_page_responses(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    rules: list[RecurringRule],
+) -> list[RecurringRuleResponse]:
+    payee_ids = {rule.payee_id for rule in rules if rule.payee_id is not None}
+    payees_by_id = await payee_repository.get_payees_by_ids(session, workspace_id, payee_ids)
+    return [await rule_response(session, rule, payees_by_id=payees_by_id) for rule in rules]
 
 
 async def create_rule(
@@ -441,6 +474,11 @@ async def _validate_financial_references(
         expected = {transaction_type, "both"}
         if category is None or category.category_type not in expected:
             raise _invalid("Active category type does not match the recurring rule")
+    payee_id = values.get("payee_id")
+    if payee_id is not None:
+        if not isinstance(payee_id, uuid.UUID):
+            raise _invalid("Payee identifier is invalid")
+        await payee_service.get_assignable_payee(session, workspace_id, payee_id)
 
 
 async def _create_transaction_from_rule(
@@ -450,6 +488,14 @@ async def _create_transaction_from_rule(
     *,
     request_id: str,
 ) -> FinancialTransaction:
+    if rule.payee_id is not None:
+        payee = await payee_repository.get_payee(session, rule.workspace_id, rule.payee_id)
+        if payee is None:
+            raise ApiError(
+                status_code=409,
+                code="RECURRING_RULE_INVALID",
+                message="Recurring rule Payee is archived or unavailable",
+            )
     user = await session.get(User, rule.created_by)
     workspace = await session.get(Workspace, rule.workspace_id)
     if user is None or workspace is None:
@@ -470,6 +516,7 @@ async def _create_transaction_from_rule(
             account_id=rule.account_id,
             target_account_id=rule.target_account_id,
             category_id=rule.category_id,
+            payee_id=rule.payee_id,
             counterparty=rule.counterparty,
             description=rule.description,
             comment=rule.comment,

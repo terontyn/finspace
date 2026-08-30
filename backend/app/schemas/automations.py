@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import Field, field_validator
 
 from app.schemas.common import ApiModel, PageMeta, require_timezone
+from app.schemas.transactions import EntityRef
 
 ServiceType = Literal["n8n", "backup_agent", "integration"]
 ServiceAccountStatus = Literal["active", "revoked", "expired"]
@@ -159,6 +160,7 @@ class RecurringRuleCreate(ApiModel):
     account_id: uuid.UUID
     target_account_id: uuid.UUID | None = None
     category_id: uuid.UUID | None = None
+    payee_id: uuid.UUID | None = None
     counterparty: str | None = Field(default=None, max_length=300)
     description: str | None = None
     comment: str | None = None
@@ -179,6 +181,7 @@ class RecurringRuleUpdate(ApiModel):
     account_id: uuid.UUID | None = None
     target_account_id: uuid.UUID | None = None
     category_id: uuid.UUID | None = None
+    payee_id: uuid.UUID | None = None
     counterparty: str | None = Field(default=None, max_length=300)
     description: str | None = None
     comment: str | None = None
@@ -200,6 +203,8 @@ class RecurringRuleResponse(ApiModel):
     account_id: uuid.UUID
     target_account_id: uuid.UUID | None
     category_id: uuid.UUID | None
+    payee_id: uuid.UUID | None
+    payee: EntityRef | None = None
     counterparty: str | None
     description: str | None
     comment: str | None

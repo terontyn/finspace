@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Index, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,6 +12,20 @@ from app.db.models.common import SoftDeleteMixin, TimestampMixin, VersionMixin
 
 class FinancialTransaction(Base, TimestampMixin, VersionMixin, SoftDeleteMixin):
     __tablename__ = "transactions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["payee_id", "workspace_id"],
+            ["payees.id", "payees.workspace_id"],
+            name="fk_transactions_payee_workspace",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_transactions_workspace_payee_occurred",
+            "workspace_id",
+            "payee_id",
+            "occurred_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -30,6 +44,7 @@ class FinancialTransaction(Base, TimestampMixin, VersionMixin, SoftDeleteMixin):
     category_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("categories.id"), nullable=True
     )
+    payee_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     counterparty: Mapped[str | None] = mapped_column(String(300), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)

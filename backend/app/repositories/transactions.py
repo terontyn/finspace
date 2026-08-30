@@ -48,6 +48,7 @@ async def list_transactions(
     status: str | None,
     account_id: uuid.UUID | None,
     category_id: uuid.UUID | None,
+    payee_id: uuid.UUID | None,
     search: str | None,
     limit: int,
     offset: int,
@@ -73,6 +74,8 @@ async def list_transactions(
         )
     if category_id is not None:
         filters.append(FinancialTransaction.category_id == category_id)
+    if payee_id is not None:
+        filters.append(FinancialTransaction.payee_id == payee_id)
     if search:
         pattern = f"%{search.strip()}%"
         filters.append(
