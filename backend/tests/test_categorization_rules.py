@@ -5,10 +5,13 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.db.models.audit import AuditLog
+from app.db.models.categories import Category
+from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import WorkspaceMember
 from app.db.session import AsyncSessionFactory
@@ -675,3 +678,294 @@ def test_viewer_can_preview_but_cannot_mutate_rules_or_transactions(client: Test
     )
     assert apply.status_code == 403
     assert apply.json()["error"]["code"] == "INSUFFICIENT_ROLE"
+
+
+async def _set_rule_created_at(rule_id: str, moment: datetime) -> None:
+    async with AsyncSessionFactory() as session:
+        await session.execute(
+            update(CategorizationRule)
+            .where(CategorizationRule.id == uuid.UUID(rule_id))
+            .values(created_at=moment)
+        )
+        await session.commit()
+
+
+async def _archive_category(category_id: str) -> None:
+    async with AsyncSessionFactory() as session:
+        await session.execute(
+            update(Category).where(Category.id == uuid.UUID(category_id)).values(is_archived=True)
+        )
+        await session.commit()
+
+
+async def _insert_transfer(
+    identity: dict,
+    account_id: str,
+    target_account_id: str,
+    *,
+    counterparty: str,
+) -> str:
+    async with AsyncSessionFactory() as session:
+        transaction = FinancialTransaction(
+            workspace_id=uuid.UUID(identity["workspace"]["id"]),
+            occurred_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+            transaction_type="transfer",
+            amount=Decimal("500.0000"),
+            currency="RUB",
+            account_id=uuid.UUID(account_id),
+            target_account_id=uuid.UUID(target_account_id),
+            category_id=None,
+            counterparty=counterparty,
+            status="confirmed",
+            source="import",
+            created_by=uuid.UUID(identity["user"]["id"]),
+            updated_by=uuid.UUID(identity["user"]["id"]),
+        )
+        session.add(transaction)
+        await session.commit()
+        await session.refresh(transaction)
+        return str(transaction.id)
+
+
+def test_equal_priority_matches_break_ties_by_created_at_then_id(client: TestClient) -> None:
+    identity, headers = _register(client, "Rules ties")
+    account = _account(client, headers, "Tie card")
+    earlier_category = _category(client, headers, "Earlier")
+    later_category = _category(client, headers, "Later")
+
+    earlier = _rule(
+        client,
+        headers,
+        name="Tie earlier",
+        category_id=earlier_category["id"],
+        priority=7,
+        counterparty_contains="tie shop",
+    )
+    later = _rule(
+        client,
+        headers,
+        name="Tie later",
+        category_id=later_category["id"],
+        priority=7,
+        counterparty_contains="tie shop",
+    )
+    transaction_id = asyncio.run(
+        _insert_uncategorized(identity, account["id"], counterparty="Tie Shop 77")
+    )
+
+    base = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    asyncio.run(_set_rule_created_at(earlier["id"], base))
+    asyncio.run(_set_rule_created_at(later["id"], base.replace(hour=10)))
+
+    first = client.post(
+        "/api/v1/categorization-rules/preview",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["rule"]["id"] == earlier["id"]
+
+    # Identical priority and identical created_at must still resolve deterministically by id.
+    asyncio.run(_set_rule_created_at(later["id"], base))
+    expected_id = min(earlier["id"], later["id"], key=lambda value: uuid.UUID(value).bytes)
+
+    second = client.post(
+        "/api/v1/categorization-rules/preview",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["rule"]["id"] == expected_id
+
+    repeated = client.post(
+        "/api/v1/categorization-rules/preview",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert repeated.json()["rule"]["id"] == expected_id
+
+
+def test_transfer_transactions_never_match_categorization_rules(client: TestClient) -> None:
+    identity, headers = _register(client, "Rules transfer")
+    source_account = _account(client, headers, "Transfer source")
+    target_account = _account(client, headers, "Transfer target")
+    category = _category(client, headers, "Transfer target category")
+
+    _rule(
+        client,
+        headers,
+        name="Broad transfer matcher",
+        category_id=category["id"],
+        priority=1,
+        counterparty_contains="internal move",
+    )
+    transaction_id = asyncio.run(
+        _insert_transfer(
+            identity,
+            source_account["id"],
+            target_account["id"],
+            counterparty="Internal Move 42",
+        )
+    )
+
+    preview = client.post(
+        "/api/v1/categorization-rules/preview",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["matched"] is False
+    assert preview.json()["rule"] is None
+
+    applied = client.post(
+        f"/api/v1/transactions/{transaction_id}/apply-categorization",
+        headers=headers,
+        json={"version": 1},
+    )
+    assert applied.status_code == 200, applied.text
+    payload = applied.json()
+    assert payload["applied"] is False
+    assert payload["reason"] == "no_match"
+    assert payload["transaction"]["category"] is None
+    assert payload["transaction"]["version"] == 1
+
+
+def test_rule_pointing_at_archived_category_is_skipped(client: TestClient) -> None:
+    identity, headers = _register(client, "Rules archived")
+    account = _account(client, headers, "Archived card")
+    archived_category = _category(client, headers, "Archived target")
+    active_category = _category(client, headers, "Active target")
+
+    archived_rule = _rule(
+        client,
+        headers,
+        name="Higher priority archived target",
+        category_id=archived_category["id"],
+        priority=1,
+        counterparty_contains="archive shop",
+    )
+    active_rule = _rule(
+        client,
+        headers,
+        name="Lower priority active target",
+        category_id=active_category["id"],
+        priority=2,
+        counterparty_contains="archive shop",
+    )
+    transaction_id = asyncio.run(
+        _insert_uncategorized(identity, account["id"], counterparty="Archive Shop 5")
+    )
+
+    before = client.post(
+        "/api/v1/categorization-rules/preview",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert before.json()["rule"]["id"] == archived_rule["id"]
+
+    asyncio.run(_archive_category(archived_category["id"]))
+
+    after = client.post(
+        "/api/v1/categorization-rules/preview",
+        headers=headers,
+        json={"transaction_id": transaction_id},
+    )
+    assert after.status_code == 200, after.text
+    assert after.json()["matched"] is True
+    assert after.json()["rule"]["id"] == active_rule["id"]
+    assert after.json()["category"]["id"] == active_category["id"]
+
+    applied = client.post(
+        f"/api/v1/transactions/{transaction_id}/apply-categorization",
+        headers=headers,
+        json={"version": 1},
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["applied"] is True
+    assert applied.json()["transaction"]["category"]["id"] == active_category["id"]
+
+
+def test_categorization_rule_payee_reference_is_workspace_scoped(client: TestClient) -> None:
+    identity_a, headers_a = _register(client, "Rules workspace A")
+    _, headers_b = _register(client, "Rules workspace B")
+    account_a = _account(client, headers_a, "Workspace A card")
+    category_a = _category(client, headers_a, "Workspace A category")
+    payee_a = _payee(client, headers_a, "Workspace A payee")
+    payee_b = _payee(client, headers_b, "Workspace B payee")
+
+    rule_a = _rule(
+        client,
+        headers_a,
+        name="Workspace A payee rule",
+        category_id=category_a["id"],
+        priority=1,
+        payee_id=payee_a["id"],
+    )
+
+    async def update_attack() -> bool:
+        async with AsyncSessionFactory() as session:
+            try:
+                await session.execute(
+                    update(CategorizationRule)
+                    .where(CategorizationRule.id == uuid.UUID(rule_a["id"]))
+                    .values(payee_id=uuid.UUID(payee_b["id"]))
+                )
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return True
+            return False
+
+    async def insert_attack() -> bool:
+        async with AsyncSessionFactory() as session:
+            session.add(
+                CategorizationRule(
+                    workspace_id=uuid.UUID(identity_a["workspace"]["id"]),
+                    name="Raw cross workspace rule",
+                    priority=1,
+                    is_active=True,
+                    payee_id=uuid.UUID(payee_b["id"]),
+                    category_id=uuid.UUID(category_a["id"]),
+                    created_by=uuid.UUID(identity_a["user"]["id"]),
+                    updated_by=uuid.UUID(identity_a["user"]["id"]),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return True
+            return False
+
+    assert asyncio.run(update_attack()) is True
+    assert asyncio.run(insert_attack()) is True
+
+    cross_create = client.post(
+        "/api/v1/categorization-rules",
+        headers=headers_a,
+        json={
+            "name": "Cross workspace payee rule",
+            "priority": 1,
+            "category_id": category_a["id"],
+            "payee_id": payee_b["id"],
+        },
+    )
+    assert cross_create.status_code == 404, cross_create.text
+
+    cross_account = client.post(
+        "/api/v1/categorization-rules",
+        headers=headers_b,
+        json={
+            "name": "Cross workspace account rule",
+            "priority": 1,
+            "category_id": category_a["id"],
+            "account_id": account_a["id"],
+        },
+    )
+    assert cross_account.status_code == 404, cross_account.text
+
+    still_scoped = client.get(
+        f"/api/v1/categorization-rules/{rule_a['id']}",
+        headers=headers_b,
+    )
+    assert still_scoped.status_code == 404
