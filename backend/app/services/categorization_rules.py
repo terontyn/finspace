@@ -437,7 +437,7 @@ async def apply_to_transaction(
         context,
         transaction.id,
         TransactionUpdate(version=version, category_id=match.category.id),
-        audit_source="categorization_rule",
+        audit_source="api",
     )
     return CategorizationApplyResult(
         transaction=updated,
