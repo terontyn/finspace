@@ -251,3 +251,66 @@ test("owner Payee lifecycle and alias actions send current versions", async () =
     restoreWindow();
   }
 });
+
+test("PayeesScreen returns to the last valid page after archiving the final row", async () => {
+  const restoreWindow = installBrowserGlobals();
+  const originalGet = apiClient.get;
+  const originalDelete = apiClient.delete;
+  const paths: string[] = [];
+  let archived = false;
+  let renderer: ReactTestRenderer | undefined;
+  const firstPage = Array.from({ length: 12 }, (_, index): Payee => ({
+    ...activePayee,
+    aliases: [{ ...primaryAlias, id: `alias-${index + 1}`, alias: `Получатель ${index + 1}` }],
+    id: `payee-${index + 1}`,
+    name: `Получатель ${index + 1}`,
+  }));
+  const finalPayee: Payee = {
+    ...activePayee,
+    aliases: [{ ...primaryAlias, id: "alias-13", alias: "Получатель 13" }],
+    id: "payee-13",
+    name: "Получатель 13",
+  };
+
+  apiClient.get = (<T,>(path: string) => {
+    paths.push(path);
+    const params = new URLSearchParams(path.split("?")[1] ?? "");
+    const requestedOffset = Number(params.get("offset") ?? "0");
+    if (!archived) {
+      const items = requestedOffset === 12 ? [finalPayee] : firstPage;
+      return Promise.resolve({ items, page: { limit: 12, offset: requestedOffset, total: 13 } } as T);
+    }
+    const items = requestedOffset === 12 ? [] : firstPage;
+    return Promise.resolve({ items, page: { limit: 12, offset: requestedOffset, total: 12 } } as T);
+  }) as typeof apiClient.get;
+  apiClient.delete = (<T,>() => {
+    archived = true;
+    return Promise.resolve({ ...finalPayee, deleted_at: "2026-08-30T03:00:00Z", version: 2 } as T);
+  }) as typeof apiClient.delete;
+
+  try {
+    await act(async () => { renderer = create(<PayeesScreen onError={(error) => { throw error; }} role="owner" roleLoading={false}/>); await settle(); });
+    assert.ok(renderer);
+    const view = renderer;
+
+    await act(async () => { button(view.root, "Дальше").props.onClick(); await settle(); });
+    assert.ok(view.root.findByProps({ "data-payee-id": "payee-13" }));
+
+    await act(async () => {
+      button(view.root.findByProps({ "data-payee-id": "payee-13" }), "В архив").props.onClick();
+      await settle();
+      await settle();
+    });
+
+    assert.ok(view.root.findByProps({ "data-payee-id": "payee-1" }));
+    assert.equal(nodeText(view.root).includes("1–12 из 12"), true);
+    assert.equal(nodeText(view.root).includes("13–12 из 12"), false);
+    assert.equal(paths.filter((path) => path.includes("offset=12")).length >= 2, true);
+    assert.equal(paths.at(-1)?.includes("offset=0"), true);
+  } finally {
+    if (renderer) await act(async () => renderer?.unmount());
+    apiClient.get = originalGet;
+    apiClient.delete = originalDelete;
+    restoreWindow();
+  }
+});
