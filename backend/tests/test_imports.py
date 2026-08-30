@@ -151,6 +151,7 @@ def test_csv_staging_validate_commit_duplicate_and_rollback(
     transactions = client.get("/api/v1/transactions", headers=headers).json()
     assert transactions["page"]["total"] == before + 1
     imported = next(item for item in transactions["items"] if item["source"] == "import")
+    assert imported["payee"] is None
 
     duplicate_upload = client.post(
         "/api/v1/imports",

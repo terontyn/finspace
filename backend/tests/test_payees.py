@@ -331,6 +331,17 @@ def test_transaction_payee_patch_hydration_filter_guards_and_google_contract(
     identity, headers = _register(client, "Transaction Payee")
     account, category = _references(client, headers, "Payee transaction")
     payee = _payee(client, headers, "Canonical merchant")
+    unlinked = _transaction(
+        client,
+        headers,
+        account["id"],
+        category["id"],
+        payee_id=None,
+        counterparty="Canonical merchant",
+        occurred_at="2026-08-14T12:00:00Z",
+    )
+    assert unlinked["payee"] is None
+    assert unlinked["counterparty"] == "Canonical merchant"
     transaction = _transaction(
         client,
         headers,
