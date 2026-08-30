@@ -134,6 +134,8 @@ async def _schema_inventory(connection: asyncpg.Connection) -> dict[str, object]
 async def _assert_stage_a_schema(connection: asyncpg.Connection) -> None:
     assert await _table_exists(connection, "payees")
     assert await _table_exists(connection, "payee_aliases")
+    assert not await _table_exists(connection, "categorization_rules")
+    assert not await _table_exists(connection, "categorization_rule_conditions")
     assert await _column_exists(connection, "transactions", "payee_id")
     assert await _column_exists(connection, "recurring_rules", "payee_id")
 
@@ -166,6 +168,14 @@ async def _assert_stage_a_absent(connection: asyncpg.Connection) -> None:
     assert not await _table_exists(connection, "payee_aliases")
     assert not await _column_exists(connection, "transactions", "payee_id")
     assert not await _column_exists(connection, "recurring_rules", "payee_id")
+    assert await connection.fetchval(
+        "SELECT count(*) FROM pg_constraint WHERE connamespace = 'public'::regnamespace "
+        "AND conname LIKE '%payee%'"
+    ) == 0
+    assert await connection.fetchval(
+        "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' "
+        "AND indexname LIKE '%payee%'"
+    ) == 0
 
 
 async def _fresh_install_proof(database: str) -> None:
@@ -174,6 +184,9 @@ async def _fresh_install_proof(database: str) -> None:
     _alembic(database, "upgrade", "head")
     current = _alembic(database, "current")
     assert "0011_payees" in current
+    heads = _alembic(database, "heads")
+    head_lines = [line for line in heads.splitlines() if "(head)" in line]
+    assert head_lines == ["0011_payees (head)"], head_lines
 
     connection = await asyncpg.connect(_asyncpg_url(database))
     try:
