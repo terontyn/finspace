@@ -1331,7 +1331,7 @@ def test_payee_list_and_transaction_page_use_bounded_payee_queries(
     assert len(transaction_payee_queries) == 1
 
 
-def test_payee_schema_constraints_and_no_rules_leak() -> None:
+def test_payee_schema_constraints_and_no_condition_table() -> None:
     async def inspect_schema() -> dict[str, object]:
         async with engine.connect() as connection:
             return await connection.run_sync(
@@ -1368,7 +1368,6 @@ def test_payee_schema_constraints_and_no_rules_leak() -> None:
     tables = schema["tables"]
     assert isinstance(tables, set)
     assert {"payees", "payee_aliases"} <= tables
-    assert "categorization_rules" not in tables
     assert "categorization_rule_conditions" not in tables
     assert "payee_id" in schema["transaction_columns"]
     assert "payee_id" in schema["recurring_columns"]
