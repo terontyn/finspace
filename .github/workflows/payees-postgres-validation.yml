@@ -43,7 +43,7 @@ jobs:
 
     env:
       DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/finspace
-      TEST_DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/finspace_test_base
+      TEST_DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/test_finspace_base
       REDIS_URL: redis://127.0.0.1:6379/0
       TEST_REDIS_URL: redis://127.0.0.1:6379/15
       ENVIRONMENT: development
