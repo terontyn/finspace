@@ -8,10 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import ApiError
 from app.db.models.accounts import Account
 from app.db.models.categories import Category
+from app.db.models.payees import Payee
 from app.db.models.transactions import FinancialTransaction, TransactionSplit
 from app.dependencies.context import RequestContext
 from app.repositories import accounts as account_repository
 from app.repositories import categories as category_repository
+from app.repositories import payees as payee_repository
 from app.repositories import transactions as repository
 from app.schemas.transactions import (
     EntityRef,
@@ -21,6 +23,7 @@ from app.schemas.transactions import (
     TransactionResponse,
     TransactionUpdate,
 )
+from app.services import payees as payee_service
 from app.services.audit import record_audit, snapshot
 from app.services.financial_period_guard import (
     assert_dates_open,
@@ -125,7 +128,6 @@ async def _validate_transaction(
                 code="INVALID_CATEGORY_TYPE",
                 message="Category type does not match transaction type",
             )
-
     if data.splits:
         if data.transaction_type == "transfer":
             raise ApiError(
@@ -231,6 +233,12 @@ async def create_transaction(
 ) -> FinancialTransaction:
     control = await get_or_create_control(session, context.workspace.id, for_update=True)
     assert_dates_open(control, context.workspace.timezone, [data.occurred_at])
+    if data.payee_id is not None:
+        await payee_service.get_assignable_payee_for_write(
+            session,
+            context.workspace.id,
+            data.payee_id,
+        )
     await _validate_transaction(session, context.workspace.id, data)
     values = data.model_dump(exclude={"splits"})
     transaction = FinancialTransaction(
@@ -293,6 +301,20 @@ async def update_transaction(
             code="RECONCILED_TRANSACTION_IMMUTABLE",
             message="A reconciled transaction cannot be changed",
         )
+    changes = data.model_dump(exclude_unset=True, exclude={"version"})
+    if "payee_id" in changes and changes["payee_id"] is not None:
+        payee_id = changes["payee_id"]
+        if not isinstance(payee_id, uuid.UUID):
+            raise ApiError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Payee identifier is invalid",
+            )
+        await payee_service.get_assignable_payee_for_write(
+            session,
+            context.workspace.id,
+            payee_id,
+        )
     existing_splits = await repository.get_splits(session, transaction.id)
     current = {
         "occurred_at": transaction.occurred_at,
@@ -302,6 +324,7 @@ async def update_transaction(
         "account_id": transaction.account_id,
         "target_account_id": transaction.target_account_id,
         "category_id": transaction.category_id,
+        "payee_id": transaction.payee_id,
         "counterparty": transaction.counterparty,
         "description": transaction.description,
         "comment": transaction.comment,
@@ -314,7 +337,6 @@ async def update_transaction(
             for item in existing_splits
         ],
     }
-    changes = data.model_dump(exclude_unset=True, exclude={"version"})
     if changes.get("status") == "reconciled":
         raise ApiError(
             status_code=409,
@@ -477,7 +499,10 @@ async def confirm_transaction(
 
 
 async def transaction_response(
-    session: AsyncSession, transaction: FinancialTransaction
+    session: AsyncSession,
+    transaction: FinancialTransaction,
+    *,
+    payees_by_id: dict[uuid.UUID, Payee] | None = None,
 ) -> TransactionResponse:
     source_account = await session.get(Account, transaction.account_id)
     target_account = (
@@ -488,6 +513,15 @@ async def transaction_response(
     category = (
         await session.get(Category, transaction.category_id)
         if transaction.category_id is not None
+        else None
+    )
+    payee = (
+        (
+            payees_by_id.get(transaction.payee_id)
+            if payees_by_id is not None
+            else await session.get(Payee, transaction.payee_id)
+        )
+        if transaction.payee_id is not None
         else None
     )
     split_rows = await repository.get_splits(session, transaction.id)
@@ -518,6 +552,7 @@ async def transaction_response(
             else None
         ),
         category=(EntityRef(id=category.id, name=category.name) if category is not None else None),
+        payee=(EntityRef(id=payee.id, name=payee.name) if payee is not None else None),
         counterparty=transaction.counterparty,
         description=transaction.description,
         comment=transaction.comment,
@@ -530,3 +565,16 @@ async def transaction_response(
         created_at=transaction.created_at,
         updated_at=transaction.updated_at,
     )
+
+
+async def transaction_page_responses(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    transactions: list[FinancialTransaction],
+) -> list[TransactionResponse]:
+    payee_ids = {item.payee_id for item in transactions if item.payee_id is not None}
+    payees_by_id = await payee_repository.get_payees_by_ids(session, workspace_id, payee_ids)
+    return [
+        await transaction_response(session, item, payees_by_id=payees_by_id)
+        for item in transactions
+    ]

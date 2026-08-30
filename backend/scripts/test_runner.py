@@ -108,6 +108,14 @@ async def run(arguments: list[str]) -> int:
         _run(["alembic", "upgrade", "head"], cycle_environment)
         await assert_test_database_marker(database_url, expected_run_id=str(test_run_id))
 
+        # Stage A adds only the 0011 Payees schema. Exercise its exact reversible
+        # boundary twice in addition to the broader historical migration cycle.
+        _run(["alembic", "downgrade", "0010_goals"], cycle_environment)
+        _run(["alembic", "upgrade", "head"], cycle_environment)
+        _run(["alembic", "downgrade", "0010_goals"], cycle_environment)
+        _run(["alembic", "upgrade", "head"], cycle_environment)
+        await assert_test_database_marker(database_url, expected_run_id=str(test_run_id))
+
         _run(
             ["python", "-m", "pytest", *_pytest_arguments(arguments)],
             child_environment,

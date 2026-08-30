@@ -34,6 +34,7 @@ class TransactionCreate(ApiModel):
     account_id: uuid.UUID
     target_account_id: uuid.UUID | None = None
     category_id: uuid.UUID | None = None
+    payee_id: uuid.UUID | None = None
     counterparty: str | None = Field(default=None, max_length=300)
     description: str | None = None
     comment: str | None = None
@@ -58,6 +59,7 @@ class TransactionUpdate(ApiModel):
     account_id: uuid.UUID | None = None
     target_account_id: uuid.UUID | None = None
     category_id: uuid.UUID | None = None
+    payee_id: uuid.UUID | None = None
     counterparty: str | None = Field(default=None, max_length=300)
     description: str | None = None
     comment: str | None = None
@@ -94,6 +96,7 @@ class TransactionResponse(ApiModel):
     account: EntityRef
     target_account: EntityRef | None
     category: EntityRef | None
+    payee: EntityRef | None
     counterparty: str | None
     description: str | None
     comment: str | None

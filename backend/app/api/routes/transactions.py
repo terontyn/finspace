@@ -34,6 +34,7 @@ async def transaction_list(
     status: TransactionStatus | None = None,
     account_id: uuid.UUID | None = None,
     category_id: uuid.UUID | None = None,
+    payee_id: uuid.UUID | None = None,
     search: str | None = Query(default=None, max_length=300),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -47,12 +48,13 @@ async def transaction_list(
         status=status,
         account_id=account_id,
         category_id=category_id,
+        payee_id=payee_id,
         search=search,
         limit=limit,
         offset=offset,
     )
     return TransactionPage(
-        items=[await service.transaction_response(session, item) for item in items],
+        items=await service.transaction_page_responses(session, context.workspace.id, items),
         page=PageMeta(limit=limit, offset=offset, total=total),
     )
 
