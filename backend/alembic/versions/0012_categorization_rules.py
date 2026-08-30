@@ -41,6 +41,12 @@ def upgrade() -> None:
         sa.Column("updated_at", TIMESTAMP, server_default=sa.text("now()"), nullable=False),
         sa.Column("deleted_at", TIMESTAMP, nullable=True),
         sa.CheckConstraint("version >= 1", name="ck_categorization_rules_version"),
+        sa.CheckConstraint("priority >= 0", name="ck_categorization_rules_priority"),
+        sa.CheckConstraint(
+            "transaction_type IS NULL OR transaction_type IN "
+            "('income', 'expense', 'refund', 'adjustment')",
+            name="ck_categorization_rules_transaction_type",
+        ),
         sa.CheckConstraint(
             "transaction_type IS NOT NULL OR account_id IS NOT NULL OR payee_id IS NOT NULL "
             "OR counterparty_contains IS NOT NULL OR description_contains IS NOT NULL",
