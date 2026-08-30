@@ -21,7 +21,8 @@ async def get_rule(
     if not include_deleted:
         statement = statement.where(CategorizationRule.deleted_at.is_(None))
     if for_update:
-        statement = statement.with_for_update()
+        # The rule may already be present in this session's identity map after matching.
+        statement = statement.with_for_update().execution_options(populate_existing=True)
     return await session.scalar(statement)
 
 

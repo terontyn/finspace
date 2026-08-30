@@ -7,14 +7,19 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.errors import ApiError
 from app.db.models.audit import AuditLog
 from app.db.models.categories import Category
 from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.transactions import FinancialTransaction
-from app.db.models.users import WorkspaceMember
+from app.db.models.users import User, Workspace, WorkspaceMember
 from app.db.session import AsyncSessionFactory
+from app.dependencies.context import RequestContext
+from app.schemas.categorization_rules import CategorizationRuleUpdate
+from app.services import categorization_rules as categorization_service
 from app.services.categorization_rules import normalize_match_text
 from app.services.financial_period_guard import get_or_create_control
 
@@ -631,6 +636,116 @@ def test_apply_preserves_reconciled_and_closed_period_guards(client: TestClient)
     )
     assert closed.status_code == 409
     assert closed.json()["error"]["code"] == "MONTH_CLOSED"
+
+
+def test_apply_rejects_a_rule_changed_after_matching(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Rules concurrent mutation")
+    account = _account(client, headers, "Concurrent card")
+    original_category = _category(client, headers, "Concurrent original")
+    replacement_category = _category(client, headers, "Concurrent replacement")
+    rule = _rule(
+        client,
+        headers,
+        name="Concurrent rule",
+        category_id=original_category["id"],
+        counterparty_contains="concurrent shop",
+    )
+    transaction_id = asyncio.run(
+        _insert_uncategorized(
+            identity,
+            account["id"],
+            counterparty="Concurrent Shop statement",
+        )
+    )
+
+    preview_finished = asyncio.Event()
+    allow_apply_to_continue = asyncio.Event()
+    original_preview = categorization_service.preview_transaction
+
+    async def paused_preview(
+        session: AsyncSession,
+        workspace_id: uuid.UUID,
+        selected_transaction_id: uuid.UUID,
+    ) -> tuple[FinancialTransaction, categorization_service.CategorizationMatch | None]:
+        result = await original_preview(session, workspace_id, selected_transaction_id)
+        preview_finished.set()
+        await allow_apply_to_continue.wait()
+        return result
+
+    monkeypatch.setattr(categorization_service, "preview_transaction", paused_preview)
+
+    async def run_race() -> str:
+        async with AsyncSessionFactory() as apply_session:
+            apply_user = await apply_session.get(User, uuid.UUID(identity["user"]["id"]))
+            apply_workspace = await apply_session.get(
+                Workspace,
+                uuid.UUID(identity["workspace"]["id"]),
+            )
+            assert apply_user is not None
+            assert apply_workspace is not None
+            apply_context = RequestContext(
+                user=apply_user,
+                workspace=apply_workspace,
+                role="owner",
+                request_id=str(uuid.uuid4()),
+            )
+            apply_task = asyncio.create_task(
+                categorization_service.apply_to_transaction(
+                    apply_session,
+                    apply_context,
+                    uuid.UUID(transaction_id),
+                    1,
+                )
+            )
+            await preview_finished.wait()
+
+            async with AsyncSessionFactory() as update_session:
+                update_user = await update_session.get(User, apply_user.id)
+                update_workspace = await update_session.get(Workspace, apply_workspace.id)
+                assert update_user is not None
+                assert update_workspace is not None
+                update_context = RequestContext(
+                    user=update_user,
+                    workspace=update_workspace,
+                    role="owner",
+                    request_id=str(uuid.uuid4()),
+                )
+                await categorization_service.update_rule(
+                    update_session,
+                    update_context,
+                    uuid.UUID(rule["id"]),
+                    CategorizationRuleUpdate(
+                        version=rule["version"],
+                        category_id=uuid.UUID(replacement_category["id"]),
+                    ),
+                )
+
+            allow_apply_to_continue.set()
+            try:
+                await apply_task
+            except ApiError as exc:
+                await apply_session.rollback()
+                return exc.code
+            raise AssertionError("Concurrent rule mutation was not rejected")
+
+    assert asyncio.run(run_race()) == "CATEGORIZATION_RULE_CHANGED"
+
+    unchanged = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["category"] is None
+    assert unchanged.json()["version"] == 1
+    assert asyncio.run(_categorization_audit(transaction_id)) is None
+
+    current_rule = client.get(
+        f"/api/v1/categorization-rules/{rule['id']}",
+        headers=headers,
+    )
+    assert current_rule.status_code == 200, current_rule.text
+    assert current_rule.json()["category_id"] == replacement_category["id"]
+    assert current_rule.json()["version"] == 2
 
 
 def test_viewer_can_preview_but_cannot_mutate_rules_or_transactions(client: TestClient) -> None:
