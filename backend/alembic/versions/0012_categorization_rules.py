@@ -14,7 +14,7 @@ from alembic import op
 revision: str = "0012_categorization_rules"
 down_revision: str | None = "0011_payees"
 branch_labels: str | Sequence[str] | None = None
-depends_on: str | Sequence[str] | None = None
+depends_on: str | None = None
 
 UUID = postgresql.UUID(as_uuid=True)
 TIMESTAMP = sa.DateTime(timezone=True)
@@ -42,10 +42,19 @@ def upgrade() -> None:
         sa.Column("deleted_at", TIMESTAMP, nullable=True),
         sa.CheckConstraint("version >= 1", name="ck_categorization_rules_version"),
         sa.CheckConstraint("priority >= 0", name="ck_categorization_rules_priority"),
+        sa.CheckConstraint("length(btrim(name)) > 0", name="ck_categorization_rules_name_not_empty"),
         sa.CheckConstraint(
             "transaction_type IS NULL OR transaction_type IN "
             "('income', 'expense', 'refund', 'adjustment')",
             name="ck_categorization_rules_transaction_type",
+        ),
+        sa.CheckConstraint(
+            "counterparty_contains IS NULL OR length(btrim(counterparty_contains)) > 0",
+            name="ck_categorization_rules_counterparty_not_empty",
+        ),
+        sa.CheckConstraint(
+            "description_contains IS NULL OR length(btrim(description_contains)) > 0",
+            name="ck_categorization_rules_description_not_empty",
         ),
         sa.CheckConstraint(
             "transaction_type IS NOT NULL OR account_id IS NOT NULL OR payee_id IS NOT NULL "
@@ -64,9 +73,9 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["payee_id"],
-            ["payees.id"],
-            name="fk_categorization_rules_payee_id_payees",
+            ["payee_id", "workspace_id"],
+            ["payees.id", "payees.workspace_id"],
+            name="fk_categorization_rules_payee_workspace",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
@@ -86,6 +95,11 @@ def upgrade() -> None:
             name="fk_categorization_rules_updated_by_users",
         ),
         sa.PrimaryKeyConstraint("id", name="pk_categorization_rules"),
+        sa.UniqueConstraint(
+            "id",
+            "workspace_id",
+            name="uq_categorization_rules_id_workspace",
+        ),
     )
     op.create_index(
         "ix_categorization_rules_workspace_order",
