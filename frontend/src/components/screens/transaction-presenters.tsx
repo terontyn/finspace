@@ -45,3 +45,13 @@ export function transactionIcon(transaction: Transaction): string {
   if (transaction.transaction_type === "transfer") return "↔";
   return "↑";
 }
+
+export function transactionPartyName(transaction: Transaction): string {
+  return transaction.payee?.name ?? transaction.counterparty ?? transactionTypeLabels[transaction.transaction_type];
+}
+
+export function transactionPartyDetail(transaction: Transaction): string | null {
+  if (transaction.payee && transaction.counterparty) return `Источник: ${transaction.counterparty}`;
+  if (transaction.payee) return "Канонический получатель";
+  return null;
+}

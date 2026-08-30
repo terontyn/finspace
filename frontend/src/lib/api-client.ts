@@ -21,6 +21,14 @@ export interface AuthWorkspace {
   version: number;
 }
 
+export type WorkspaceRole = "viewer" | "editor" | "owner";
+
+export interface AuthMeResponse {
+  user: AuthUser;
+  workspace: AuthWorkspace;
+  role: WorkspaceRole;
+}
+
 export interface AuthSession {
   accessToken: string;
   expiresIn: number;

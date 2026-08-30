@@ -112,6 +112,7 @@ test("renders the finance application when a session is restored", async () => {
   let renderer: ReactTestRenderer | undefined;
   apiClient.restoreSession = async () => restoredSession;
   apiClient.get = (<T,>(path: string) => {
+    if (path === "/api/v1/auth/me") return Promise.resolve({ user: restoredSession.user, workspace: restoredSession.workspace, role: "owner" } as T);
     if (path === "/api/v1/accounts/balances") return Promise.resolve([] as T);
     if (path.startsWith("/api/v1/financial-summary?")) return Promise.resolve({ groups: [] } as T);
     if (path.startsWith("/api/v1/transactions?")) {

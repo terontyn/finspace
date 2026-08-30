@@ -15,6 +15,7 @@ export interface TransactionForm {
   currency: Currency;
   description: string;
   occurredAt: string;
+  payeeId: string;
   splits: TransactionSplitForm[];
   status: "draft" | "confirmed";
   targetAccountId: string;
@@ -30,7 +31,7 @@ function localDateTime(value: Date): string {
 export function initialTransactionForm(now = new Date()): TransactionForm {
   return {
     accountId: "", amount: "", categoryId: "", comment: "", counterparty: "", currency: "RUB",
-    description: "", occurredAt: localDateTime(now), splits: [], status: "confirmed", targetAccountId: "", transactionType: "expense",
+    description: "", occurredAt: localDateTime(now), payeeId: "", splits: [], status: "confirmed", targetAccountId: "", transactionType: "expense",
   };
 }
 
@@ -45,6 +46,7 @@ export function transactionFormFromRecord(transaction: Transaction): Transaction
     currency: transaction.currency,
     description: transaction.description ?? "",
     occurredAt: localDateTime(new Date(transaction.occurred_at)),
+    payeeId: transaction.payee?.id ?? "",
     splits: transaction.splits.map((split) => ({ amount: split.amount, categoryId: split.category_id, comment: "" })),
     status: transaction.status === "draft" ? "draft" : "confirmed",
     targetAccountId: transaction.target_account?.id ?? "",
@@ -64,12 +66,21 @@ export function transactionPayload(form: TransactionForm) {
     account_id: form.accountId,
     target_account_id: form.transactionType === "transfer" ? form.targetAccountId : null,
     category_id: form.transactionType === "transfer" || splits.length ? null : form.categoryId || null,
+    payee_id: form.payeeId || null,
     counterparty: form.counterparty || null,
     description: form.description || null,
     comment: form.comment || null,
     status: form.status,
     splits,
   };
+}
+
+export function transactionFormWithPayee(form: TransactionForm, payeeId: string): TransactionForm {
+  return { ...form, payeeId };
+}
+
+export function transactionFormWithCounterparty(form: TransactionForm, counterparty: string): TransactionForm {
+  return { ...form, counterparty };
 }
 
 export function transactionMutation(form: TransactionForm, editing: Transaction | null) {

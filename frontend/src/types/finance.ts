@@ -111,6 +111,26 @@ export interface EntityRef {
   name: string;
 }
 
+export interface PayeeAlias {
+  id: string;
+  alias: string;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface Payee {
+  id: string;
+  name: string;
+  notes: string | null;
+  aliases: PayeeAlias[];
+  version: number;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
 export interface Transaction {
   id: string;
   occurred_at: string;
@@ -120,6 +140,7 @@ export interface Transaction {
   account: EntityRef;
   target_account: EntityRef | null;
   category: EntityRef | null;
+  payee: EntityRef | null;
   counterparty: string | null;
   description: string | null;
   comment: string | null;

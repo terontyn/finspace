@@ -8,6 +8,7 @@ import { formatMoney, moneyTone } from "@/lib/money";
 import type { AccountBalance, FinancialSummaryGroup, Paged, Transaction } from "@/types/finance";
 
 import { currentMonthPeriod, financialSummaryUrl, groupBalanceTotals } from "./dashboard-data";
+import { transactionPartyDetail, transactionPartyName } from "./transaction-presenters";
 
 interface TodayScreenProps { onError: (error: unknown) => void; timezone: string; }
 
@@ -99,7 +100,7 @@ export function TodayScreen({ onError, timezone }: TodayScreenProps) {
 
         <section className="panel dashboard-list-card">
           <div className="panel-heading"><div><span className="kicker">Последнее</span><h2>Недавние операции</h2></div><Link className="text-button" href="/transactions">Все операции →</Link></div>
-          {recent.length ? <div className="dashboard-recent-list">{recent.map((transaction) => <Link className="dashboard-recent-row" href="/transactions" key={transaction.id}><span className={`transaction-type-icon transaction-type-icon--${transaction.transaction_type}`}>{transaction.transaction_type === "income" ? "↓" : transaction.transaction_type === "transfer" ? "↔" : "↑"}</span><div><strong>{transaction.counterparty ?? transaction.description ?? transactionLabels[transaction.transaction_type]}</strong><small>{transaction.category?.name ?? transactionLabels[transaction.transaction_type]} · {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", timeZone: timezone }).format(new Date(transaction.occurred_at))} · {transactionStatusLabels[transaction.status]}</small></div><b className={`amount-cell--${transaction.transaction_type}`}>{transaction.transaction_type === "expense" ? "− " : transaction.transaction_type === "income" ? "+ " : ""}{formatMoney(transaction.amount, transaction.currency)}</b></Link>)}</div> : <div className="empty-state"><strong>Операций пока нет</strong><span>Добавьте первую запись в финансовый журнал.</span></div>}
+          {recent.length ? <div className="dashboard-recent-list">{recent.map((transaction) => <Link className="dashboard-recent-row" href="/transactions" key={transaction.id}><span className={`transaction-type-icon transaction-type-icon--${transaction.transaction_type}`}>{transaction.transaction_type === "income" ? "↓" : transaction.transaction_type === "transfer" ? "↔" : "↑"}</span><div><strong>{transactionPartyName(transaction)}</strong><small>{transactionPartyDetail(transaction) ? `${transactionPartyDetail(transaction)} · ` : ""}{transaction.category?.name ?? transactionLabels[transaction.transaction_type]} · {new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", timeZone: timezone }).format(new Date(transaction.occurred_at))} · {transactionStatusLabels[transaction.status]}</small></div><b className={`amount-cell--${transaction.transaction_type}`}>{transaction.transaction_type === "expense" ? "− " : transaction.transaction_type === "income" ? "+ " : ""}{formatMoney(transaction.amount, transaction.currency)}</b></Link>)}</div> : <div className="empty-state"><strong>Операций пока нет</strong><span>Добавьте первую запись в финансовый журнал.</span></div>}
         </section>
       </div>
     </>}

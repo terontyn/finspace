@@ -12,6 +12,7 @@ const draftTransaction: Transaction = {
   account: { id: "account-1", name: "Основной" },
   amount: "25.0000",
   category: { id: "category-1", name: "Покупки" },
+  payee: null,
   comment: null,
   counterparty: "Черновая покупка",
   created_at: "2026-08-23T08:00:00.000Z",
