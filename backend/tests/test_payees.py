@@ -924,19 +924,22 @@ def test_payee_list_and_transaction_page_use_bounded_payee_queries(
     event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
     try:
         listed = client.get("/api/v1/payees?limit=100", headers=headers)
+        payee_list_statements = statements.copy()
+        statements.clear()
         transactions = client.get("/api/v1/transactions?limit=100", headers=headers)
+        transaction_statements = statements.copy()
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
     assert listed.status_code == transactions.status_code == 200
     assert len(listed.json()["items"]) == 5
     payee_list_queries = [
         statement
-        for statement in statements
+        for statement in payee_list_statements
         if "from payees" in statement and "transactions" not in statement
     ]
     transaction_payee_queries = [
         statement
-        for statement in statements
+        for statement in transaction_statements
         if "from payees" in statement and "payees.id in" in statement
     ]
     assert len(payee_list_queries) <= 3
