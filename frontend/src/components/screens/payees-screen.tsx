@@ -110,17 +110,24 @@ export function PayeesScreen({ onError, role, roleLoading }: PayeesScreenProps) 
   }, [appliedSearch, includeDeleted, offset]);
 
   const load = useCallback(async () => {
+    let redirectedToValidPage = false;
     setIsLoading(true);
     setLoadFailed(false);
     try {
       const result = await apiClient.get<Paged<Payee>>(`/api/v1/payees?${query}`);
+      const lastOffset = result.page.total > 0 ? Math.floor((result.page.total - 1) / limit) * limit : 0;
+      if (result.page.offset > lastOffset) {
+        redirectedToValidPage = true;
+        setOffset(lastOffset);
+        return;
+      }
       setItems(result.items);
       setTotal(result.page.total);
     } catch (error) {
       setLoadFailed(true);
       onError(error);
     } finally {
-      setIsLoading(false);
+      if (!redirectedToValidPage) setIsLoading(false);
     }
   }, [onError, query]);
 
