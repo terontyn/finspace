@@ -14,7 +14,7 @@ from alembic import op
 revision: str = "0012_categorization_rules"
 down_revision: str | None = "0011_payees"
 branch_labels: str | Sequence[str] | None = None
-depends_on: str | None = None
+depends_on: str | Sequence[str] | None = None
 
 UUID = postgresql.UUID(as_uuid=True)
 TIMESTAMP = sa.DateTime(timezone=True)
