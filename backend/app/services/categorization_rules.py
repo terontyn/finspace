@@ -12,8 +12,8 @@ from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.transactions import FinancialTransaction
 from app.dependencies.context import RequestContext
 from app.repositories import accounts as account_repository
-from app.repositories import categorization_rules as repository
 from app.repositories import categories as category_repository
+from app.repositories import categorization_rules as repository
 from app.repositories import transactions as transaction_repository
 from app.schemas.categorization_rules import (
     CategorizationApplyReason,
@@ -394,7 +394,11 @@ async def preview_transaction(
     workspace_id: uuid.UUID,
     transaction_id: uuid.UUID,
 ) -> tuple[FinancialTransaction, CategorizationMatch | None]:
-    transaction = await transaction_repository.get_transaction(session, workspace_id, transaction_id)
+    transaction = await transaction_repository.get_transaction(
+        session,
+        workspace_id,
+        transaction_id,
+    )
     if transaction is None:
         raise ApiError(
             status_code=404,

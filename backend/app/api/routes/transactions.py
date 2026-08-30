@@ -164,9 +164,7 @@ async def transaction_apply_categorization(
     return CategorizationApplyResponse(
         applied=result.applied,
         reason=result.reason,
-        rule=(
-            CategorizationRuleResponse.model_validate(match.rule) if match is not None else None
-        ),
+        rule=(CategorizationRuleResponse.model_validate(match.rule) if match is not None else None),
         category=(
             EntityRef(id=match.category.id, name=match.category.name) if match is not None else None
         ),
