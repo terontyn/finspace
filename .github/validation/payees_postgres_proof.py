@@ -119,9 +119,15 @@ async def _schema_inventory(connection: asyncpg.Connection) -> dict[str, object]
         "AND (tablename IN ('payees', 'payee_aliases') OR indexname LIKE '%payee%') "
         "ORDER BY indexname"
     )
+    def serializable(row: asyncpg.Record) -> dict[str, object]:
+        return {
+            key: value.decode() if isinstance(value, bytes) else value
+            for key, value in dict(row).items()
+        }
+
     return {
-        "constraints": [dict(row) for row in constraints],
-        "indexes": [dict(row) for row in indexes],
+        "constraints": [serializable(row) for row in constraints],
+        "indexes": [serializable(row) for row in indexes],
     }
 
 
