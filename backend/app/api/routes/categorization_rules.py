@@ -50,7 +50,9 @@ async def categorization_rule_create(
     context: EditorContext,
     session: DbSession,
 ) -> CategorizationRuleResponse:
-    return CategorizationRuleResponse.model_validate(await service.create_rule(session, context, data))
+    return CategorizationRuleResponse.model_validate(
+        await service.create_rule(session, context, data)
+    )
 
 
 @router.post("/preview", response_model=CategorizationPreviewResponse)

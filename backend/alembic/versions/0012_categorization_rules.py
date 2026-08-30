@@ -42,7 +42,10 @@ def upgrade() -> None:
         sa.Column("deleted_at", TIMESTAMP, nullable=True),
         sa.CheckConstraint("version >= 1", name="ck_categorization_rules_version"),
         sa.CheckConstraint("priority >= 0", name="ck_categorization_rules_priority"),
-        sa.CheckConstraint("length(btrim(name)) > 0", name="ck_categorization_rules_name_not_empty"),
+        sa.CheckConstraint(
+            "length(btrim(name)) > 0",
+            name="ck_categorization_rules_name_not_empty",
+        ),
         sa.CheckConstraint(
             "transaction_type IS NULL OR transaction_type IN "
             "('income', 'expense', 'refund', 'adjustment')",
