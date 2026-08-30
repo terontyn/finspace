@@ -65,6 +65,11 @@ jobs:
       - name: Install backend and validation dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e "backend[dev]"
 
+      - name: Mirror production Apps Script package mount
+        run: |
+          sudo install -d -m 0755 /app
+          sudo ln -s "$GITHUB_WORKSPACE/google-apps-script" /app/google-apps-script
+
       - name: Runtime evidence
         run: |
           python --version
