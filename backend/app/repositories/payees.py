@@ -14,8 +14,11 @@ async def get_payee(
     *,
     include_deleted: bool = False,
     for_update: bool = False,
+    for_share: bool = False,
     include_aliases: bool = False,
 ) -> Payee | None:
+    if for_update and for_share:
+        raise ValueError("Payee row cannot use FOR UPDATE and FOR SHARE together")
     statement = select(Payee).where(Payee.id == payee_id, Payee.workspace_id == workspace_id)
     if not include_deleted:
         statement = statement.where(Payee.deleted_at.is_(None))
@@ -25,6 +28,8 @@ async def get_payee(
         )
     if for_update:
         statement = statement.with_for_update()
+    elif for_share:
+        statement = statement.with_for_update(read=True)
     return await session.scalar(statement)
 
 

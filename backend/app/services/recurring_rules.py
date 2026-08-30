@@ -110,6 +110,12 @@ async def create_rule(
     values["currency"] = data.currency.upper()
     values["schedule_rrule"] = recurrence.normalize_rrule(data.schedule_rrule)
     await _validate_financial_references(session, context.workspace.id, values)
+    if data.payee_id is not None:
+        await payee_service.get_assignable_payee_for_write(
+            session,
+            context.workspace.id,
+            data.payee_id,
+        )
     now = datetime.now(UTC)
     rule = RecurringRule(
         workspace_id=context.workspace.id,
@@ -150,6 +156,15 @@ async def update_rule(
     values["currency"] = merged.currency.upper()
     values["schedule_rrule"] = recurrence.normalize_rrule(merged.schedule_rrule)
     await _validate_financial_references(session, context.workspace.id, values)
+    if "payee_id" in changes and changes["payee_id"] is not None:
+        payee_id = changes["payee_id"]
+        if not isinstance(payee_id, uuid.UUID):
+            raise _invalid("Payee identifier is invalid")
+        await payee_service.get_assignable_payee_for_write(
+            session,
+            context.workspace.id,
+            payee_id,
+        )
     for field, value in values.items():
         setattr(rule, field, value)
     now = datetime.now(UTC)
@@ -474,13 +489,6 @@ async def _validate_financial_references(
         expected = {transaction_type, "both"}
         if category is None or category.category_type not in expected:
             raise _invalid("Active category type does not match the recurring rule")
-    payee_id = values.get("payee_id")
-    if payee_id is not None:
-        if not isinstance(payee_id, uuid.UUID):
-            raise _invalid("Payee identifier is invalid")
-        await payee_service.get_assignable_payee(session, workspace_id, payee_id)
-
-
 async def _create_transaction_from_rule(
     session: AsyncSession,
     rule: RecurringRule,
@@ -488,14 +496,6 @@ async def _create_transaction_from_rule(
     *,
     request_id: str,
 ) -> FinancialTransaction:
-    if rule.payee_id is not None:
-        payee = await payee_repository.get_payee(session, rule.workspace_id, rule.payee_id)
-        if payee is None:
-            raise ApiError(
-                status_code=409,
-                code="RECURRING_RULE_INVALID",
-                message="Recurring rule Payee is archived or unavailable",
-            )
     user = await session.get(User, rule.created_by)
     workspace = await session.get(Workspace, rule.workspace_id)
     if user is None or workspace is None:
@@ -505,28 +505,37 @@ async def _create_transaction_from_rule(
             message="Recurring rule owner or workspace no longer exists",
         )
     context = RequestContext(user=user, workspace=workspace, role="owner", request_id=request_id)
-    return await transactions.create_transaction(
-        session,
-        context,
-        TransactionCreate(
-            occurred_at=scheduled_for,
-            transaction_type=rule.transaction_type,  # type: ignore[arg-type]
-            amount=rule.amount,
-            currency=rule.currency,
-            account_id=rule.account_id,
-            target_account_id=rule.target_account_id,
-            category_id=rule.category_id,
-            payee_id=rule.payee_id,
-            counterparty=rule.counterparty,
-            description=rule.description,
-            comment=rule.comment,
-            status="draft" if rule.creation_mode == "draft" else "confirmed",
-            source="automation",
-            external_id=f"recurring:{rule.id}:{scheduled_for.isoformat()}",
-        ),
-        commit=False,
-        audit_source="automation",
-    )
+    try:
+        return await transactions.create_transaction(
+            session,
+            context,
+            TransactionCreate(
+                occurred_at=scheduled_for,
+                transaction_type=rule.transaction_type,  # type: ignore[arg-type]
+                amount=rule.amount,
+                currency=rule.currency,
+                account_id=rule.account_id,
+                target_account_id=rule.target_account_id,
+                category_id=rule.category_id,
+                payee_id=rule.payee_id,
+                counterparty=rule.counterparty,
+                description=rule.description,
+                comment=rule.comment,
+                status="draft" if rule.creation_mode == "draft" else "confirmed",
+                source="automation",
+                external_id=f"recurring:{rule.id}:{scheduled_for.isoformat()}",
+            ),
+            commit=False,
+            audit_source="automation",
+        )
+    except ApiError as exc:
+        if exc.code == "PAYEE_NOT_FOUND":
+            raise ApiError(
+                status_code=409,
+                code="RECURRING_RULE_INVALID",
+                message="Recurring rule Payee is archived or unavailable",
+            ) from exc
+        raise
 
 
 async def _audit(

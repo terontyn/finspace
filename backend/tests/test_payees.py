@@ -1,24 +1,28 @@
 import asyncio
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, inspect, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.errors import ApiError
 from app.db.models.audit import AuditLog
 from app.db.models.automations import MonthCloseControl, RecurringRule
-from app.db.models.payees import PayeeAlias
+from app.db.models.payees import Payee, PayeeAlias
 from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import User, Workspace
 from app.db.session import AsyncSessionFactory, engine
 from app.dependencies.context import RequestContext
+from app.repositories import payees as payee_repository
 from app.schemas.payees import PayeeAliasCreate, PayeeUpdate
+from app.schemas.transactions import TransactionCreate
 from app.services import payees as payee_service
+from app.services import recurring_rules as recurring_service
+from app.services import transactions as transaction_service
 from app.services.payees import alias_identity, normalize_alias
 from app.services.sync_hash import row_hash
 from app.services.sync_payload import transaction_payload
@@ -137,6 +141,21 @@ def _recurring_payload(
         "comment": "Template comment",
         "creation_mode": "draft",
     }
+
+
+async def _request_context(
+    session: AsyncSession,
+    identity: dict,
+) -> RequestContext:
+    user = await session.get(User, uuid.UUID(identity["user"]["id"]))
+    workspace = await session.get(Workspace, uuid.UUID(identity["workspace"]["id"]))
+    assert user is not None and workspace is not None
+    return RequestContext(
+        user=user,
+        workspace=workspace,
+        role="owner",
+        request_id=str(uuid.uuid4()),
+    )
 
 
 def test_normalization_is_unicode_conservative() -> None:
@@ -452,6 +471,136 @@ def test_transaction_payee_patch_hydration_filter_guards_and_google_contract(
     assert audit_after is not None and audit_after["payee_id"] == payee["id"]
 
 
+def test_archived_payee_relations_distinguish_omitted_null_and_explicit_assignment(
+    client: TestClient,
+) -> None:
+    _, headers = _register(client, "Archived Payee relation")
+    account, category = _references(client, headers, "Archived Payee relation")
+    payee = _payee(client, headers, "Historical merchant")
+    transaction = _transaction(
+        client,
+        headers,
+        account["id"],
+        category["id"],
+        payee_id=payee["id"],
+        counterparty="Historical statement snapshot",
+    )
+    draft_response = client.post(
+        "/api/v1/transactions",
+        headers=headers,
+        json={
+            "occurred_at": "2026-08-16T12:00:00Z",
+            "transaction_type": "expense",
+            "amount": "25.00",
+            "currency": "RUB",
+            "account_id": account["id"],
+            "category_id": category["id"],
+            "payee_id": payee["id"],
+            "counterparty": "Draft statement snapshot",
+            "status": "draft",
+            "source": "manual",
+        },
+    )
+    assert draft_response.status_code == 201, draft_response.text
+    draft = draft_response.json()
+    recurring_response = client.post(
+        "/api/v1/recurring-rules",
+        headers=headers,
+        json=_recurring_payload(
+            account["id"],
+            category["id"],
+            payee_id=payee["id"],
+            name="Historical recurring relation",
+        ),
+    )
+    assert recurring_response.status_code == 201, recurring_response.text
+    recurring = recurring_response.json()
+
+    archived = client.delete(
+        f"/api/v1/payees/{payee['id']}?version={payee['version']}",
+        headers=headers,
+    )
+    assert archived.status_code == 200, archived.text
+
+    retained = client.patch(
+        f"/api/v1/transactions/{transaction['id']}",
+        headers=headers,
+        json={"version": transaction["version"], "comment": "Unrelated historical edit"},
+    )
+    assert retained.status_code == 200, retained.text
+    retained_transaction = retained.json()
+    assert retained_transaction["version"] == transaction["version"] + 1
+    assert retained_transaction["payee"] == {
+        "id": payee["id"],
+        "name": "Historical merchant",
+    }
+    assert retained_transaction["counterparty"] == "Historical statement snapshot"
+
+    explicit_same = client.patch(
+        f"/api/v1/transactions/{transaction['id']}",
+        headers=headers,
+        json={
+            "version": retained_transaction["version"],
+            "payee_id": payee["id"],
+        },
+    )
+    assert explicit_same.status_code == 404
+    assert explicit_same.json()["error"]["code"] == "PAYEE_NOT_FOUND"
+
+    cleared = client.patch(
+        f"/api/v1/transactions/{transaction['id']}",
+        headers=headers,
+        json={"version": retained_transaction["version"], "payee_id": None},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["version"] == retained_transaction["version"] + 1
+    assert cleared.json()["payee"] is None
+
+    confirmed = client.post(
+        f"/api/v1/transactions/{draft['id']}/confirm",
+        headers=headers,
+        json={"version": draft["version"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "confirmed"
+    assert confirmed.json()["payee"] == {
+        "id": payee["id"],
+        "name": "Historical merchant",
+    }
+    assert confirmed.json()["counterparty"] == "Draft statement snapshot"
+
+    recurring_retained = client.patch(
+        f"/api/v1/recurring-rules/{recurring['id']}",
+        headers=headers,
+        json={"version": recurring["version"], "comment": "Unrelated recurring edit"},
+    )
+    assert recurring_retained.status_code == 200, recurring_retained.text
+    retained_rule = recurring_retained.json()
+    assert retained_rule["version"] == recurring["version"] + 1
+    assert retained_rule["payee"] == {
+        "id": payee["id"],
+        "name": "Historical merchant",
+    }
+
+    recurring_explicit_same = client.patch(
+        f"/api/v1/recurring-rules/{recurring['id']}",
+        headers=headers,
+        json={"version": retained_rule["version"], "payee_id": payee["id"]},
+    )
+    assert recurring_explicit_same.status_code == 404
+    assert recurring_explicit_same.json()["error"]["code"] == "PAYEE_NOT_FOUND"
+
+    recurring_cleared = client.patch(
+        f"/api/v1/recurring-rules/{recurring['id']}",
+        headers=headers,
+        json={"version": retained_rule["version"], "payee_id": None},
+    )
+    assert recurring_cleared.status_code == 200, recurring_cleared.text
+    assert recurring_cleared.json()["version"] == retained_rule["version"] + 1
+    assert recurring_cleared.json()["payee_id"] is None
+    assert recurring_cleared.json()["payee"] is None
+
+
 def test_transaction_payee_respects_reconciliation_and_month_close(
     client: TestClient,
 ) -> None:
@@ -729,6 +878,242 @@ def test_workspace_composite_foreign_keys_reject_raw_cross_workspace_links(
     )
     assert cross_recurring_api.status_code == 404
     assert cross_recurring_api.json()["error"]["code"] == "PAYEE_NOT_FOUND"
+
+
+def test_transaction_assignment_for_share_serializes_with_payee_archive(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Transaction assignment lock")
+    account, category = _references(client, headers, "Transaction assignment lock")
+    payee = _payee(client, headers, "Locking transaction merchant")
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: object,
+    ) -> None:
+        statements.append(statement.lower())
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+
+    async def run_assignment_first() -> uuid.UUID:
+        assignment_locked = asyncio.Event()
+        release_assignment = asyncio.Event()
+        original = payee_service.get_assignable_payee_for_write
+
+        async def hold_after_assignment_lock(
+            session: AsyncSession,
+            workspace_id: uuid.UUID,
+            payee_id: uuid.UUID,
+        ) -> Payee:
+            result = await original(session, workspace_id, payee_id)
+            if session.info.get("hold_transaction_assignment_lock"):
+                assignment_locked.set()
+                await release_assignment.wait()
+            return result
+
+        monkeypatch.setattr(
+            payee_service,
+            "get_assignable_payee_for_write",
+            hold_after_assignment_lock,
+        )
+        async with AsyncSessionFactory() as assignment_session:
+            assignment_session.info["hold_transaction_assignment_lock"] = True
+            context = await _request_context(assignment_session, identity)
+            assignment_task = asyncio.create_task(
+                transaction_service.create_transaction(
+                    assignment_session,
+                    context,
+                    TransactionCreate(
+                        occurred_at=datetime(2026, 8, 20, 12, tzinfo=UTC),
+                        transaction_type="expense",
+                        amount="10.00",
+                        currency="RUB",
+                        account_id=uuid.UUID(account["id"]),
+                        category_id=uuid.UUID(category["id"]),
+                        payee_id=uuid.UUID(payee["id"]),
+                        counterparty="Assignment-first snapshot",
+                    ),
+                )
+            )
+            await asyncio.wait_for(assignment_locked.wait(), timeout=5)
+            try:
+                async with AsyncSessionFactory() as archive_session:
+                    await archive_session.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                    with pytest.raises(DBAPIError) as blocked:
+                        await payee_repository.get_payee(
+                            archive_session,
+                            uuid.UUID(identity["workspace"]["id"]),
+                            uuid.UUID(payee["id"]),
+                            for_update=True,
+                        )
+                    assert getattr(blocked.value.orig, "sqlstate", None) == "55P03"
+                    await archive_session.rollback()
+            finally:
+                release_assignment.set()
+            transaction = await assignment_task
+
+        async with AsyncSessionFactory() as archive_session:
+            context = await _request_context(archive_session, identity)
+            await payee_service.delete_payee(
+                archive_session,
+                context,
+                uuid.UUID(payee["id"]),
+                payee["version"],
+            )
+
+        async with AsyncSessionFactory() as inspection_session:
+            transaction_row = await inspection_session.get(FinancialTransaction, transaction.id)
+            payee_row = await inspection_session.get(Payee, uuid.UUID(payee["id"]))
+            assert transaction_row is not None and payee_row is not None
+            assert transaction_row.payee_id == payee_row.id
+            assert payee_row.deleted_at is not None
+        return transaction.id
+
+    try:
+        transaction_id = asyncio.run(run_assignment_first())
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
+    assert any("from payees" in statement and "for share" in statement for statement in statements)
+    historical = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+    assert historical.status_code == 200
+    assert historical.json()["payee"]["id"] == payee["id"]
+
+    archive_first = _payee(client, headers, "Archive-first transaction merchant")
+    deleted = client.delete(
+        f"/api/v1/payees/{archive_first['id']}?version={archive_first['version']}",
+        headers=headers,
+    )
+    assert deleted.status_code == 200
+    rejected = client.post(
+        "/api/v1/transactions",
+        headers=headers,
+        json={
+            "occurred_at": "2026-08-21T12:00:00Z",
+            "transaction_type": "expense",
+            "amount": "10.00",
+            "currency": "RUB",
+            "account_id": account["id"],
+            "category_id": category["id"],
+            "payee_id": archive_first["id"],
+        },
+    )
+    assert rejected.status_code == 404
+    assert rejected.json()["error"]["code"] == "PAYEE_NOT_FOUND"
+
+
+def test_recurring_execution_assignment_lock_serializes_with_payee_archive(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Recurring execution lock")
+    account, category = _references(client, headers, "Recurring execution lock")
+    payee = _payee(client, headers, "Locking recurring merchant")
+    rule_response = client.post(
+        "/api/v1/recurring-rules",
+        headers=headers,
+        json=_recurring_payload(
+            account["id"],
+            category["id"],
+            payee_id=payee["id"],
+            name="Recurring assignment lock",
+        ),
+    )
+    assert rule_response.status_code == 201, rule_response.text
+    rule_id = uuid.UUID(rule_response.json()["id"])
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: object,
+    ) -> None:
+        statements.append(statement.lower())
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+
+    async def run_execution_first() -> uuid.UUID:
+        assignment_locked = asyncio.Event()
+        release_assignment = asyncio.Event()
+        original = payee_service.get_assignable_payee_for_write
+
+        async def hold_after_assignment_lock(
+            session: AsyncSession,
+            workspace_id: uuid.UUID,
+            payee_id: uuid.UUID,
+        ) -> Payee:
+            result = await original(session, workspace_id, payee_id)
+            if session.info.get("hold_recurring_assignment_lock"):
+                assignment_locked.set()
+                await release_assignment.wait()
+            return result
+
+        monkeypatch.setattr(
+            payee_service,
+            "get_assignable_payee_for_write",
+            hold_after_assignment_lock,
+        )
+        async with AsyncSessionFactory() as execution_session:
+            execution_session.info["hold_recurring_assignment_lock"] = True
+            rule = await execution_session.get(RecurringRule, rule_id)
+            assert rule is not None
+            execution_task = asyncio.create_task(
+                recurring_service.execute_rule(
+                    execution_session,
+                    rule,
+                    scheduled_for=datetime.now(UTC),
+                    idempotency_key=f"recurring-lock:{uuid.uuid4()}",
+                    service_account_id=None,
+                    initiated_by=uuid.UUID(identity["user"]["id"]),
+                    request_id=str(uuid.uuid4()),
+                    trigger_type="manual",
+                )
+            )
+            await asyncio.wait_for(assignment_locked.wait(), timeout=5)
+            try:
+                async with AsyncSessionFactory() as archive_session:
+                    await archive_session.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                    with pytest.raises(DBAPIError) as blocked:
+                        await payee_repository.get_payee(
+                            archive_session,
+                            uuid.UUID(identity["workspace"]["id"]),
+                            uuid.UUID(payee["id"]),
+                            for_update=True,
+                        )
+                    assert getattr(blocked.value.orig, "sqlstate", None) == "55P03"
+                    await archive_session.rollback()
+            finally:
+                release_assignment.set()
+            execution, duplicate = await execution_task
+            assert duplicate is False
+            assert execution.transaction_id is not None
+            return execution.transaction_id
+
+    try:
+        transaction_id = asyncio.run(run_execution_first())
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
+    assert any("from payees" in statement and "for share" in statement for statement in statements)
+
+    deleted = client.delete(
+        f"/api/v1/payees/{payee['id']}?version={payee['version']}",
+        headers=headers,
+    )
+    assert deleted.status_code == 200, deleted.text
+    historical = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+    assert historical.status_code == 200
+    assert historical.json()["payee"] == {
+        "id": payee["id"],
+        "name": "Locking recurring merchant",
+    }
 
 
 def test_alias_concurrency_and_rename_race_leave_one_namespace_winner(

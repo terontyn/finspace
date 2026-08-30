@@ -50,10 +50,6 @@ async def _category(
     return category
 
 
-async def _payee(session: AsyncSession, workspace_id: uuid.UUID, payee_id: uuid.UUID) -> Payee:
-    return await payee_service.get_assignable_payee(session, workspace_id, payee_id)
-
-
 def _allowed_category(transaction_type: str, category_type: str) -> bool:
     if transaction_type == "income":
         return category_type in {"income", "both"}
@@ -132,9 +128,6 @@ async def _validate_transaction(
                 code="INVALID_CATEGORY_TYPE",
                 message="Category type does not match transaction type",
             )
-    if data.payee_id is not None:
-        await _payee(session, workspace_id, data.payee_id)
-
     if data.splits:
         if data.transaction_type == "transfer":
             raise ApiError(
@@ -240,6 +233,12 @@ async def create_transaction(
 ) -> FinancialTransaction:
     control = await get_or_create_control(session, context.workspace.id, for_update=True)
     assert_dates_open(control, context.workspace.timezone, [data.occurred_at])
+    if data.payee_id is not None:
+        await payee_service.get_assignable_payee_for_write(
+            session,
+            context.workspace.id,
+            data.payee_id,
+        )
     await _validate_transaction(session, context.workspace.id, data)
     values = data.model_dump(exclude={"splits"})
     transaction = FinancialTransaction(
@@ -302,6 +301,20 @@ async def update_transaction(
             code="RECONCILED_TRANSACTION_IMMUTABLE",
             message="A reconciled transaction cannot be changed",
         )
+    changes = data.model_dump(exclude_unset=True, exclude={"version"})
+    if "payee_id" in changes and changes["payee_id"] is not None:
+        payee_id = changes["payee_id"]
+        if not isinstance(payee_id, uuid.UUID):
+            raise ApiError(
+                status_code=422,
+                code="VALIDATION_ERROR",
+                message="Payee identifier is invalid",
+            )
+        await payee_service.get_assignable_payee_for_write(
+            session,
+            context.workspace.id,
+            payee_id,
+        )
     existing_splits = await repository.get_splits(session, transaction.id)
     current = {
         "occurred_at": transaction.occurred_at,
@@ -324,7 +337,6 @@ async def update_transaction(
             for item in existing_splits
         ],
     }
-    changes = data.model_dump(exclude_unset=True, exclude={"version"})
     if changes.get("status") == "reconciled":
         raise ApiError(
             status_code=409,

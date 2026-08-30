@@ -142,12 +142,17 @@ def payee_response(payee: Payee) -> PayeeResponse:
     )
 
 
-async def get_assignable_payee(
+async def get_assignable_payee_for_write(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     payee_id: uuid.UUID,
 ) -> Payee:
-    payee = await repository.get_payee(session, workspace_id, payee_id)
+    payee = await repository.get_payee(
+        session,
+        workspace_id,
+        payee_id,
+        for_share=True,
+    )
     if payee is None:
         raise _not_found()
     return payee
