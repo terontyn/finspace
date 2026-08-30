@@ -142,9 +142,9 @@ async def _assert_stage_a_schema(connection: asyncpg.Connection) -> None:
         "fk_payee_aliases_payee_workspace",
         "fk_transactions_payee_workspace",
         "fk_recurring_rules_payee_workspace",
-        "ck_payee_aliases_primary_not_deleted",
     }
     assert required <= names, required - names
+    assert any(name.endswith("ck_payee_aliases_primary_not_deleted") for name in names)
 
     primary_index = await connection.fetchval(
         "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' "
