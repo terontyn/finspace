@@ -14,6 +14,7 @@ import { GoogleSheetsScreen } from "@/components/screens/google-sheets-screen";
 import { GoalsScreen } from "@/components/screens/goals-screen";
 import { ImportScreen } from "@/components/screens/import-screen";
 import { MonthCloseScreen } from "@/components/screens/month-close-screen";
+import { PayeesScreen } from "@/components/screens/payees-screen";
 import { RecurringRulesScreen } from "@/components/screens/recurring-rules-screen";
 import { ReportsScreen } from "@/components/screens/reports-screen";
 import { SyncConflictsScreen } from "@/components/screens/sync-conflicts-screen";
@@ -74,7 +75,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       {screen === "month-close" && <MonthCloseScreen onError={showError} />}
       {screen === "budget" && <BudgetScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} timezone={auth.session.workspace.timezone} />}
       {screen === "reports" && <ReportsScreen onError={showError} timezone={auth.session.workspace.timezone} />}
-      {screen === "payees" && <ComingSoonScreen description="Получатели будут спроектированы поверх текущего поля counterparty с aliases и обратной совместимостью." requiresApi title="Получатели" />}
+      {screen === "payees" && <PayeesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "rules" && <ComingSoonScreen description="Правила категоризации — отдельный механизм и не заменяют recurring rules." requiresApi title="Правила" />}
       {screen === "goals" && <GoalsScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} />}
       {screen === "settings" && <ComingSoonScreen description="Настройки пространства будут перенесены после завершения интеграции рабочих финансовых экранов." title="Настройки" />}

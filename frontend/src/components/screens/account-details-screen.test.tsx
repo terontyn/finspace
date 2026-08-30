@@ -36,6 +36,7 @@ const transaction: Transaction = {
   account: { id: account.id, name: account.name },
   amount: "25.0000",
   category: { id: "category-1", name: "Доход" },
+  payee: null,
   comment: null,
   counterparty: "Работодатель",
   created_at: "2026-08-20T00:00:00.000Z",
