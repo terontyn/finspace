@@ -35,7 +35,7 @@ async def recurring_rule_list(
         offset=offset,
     )
     return RecurringRulePage(
-        items=[RecurringRuleResponse.model_validate(item) for item in items],
+        items=await service.rule_page_responses(session, context.workspace.id, items),
         page=PageMeta(limit=limit, offset=offset, total=total),
     )
 
@@ -46,7 +46,7 @@ async def recurring_rule_create(
     context: EditorContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(await service.create_rule(session, context, data))
+    return await service.rule_response(session, await service.create_rule(session, context, data))
 
 
 @router.get("/{rule_id}", response_model=RecurringRuleResponse)
@@ -55,8 +55,8 @@ async def recurring_rule_get(
     context: CurrentContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(
-        await service.get_rule(session, context.workspace.id, rule_id)
+    return await service.rule_response(
+        session, await service.get_rule(session, context.workspace.id, rule_id)
     )
 
 
@@ -67,8 +67,8 @@ async def recurring_rule_update(
     context: EditorContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(
-        await service.update_rule(session, context, rule_id, data)
+    return await service.rule_response(
+        session, await service.update_rule(session, context, rule_id, data)
     )
 
 
@@ -78,8 +78,8 @@ async def recurring_rule_delete(
     context: EditorContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(
-        await service.change_state(session, context, rule_id, "delete")
+    return await service.rule_response(
+        session, await service.change_state(session, context, rule_id, "delete")
     )
 
 
@@ -89,8 +89,8 @@ async def recurring_rule_restore(
     context: EditorContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(
-        await service.change_state(session, context, rule_id, "restore")
+    return await service.rule_response(
+        session, await service.change_state(session, context, rule_id, "restore")
     )
 
 
@@ -100,8 +100,8 @@ async def recurring_rule_pause(
     context: EditorContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(
-        await service.change_state(session, context, rule_id, "pause")
+    return await service.rule_response(
+        session, await service.change_state(session, context, rule_id, "pause")
     )
 
 
@@ -111,8 +111,8 @@ async def recurring_rule_resume(
     context: EditorContext,
     session: DbSession,
 ) -> RecurringRuleResponse:
-    return RecurringRuleResponse.model_validate(
-        await service.change_state(session, context, rule_id, "resume")
+    return await service.rule_response(
+        session, await service.change_state(session, context, rule_id, "resume")
     )
 
 

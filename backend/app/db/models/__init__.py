@@ -32,6 +32,7 @@ from app.db.models.google_sync import (
     SyncRun,
 )
 from app.db.models.imports import ImportBatch, ImportRow
+from app.db.models.payees import Payee, PayeeAlias
 from app.db.models.system import SystemMetadata
 from app.db.models.transactions import FinancialTransaction, TransactionSplit
 from app.db.models.users import User, Workspace, WorkspaceMember
@@ -60,6 +61,8 @@ __all__ = [
     "MonthCloseRevision",
     "MonthClosure",
     "NotificationSetting",
+    "Payee",
+    "PayeeAlias",
     "RecurringRule",
     "RecurringRuleExecution",
     "ServiceAccount",

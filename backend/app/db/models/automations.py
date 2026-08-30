@@ -9,6 +9,8 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     Integer,
     Numeric,
     String,
@@ -84,6 +86,15 @@ class AutomationRun(Base):
 
 class RecurringRule(Base, TimestampMixin, VersionMixin, SoftDeleteMixin):
     __tablename__ = "recurring_rules"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["payee_id", "workspace_id"],
+            ["payees.id", "payees.workspace_id"],
+            name="fk_recurring_rules_payee_workspace",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_recurring_rules_workspace_payee", "workspace_id", "payee_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -105,6 +116,7 @@ class RecurringRule(Base, TimestampMixin, VersionMixin, SoftDeleteMixin):
     category_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("categories.id"), nullable=True
     )
+    payee_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     counterparty: Mapped[str | None] = mapped_column(String(300), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -569,7 +569,7 @@ def test_telegram_link_parser_intent_callback_and_isolation(client: TestClient) 
     assert confirmed.json()["transaction_id"] == repeated.json()["transaction_id"]
     assert repeated.json()["duplicate"] is True
 
-    async def inspect_telegram() -> tuple[str, int, int]:
+    async def inspect_telegram() -> tuple[str, int, int, bool]:
         async with AsyncSessionFactory() as session:
             transaction = await session.get(
                 FinancialTransaction, uuid.UUID(confirmed.json()["transaction_id"])
@@ -579,12 +579,18 @@ def test_telegram_link_parser_intent_callback_and_isolation(client: TestClient) 
             codes = list((await session.scalars(select(TelegramLinkCode))).all())
             serialized = repr([(item.payload, item.opaque_id) for item in intents])
             assert "bot_token" not in serialized.casefold()
-            return str(transaction.amount), len(intents), sum(item.attempts for item in codes)
+            return (
+                str(transaction.amount),
+                len(intents),
+                sum(item.attempts for item in codes),
+                transaction.payee_id is None,
+            )
 
-    amount, intent_count, attempts = asyncio.run(inspect_telegram())
+    amount, intent_count, attempts, payee_is_unset = asyncio.run(inspect_telegram())
     assert amount == "1250.2500"
     assert intent_count >= 2
     assert attempts == 0
+    assert payee_is_unset is True
 
 
 def test_telegram_backdated_confirmation_is_terminal_month_closed(
