@@ -489,6 +489,8 @@ async def _validate_financial_references(
         expected = {transaction_type, "both"}
         if category is None or category.category_type not in expected:
             raise _invalid("Active category type does not match the recurring rule")
+
+
 async def _create_transaction_from_rule(
     session: AsyncSession,
     rule: RecurringRule,
