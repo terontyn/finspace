@@ -19,9 +19,8 @@ from app.schemas.categorization_rules import (
     CategorizationRuleCreate,
     CategorizationRuleUpdate,
 )
-from app.schemas.transactions import TransactionUpdate
+from app.services import categorization_executor as executor
 from app.services import payees as payee_service
-from app.services import transactions as transaction_service
 from app.services.audit import record_audit, snapshot
 from app.services.categorization_matcher import (
     MatchCandidate,
@@ -465,60 +464,18 @@ async def preview_transaction(
     return transaction, await match_transaction(session, workspace_id, transaction)
 
 
-async def _lock_proposed_match(
-    session: AsyncSession,
-    workspace_id: uuid.UUID,
-    transaction: FinancialTransaction,
-    match: CategorizationMatch,
-) -> None:
-    """Pin the proposed rule row and prove it is still the deterministic first valid match.
-
-    Must be called while the workspace rule-set control is held ``FOR SHARE``. Two things are
-    checked, and both are needed:
-
-    * the proposed rule row itself is unchanged and still matches — this is the v0.11 guarantee;
-    * recomputing the deterministic first match still yields the same rule, rule version and
-      category — this is what catches a rule that was created, restored, activated or reprioritized
-      into a higher-priority position after the optimistic preview.
-
-    The rule row is taken ``FOR SHARE`` rather than ``FOR UPDATE``: apply never writes to the rule,
-    so several applies may pin the same rule at once, while mutations are already excluded by the
-    exclusive rule-set gate they must take first.
-    """
-    matched_version = match.rule.version
-    matched_category_id = match.category.id
-    current_rule = await repository.get_rule(
-        session,
-        workspace_id,
-        match.rule.id,
-        include_deleted=True,
-        for_share=True,
-    )
-    if (
-        current_rule is None
-        or current_rule.version != matched_version
-        or current_rule.deleted_at is not None
-        or not current_rule.is_active
-        or current_rule.category_id != matched_category_id
-        or not _matches(current_rule, transaction)
-    ):
-        raise _rule_changed_during_apply()
-    confirmed = await match_transaction(session, workspace_id, transaction, refresh=True)
-    if (
-        confirmed is None
-        or confirmed.rule.id != match.rule.id
-        or confirmed.rule.version != matched_version
-        or confirmed.category.id != matched_category_id
-    ):
-        raise _rule_changed_during_apply()
-
-
 async def apply_to_transaction(
     session: AsyncSession,
     context: RequestContext,
     transaction_id: uuid.UUID,
     version: int,
 ) -> CategorizationApplyResult:
+    """Single-transaction apply.
+
+    The optimistic preview, the version check and the public reason vocabulary are unchanged; the
+    guarded mutation itself now runs through the shared executor so single and bulk cannot drift
+    apart in their locking or revalidation semantics. No persisted preview is required.
+    """
     transaction, match = await preview_transaction(
         session,
         context.workspace.id,
@@ -541,30 +498,54 @@ async def apply_to_transaction(
             applied=False,
             reason="already_categorized",
         )
-    # Lock order: rule-set control -> categorization rule -> financial-period/transaction locks.
-    # The shared rule-set lock is held until the transaction mutation below commits, so a rule
-    # mutation cannot slip a higher-priority match in between the proof and the write.
-    await repository.get_or_create_rule_set_control(
-        session,
-        context.workspace.id,
-        for_share=True,
-    )
-    await _lock_proposed_match(
-        session,
-        context.workspace.id,
-        transaction,
-        match,
-    )
-    updated = await transaction_service.update_transaction(
+    outcome = await executor.execute_apply(
         session,
         context,
-        transaction.id,
-        TransactionUpdate(version=version, category_id=match.category.id),
-        audit_source="api",
+        executor.ApplyExpectation(
+            transaction_id=transaction.id,
+            transaction_version=version,
+            rule_id=match.rule.id,
+            rule_version=match.rule.version,
+            category_id=match.category.id,
+        ),
+        commit=True,
     )
-    return CategorizationApplyResult(
-        transaction=updated,
-        match=match,
-        applied=True,
-        reason="applied",
-    )
+    if outcome.status == executor.APPLIED and outcome.transaction is not None:
+        return CategorizationApplyResult(
+            transaction=outcome.transaction,
+            match=match,
+            applied=True,
+            reason="applied",
+        )
+    # Map the executor vocabulary back onto the established single-apply contract.
+    if outcome.status == executor.NO_MATCH:
+        return CategorizationApplyResult(
+            transaction=outcome.transaction or transaction,
+            match=None,
+            applied=False,
+            reason="no_match",
+        )
+    if outcome.status in {executor.ALREADY_CATEGORIZED, executor.SPLIT}:
+        return CategorizationApplyResult(
+            transaction=outcome.transaction or transaction,
+            match=match,
+            applied=False,
+            reason="already_categorized",
+        )
+    if outcome.status == executor.TRANSACTION_CHANGED:
+        raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
+    if outcome.status == executor.RECONCILED:
+        raise ApiError(
+            status_code=409,
+            code="RECONCILED_TRANSACTION_IMMUTABLE",
+            message="A reconciled transaction cannot be changed",
+        )
+    if outcome.status == executor.NOT_FOUND:
+        raise ApiError(
+            status_code=404,
+            code="TRANSACTION_NOT_FOUND",
+            message="Transaction was not found",
+        )
+    # rule_changed, category_changed and transfer all mean the proposal is no longer the
+    # deterministic decision, which single apply has always reported as a rule change.
+    raise _rule_changed_during_apply()
