@@ -114,9 +114,17 @@ jobs:
           PGPASSWORD=finspace createdb -h 127.0.0.1 -U finspace v011_schema_test
           (cd backend && alembic -c alembic.ini upgrade 0012_categorization_rules)
           PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -v ON_ERROR_STOP=1 <<'SQL'
-          INSERT INTO workspaces (id, name, base_currency, timezone, created_at, updated_at)
-          VALUES (gen_random_uuid(), 'Legacy v0.11 workspace', 'RUB', 'Asia/Yekaterinburg', now(), now());
+          WITH legacy_user AS (
+            INSERT INTO users (id, email, normalized_email, display_name, locale, timezone)
+            VALUES (gen_random_uuid(), 'legacy@example.com', 'legacy@example.com',
+                    'Legacy owner', 'ru-RU', 'Asia/Yekaterinburg')
+            RETURNING id
+          )
+          INSERT INTO workspaces (id, name, base_currency, timezone, owner_user_id)
+          SELECT gen_random_uuid(), 'Legacy v0.11 workspace', 'RUB', 'Asia/Yekaterinburg', id
+          FROM legacy_user;
           SQL
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -Atc 'SELECT count(*) FROM workspaces;')" = "1"
           (cd backend && alembic -c alembic.ini upgrade 0013_categorization_rule_sets)
           WORKSPACES=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -Atc "SELECT count(*) FROM workspaces;")
           CONTROLS=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -Atc "SELECT count(*) FROM categorization_rule_set_controls;")
