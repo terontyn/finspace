@@ -83,7 +83,7 @@ jobs:
         run: |
           PGPASSWORD=finspace createdb -h 127.0.0.1 -U finspace apply_test
           (cd backend && alembic -c alembic.ini upgrade head)
-          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d apply_test -Atc 'select version_num from alembic_version')" = "0015_categorization_apply_operations"
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d apply_test -Atc 'select version_num from alembic_version')" = "0015_categorization_apply_ops"
           PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d apply_test -v ON_ERROR_STOP=1 <<'SQL'
           SELECT to_regclass('public.categorization_apply_operations') IS NOT NULL AS operations_exist;
           SELECT to_regclass('public.categorization_apply_results') IS NOT NULL AS results_exist;
@@ -107,7 +107,7 @@ jobs:
           KEPT=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d apply_test -Atc "SELECT CASE WHEN to_regclass('public.categorization_previews') IS NOT NULL AND to_regclass('public.categorization_preview_items') IS NOT NULL THEN 1 ELSE 0 END;")
           test "$KEPT" = "1"
           (cd backend && alembic -c alembic.ini upgrade head)
-          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d apply_test -Atc 'select version_num from alembic_version')" = "0015_categorization_apply_operations"
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d apply_test -Atc 'select version_num from alembic_version')" = "0015_categorization_apply_ops"
 
       - name: Upgrade from the exact main 0014 schema with existing preview data
         env:
@@ -134,7 +134,7 @@ jobs:
           FROM seed_workspace;
           SQL
           BEFORE=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM categorization_previews;')
-          (cd backend && alembic -c alembic.ini upgrade 0015_categorization_apply_operations)
+          (cd backend && alembic -c alembic.ini upgrade 0015_categorization_apply_ops)
           AFTER=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM categorization_previews;')
           OPERATIONS=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM categorization_apply_operations;')
           echo "previews_before=$BEFORE previews_after=$AFTER operations=$OPERATIONS"
