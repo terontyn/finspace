@@ -1,7 +1,10 @@
 """Add idempotent bulk categorization apply operations and per-item results.
 
-Revision ID: 0015_categorization_apply_operations
+Revision ID: 0015_categorization_apply_ops
 Revises: 0014_categorization_previews
+
+The identifier is abbreviated because Alembic's ``alembic_version.version_num`` column is
+``VARCHAR(32)``; the unabbreviated name would be 36 characters and cannot be stamped.
 """
 
 from collections.abc import Sequence
@@ -11,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0015_categorization_apply_operations"
+revision: str = "0015_categorization_apply_ops"
 down_revision: str | None = "0014_categorization_previews"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
