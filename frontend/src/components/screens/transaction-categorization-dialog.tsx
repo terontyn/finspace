@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { ActionDialog } from "@/components/ui/action-dialog";
 import { categorizationUiError, type CategorizationUiError } from "@/lib/categorization";
@@ -29,19 +29,41 @@ export function TransactionCategorizationDialog({ canApply, onApplied, onClose, 
   const [outcome, setOutcome] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [staleVersion, setStaleVersion] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState<CategorizationUiError | null>(null);
   const hasExistingCategorization = Boolean(transaction.category || transaction.splits.length);
   const isTransfer = transaction.transaction_type === "transfer";
   const canPreview = !hasExistingCategorization && !isTransfer;
 
-  useEffect(() => {
+  // Reset during render (React's documented prop-change adjustment) instead of in an effect: the
+  // parent replaces this transaction after every apply, and an effect-based reset would race the
+  // result message it is supposed to leave alone.
+  const [seen, setSeen] = useState({ id: transaction.id, version: transaction.version });
+  if (seen.id !== transaction.id || seen.version !== transaction.version) {
+    setSeen({ id: transaction.id, version: transaction.version });
     setPreview(null);
     setIssue(null);
-    setOutcome(null);
-  }, [transaction.id, transaction.version]);
+    setStaleVersion(false);
+    if (seen.id !== transaction.id) {
+      setOutcome(null);
+      setRefreshNotice(null);
+    }
+  }
 
   function report(error: unknown) {
     setIssue(categorizationUiError(error));
     if (!(error instanceof ApiClientError)) onError(error);
+  }
+
+  async function refreshStaleTransaction(conflict: CategorizationUiError): Promise<void> {
+    try {
+      const fresh = await apiClient.get<Transaction>(`/api/v1/transactions/${transaction.id}`);
+      await onApplied(fresh);
+      setRefreshNotice({ ...conflict, message: `${conflict.message} Операция перечитана: версия ${fresh.version}. Выполните предпросмотр заново.` });
+    } catch {
+      setStaleVersion(true);
+      setIssue(conflict);
+    }
   }
 
   async function requestPreview() {
@@ -49,6 +71,7 @@ export function TransactionCategorizationDialog({ canApply, onApplied, onClose, 
     setPreviewing(true);
     setIssue(null);
     setOutcome(null);
+    setRefreshNotice(null);
     try {
       setPreview(await apiClient.post<CategorizationPreview>("/api/v1/categorization-rules/preview", { transaction_id: transaction.id }));
     } catch (error) {
@@ -63,6 +86,7 @@ export function TransactionCategorizationDialog({ canApply, onApplied, onClose, 
     setApplying(true);
     setIssue(null);
     setOutcome(null);
+    setRefreshNotice(null);
     try {
       const result = await apiClient.post<CategorizationApplyResult>(`/api/v1/transactions/${transaction.id}/apply-categorization`, { version: transaction.version });
       if (result.applied) {
@@ -74,8 +98,15 @@ export function TransactionCategorizationDialog({ canApply, onApplied, onClose, 
       await onApplied(result.transaction);
       setOutcome(result.reason === "already_categorized" ? "Операция уже получила категорию или разделение. Правила ничего не перезаписали." : "Подходящее правило больше не найдено. Выполните новый предпросмотр.");
     } catch (error) {
-      if (error instanceof ApiClientError && (error.code === "CATEGORIZATION_RULE_CHANGED" || error.code === "VERSION_CONFLICT")) {
-        setPreview(null);
+      const conflict = error instanceof ApiClientError ? error.code : null;
+      if (conflict === "CATEGORIZATION_RULE_CHANGED" || conflict === "VERSION_CONFLICT") setPreview(null);
+      // CATEGORIZATION_RULE_CHANGED leaves the transaction current, so clearing the preview is the
+      // whole recovery. VERSION_CONFLICT means the transaction itself is stale: the known version
+      // must never be reused, so re-read the record and hand it to the parent. If the re-read fails
+      // the dialog refuses to apply at all instead of looping on a version the backend rejects.
+      if (conflict === "VERSION_CONFLICT") {
+        await refreshStaleTransaction(categorizationUiError(error));
+        return;
       }
       report(error);
     } finally {
@@ -92,9 +123,11 @@ export function TransactionCategorizationDialog({ canApply, onApplied, onClose, 
         {preview ? preview.matched && preview.rule && preview.category ? <section className="categorization-preview-result" aria-label="Найденное правило"><span className="status-chip status-chip--confirmed">Совпадение найдено</span><div><span>Правило</span><strong>{preview.rule.name}</strong></div><div><span>Целевая категория</span><strong>{preview.category.name}</strong></div><small>Приоритет {preview.rule.priority} · версия правила {preview.rule.version}</small></section> : <div className="categorization-no-match" role="status"><strong>Подходящего правила нет</strong><span>Операция не изменена.</span></div> : null}
         {preview?.matched && !canApply && !roleLoading ? <div className="categorization-viewer-note" role="status">Режим просмотра: результат preview доступен, применение — только редактору или владельцу.</div> : null}
       </>}
+      {staleVersion ? <div className="categorization-guard" role="status"><strong>Версия операции устарела</strong><span>Не удалось перечитать операцию. Закройте диалог, обновите список и откройте операцию заново.</span></div> : null}
+      {refreshNotice ? <DialogError error={refreshNotice}/> : null}
       {issue ? <DialogError error={issue}/> : null}
       {outcome ? <div className="categorization-success" role="status">{outcome}</div> : null}
     </div>
-    <footer><button className="secondary-button" disabled={applying} onClick={onClose} type="button">Закрыть</button>{canPreview && preview?.matched && canApply ? <button className="primary-button" disabled={applying || previewing} onClick={() => void apply()} type="button">{applying ? "Применяем…" : "Применить категорию"}</button> : null}</footer>
+    <footer><button className="secondary-button" disabled={applying} onClick={onClose} type="button">Закрыть</button>{canPreview && preview?.matched && canApply && !staleVersion ? <button className="primary-button" disabled={applying || previewing} onClick={() => void apply()} type="button">{applying ? "Применяем…" : "Применить категорию"}</button> : null}</footer>
   </ActionDialog>;
 }

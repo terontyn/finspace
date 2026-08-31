@@ -54,20 +54,29 @@ function installBrowserGlobals(): () => void {
 interface HarnessOptions {
   canApply?: boolean;
   current?: Transaction;
+  onGet?: (path: string) => unknown | Promise<unknown>;
   onPost?: (path: string, body: unknown) => unknown | Promise<unknown>;
+  rerenderOnApplied?: boolean;
 }
 
 async function createHarness(options: HarnessOptions = {}) {
   const restoreBrowser = installBrowserGlobals();
+  const originalGet = apiClient.get;
   const originalPost = apiClient.post;
   const calls: Array<{ body: unknown; path: string }> = [];
+  const gets: string[] = [];
   const applied: Transaction[] = [];
   const errors: unknown[] = [];
   let renderer: ReactTestRenderer | undefined;
+  let current = options.current ?? transaction();
+  apiClient.get = (<T,>(path: string) => { gets.push(path); if (!options.onGet) throw new Error(`Unexpected GET ${path}`); return Promise.resolve(options.onGet(path)) as Promise<T>; }) as typeof apiClient.get;
   apiClient.post = (<T,>(path: string, body?: unknown) => { calls.push({ body, path }); return Promise.resolve(options.onPost?.(path, body) ?? matchedPreview) as Promise<T>; }) as typeof apiClient.post;
-  await act(async () => { renderer = create(<TransactionCategorizationDialog canApply={options.canApply ?? true} onApplied={(updated) => { applied.push(updated); }} onClose={() => undefined} onError={(error) => errors.push(error)} roleLoading={false} transaction={options.current ?? transaction()}/>); await settle(); });
+  // The real parent screen stores the transaction in state and replaces it whenever the dialog
+  // reports a fresher record, so opting in mirrors production prop flow.
+  const element = (value: Transaction) => <TransactionCategorizationDialog canApply={options.canApply ?? true} onApplied={(updated) => { applied.push(updated); current = updated; if (options.rerenderOnApplied) renderer?.update(element(updated)); }} onClose={() => undefined} onError={(error) => errors.push(error)} roleLoading={false} transaction={value}/>;
+  await act(async () => { renderer = create(element(current)); await settle(); });
   if (!renderer) throw new Error("Renderer was not created");
-  return { applied, calls, errors, renderer, async cleanup() { await act(async () => renderer?.unmount()); apiClient.post = originalPost; restoreBrowser(); } };
+  return { applied, calls, errors, gets, renderer, async cleanup() { await act(async () => renderer?.unmount()); apiClient.get = originalGet; apiClient.post = originalPost; restoreBrowser(); } };
 }
 
 test("matched preview is non-mutating and apply is a separate versioned command", async () => {
@@ -147,4 +156,81 @@ test("categorized, split and transfer transactions never expose preview or overw
       assert.equal(harness.calls.length, 0);
     } finally { await harness.cleanup(); }
   }
+});
+
+test("stale-version apply re-reads the transaction so a repeat preview cannot reuse the old version", async () => {
+  const refreshed = transaction({ version: 9 });
+  let applyAttempts = 0;
+  const harness = await createHarness({
+    onGet: () => refreshed,
+    onPost: (path, body) => {
+      if (path.endsWith("/preview")) return matchedPreview;
+      applyAttempts += 1;
+      if ((body as { version: number }).version !== 9) throw new ApiClientError("conflict", "VERSION_CONFLICT", 409, "request-1");
+      return { applied: true, category: { id: "category-1", name: "Кафе" }, reason: "applied", rule: rule(), transaction: transaction({ category: { id: "category-1", name: "Кафе" }, version: 10 }) } satisfies CategorizationApplyResult;
+    },
+    rerenderOnApplied: true,
+  });
+  try {
+    await act(async () => { button(harness.renderer.root, "Предпросмотр").props.onClick(); await settle(); });
+    await act(async () => { button(harness.renderer.root, "Применить категорию").props.onClick(); await settle(); });
+
+    assert.deepEqual(harness.calls[1], { body: { version: 7 }, path: "/api/v1/transactions/transaction-1/apply-categorization" });
+    assert.deepEqual(harness.gets, ["/api/v1/transactions/transaction-1"]);
+    assert.deepEqual(harness.applied, [refreshed]);
+    const conflictText = renderedText(harness.renderer.toJSON());
+    assert.match(conflictText, /VERSION_CONFLICT/);
+    assert.match(conflictText, /Версияv9/);
+    assert.equal(harness.renderer.root.findAllByType("button").some((node) => renderedText(node.props.children).includes("Применить категорию")), false);
+
+    await act(async () => { button(harness.renderer.root, "Предпросмотр").props.onClick(); await settle(); });
+    await act(async () => { button(harness.renderer.root, "Применить категорию").props.onClick(); await settle(); });
+    assert.deepEqual(harness.calls.at(-1), { body: { version: 9 }, path: "/api/v1/transactions/transaction-1/apply-categorization" });
+    assert.equal(applyAttempts, 2);
+    assert.equal(harness.applied.at(-1)?.version, 10);
+    const appliedText = renderedText(harness.renderer.toJSON());
+    assert.match(appliedText, /Версияv10/);
+    assert.doesNotMatch(appliedText, /VERSION_CONFLICT/);
+  } finally { await harness.cleanup(); }
+});
+
+test("apply stays blocked when the stale transaction cannot be re-read", async () => {
+  const harness = await createHarness({
+    onGet: () => { throw new ApiClientError("gone", "TRANSACTION_NOT_FOUND", 404, "request-2"); },
+    onPost: (path) => { if (path.endsWith("/preview")) return matchedPreview; throw new ApiClientError("conflict", "VERSION_CONFLICT", 409, "request-1"); },
+    rerenderOnApplied: true,
+  });
+  try {
+    await act(async () => { button(harness.renderer.root, "Предпросмотр").props.onClick(); await settle(); });
+    await act(async () => { button(harness.renderer.root, "Применить категорию").props.onClick(); await settle(); });
+    assert.equal(harness.applied.length, 0);
+    assert.match(renderedText(harness.renderer.toJSON()), /Версия операции устарела/);
+
+    await act(async () => { button(harness.renderer.root, "Предпросмотр").props.onClick(); await settle(); });
+    assert.match(renderedText(harness.renderer.toJSON()), /Совпадение найдено/);
+    assert.equal(harness.renderer.root.findAllByType("button").some((node) => renderedText(node.props.children).includes("Применить категорию")), false);
+    assert.equal(harness.calls.filter((call) => call.path.endsWith("/apply-categorization")).length, 1);
+  } finally { await harness.cleanup(); }
+});
+
+test("rule-change conflict keeps the transaction untouched and allows a fresh preview", async () => {
+  let applyCalls = 0;
+  const harness = await createHarness({
+    onGet: () => { throw new Error("VERSION_CONFLICT recovery must not run for rule changes"); },
+    onPost: (path) => { if (path.endsWith("/preview")) return matchedPreview; applyCalls += 1; throw new ApiClientError("conflict", "CATEGORIZATION_RULE_CHANGED", 409, "request-3"); },
+    rerenderOnApplied: true,
+  });
+  try {
+    await act(async () => { button(harness.renderer.root, "Предпросмотр").props.onClick(); await settle(); });
+    await act(async () => { button(harness.renderer.root, "Применить категорию").props.onClick(); await settle(); });
+    assert.equal(harness.gets.length, 0);
+    assert.equal(harness.applied.length, 0);
+    assert.match(renderedText(harness.renderer.toJSON()), /Выполните предпросмотр ещё раз/);
+
+    await act(async () => { button(harness.renderer.root, "Предпросмотр").props.onClick(); await settle(); });
+    assert.match(renderedText(harness.renderer.toJSON()), /Версияv7/);
+    assert.equal(harness.renderer.root.findAllByType("button").some((node) => renderedText(node.props.children).includes("Применить категорию")), true);
+    await act(async () => { button(harness.renderer.root, "Применить категорию").props.onClick(); await settle(); });
+    assert.equal(applyCalls, 2);
+  } finally { await harness.cleanup(); }
 });

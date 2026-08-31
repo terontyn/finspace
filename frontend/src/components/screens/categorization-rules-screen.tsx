@@ -67,7 +67,15 @@ function RuleDrawer({ editing, entities, error, form, isSaving, onChange, onClos
   onClose: () => void;
   onSave: (event: React.FormEvent) => void;
 }) {
-  const missingCategory = editing && !entities.categories.some((category) => category.id === editing.category_id);
+  const availableAccounts = entities.accounts.filter((account) => !account.is_archived);
+  const availablePayees = entities.payees.filter((payee) => !payee.deleted_at);
+  const availableCategories = entities.categories.filter((category) => !category.is_archived);
+  // A rule may reference an entity that is archived, deleted or simply outside the fetched catalog
+  // page. Without an explicit option the select cannot represent the saved matcher, and an unrelated
+  // edit would silently resubmit the unavailable reference.
+  const missingAccount = Boolean(form.accountId) && !availableAccounts.some((account) => account.id === form.accountId);
+  const missingPayee = Boolean(form.payeeId) && !availablePayees.some((payee) => payee.id === form.payeeId);
+  const missingCategory = Boolean(form.categoryId) && !availableCategories.some((category) => category.id === form.categoryId);
   return <EntityDrawer ariaLabel={editing ? "Редактирование правила категоризации" : "Новое правило категоризации"} eyebrow={editing ? "Версионное изменение" : "Явное правило"} onClose={onClose} subtitle={editing ? `Версия ${editing.version}` : "Backend проверит ссылки и условия"} title={editing?.name ?? "Создать правило"}>
     <form className="categorization-rule-form" onSubmit={onSave}>
       <label><span>Название</span><input autoComplete="off" maxLength={200} onChange={(event) => onChange({ ...form, name: event.target.value })} required value={form.name}/></label>
@@ -78,12 +86,12 @@ function RuleDrawer({ editing, entities, error, form, isSaving, onChange, onClos
       <section className="categorization-matchers" aria-label="Условия правила">
         <div><span className="kicker">Условия совпадения</span><strong>Все заполненные условия объединяются через AND</strong><small>Получатель — каноническая запись. Исходный контрагент остаётся отдельным текстом.</small></div>
         <label><span>Тип операции</span><select onChange={(event) => onChange({ ...form, transactionType: event.target.value as CategorizationRuleForm["transactionType"] })} value={form.transactionType}><option value="">Любой поддерживаемый тип</option>{Object.entries(transactionTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        <label><span>Счёт</span><select onChange={(event) => onChange({ ...form, accountId: event.target.value })} value={form.accountId}><option value="">Любой счёт</option>{entities.accounts.filter((account) => !account.is_archived).map((account) => <option key={account.id} value={account.id}>{account.name} · {account.currency}</option>)}</select></label>
-        <label><span>Получатель</span><select aria-label="Получатель правила" onChange={(event) => onChange({ ...form, payeeId: event.target.value })} value={form.payeeId}><option value="">Любой получатель</option>{entities.payees.filter((payee) => !payee.deleted_at).map((payee) => <option key={payee.id} value={payee.id}>{payee.name}</option>)}</select><small>Выбор не выводится из поля «Контрагент».</small></label>
+        <label><span>Счёт</span><select aria-label="Счёт правила" onChange={(event) => onChange({ ...form, accountId: event.target.value })} value={form.accountId}><option value="">Любой счёт</option>{missingAccount ? <option value={form.accountId}>Текущий счёт недоступен</option> : null}{availableAccounts.map((account) => <option key={account.id} value={account.id}>{account.name} · {account.currency}</option>)}</select>{missingAccount ? <small>Счёт условия недоступен. Выберите «Любой счёт» или другой счёт, иначе backend отклонит сохранение.</small> : null}</label>
+        <label><span>Получатель</span><select aria-label="Получатель правила" onChange={(event) => onChange({ ...form, payeeId: event.target.value })} value={form.payeeId}><option value="">Любой получатель</option>{missingPayee ? <option value={form.payeeId}>Текущий получатель недоступен</option> : null}{availablePayees.map((payee) => <option key={payee.id} value={payee.id}>{payee.name}</option>)}</select><small>{missingPayee ? "Получатель условия недоступен. Выберите «Любой получатель» или другого получателя, иначе backend отклонит сохранение." : "Выбор не выводится из поля «Контрагент»."}</small></label>
         <label><span>Контрагент содержит</span><input maxLength={300} onChange={(event) => onChange({ ...form, counterpartyContains: event.target.value })} placeholder="Например, COFFEE SHOP" value={form.counterpartyContains}/></label>
         <label><span>Описание содержит</span><input maxLength={300} onChange={(event) => onChange({ ...form, descriptionContains: event.target.value })} placeholder="Например, подписка" value={form.descriptionContains}/></label>
       </section>
-      <label><span>Целевая категория</span><select aria-label="Целевая категория" onChange={(event) => onChange({ ...form, categoryId: event.target.value })} required value={form.categoryId}><option value="">Выберите категорию</option>{missingCategory ? <option value={editing.category_id}>Текущая категория недоступна</option> : null}{entities.categories.filter((category) => !category.is_archived).map((category) => <option key={category.id} value={category.id}>{category.name} · {category.category_type}</option>)}</select></label>
+      <label><span>Целевая категория</span><select aria-label="Целевая категория" onChange={(event) => onChange({ ...form, categoryId: event.target.value })} required value={form.categoryId}><option value="">Выберите категорию</option>{missingCategory ? <option value={form.categoryId}>Текущая категория недоступна</option> : null}{availableCategories.map((category) => <option key={category.id} value={category.id}>{category.name} · {category.category_type}</option>)}</select>{missingCategory ? <small>Целевая категория недоступна. Выберите другую категорию, иначе backend отклонит сохранение.</small> : null}</label>
       {error ? <InlineError error={error}/> : null}
       <footer><button className="secondary-button" onClick={onClose} type="button">Отмена</button><button className="primary-button" disabled={isSaving || !form.name.trim() || !form.categoryId} type="submit">{isSaving ? "Сохраняем…" : editing ? "Сохранить" : "Создать правило"}</button></footer>
     </form>

@@ -151,7 +151,7 @@ test("edit can remove an optional matcher and archive/restore use current versio
   });
   try {
     await act(async () => { button(harness.renderer.root.findByProps({ "data-rule-id": "rule-1" }), "Изменить").props.onClick(); });
-    let dialog = harness.renderer.root.findByProps({ "aria-label": "Редактирование правила категоризации" });
+    const dialog = harness.renderer.root.findByProps({ "aria-label": "Редактирование правила категоризации" });
     await act(async () => { dialog.findByProps({ "aria-label": "Получатель правила" }).props.onChange({ target: { value: "" } }); });
     await act(async () => { dialog.findByProps({ className: "categorization-rule-form" }).props.onSubmit({ preventDefault: () => undefined }); await settle(); });
     const patchCall = harness.calls.find((item) => item.method === "PATCH");
@@ -190,5 +190,47 @@ test("archiving the final rule on a page returns to the last valid backend page"
     assert.equal(paths.some((path) => path.includes("offset=12")), true);
     assert.equal(paths.at(-1)?.includes("offset=0"), true);
     assert.match(renderedText(harness.renderer.toJSON()), /1–12 из 12/);
+  } finally { await harness.cleanup(); }
+});
+
+test("editing a rule whose account, payee or category is unavailable keeps the matcher visible and clearable", async () => {
+  const orphaned = rule({ account_id: "account-archived", category_id: "category-archived", payee_id: "payee-archived" });
+  const harness = await createHarness({ list: () => rulesPage([orphaned]) });
+  try {
+    const listText = renderedText(harness.renderer.toJSON());
+    assert.match(listText, /Счёт: Недоступный счёт/);
+    assert.match(listText, /Получатель: Недоступный получатель/);
+    assert.match(listText, /Недоступная категория/);
+
+    await act(async () => { button(harness.renderer.root.findByProps({ "data-rule-id": "rule-1" }), "Изменить").props.onClick(); });
+    const dialog = harness.renderer.root.findByProps({ "aria-label": "Редактирование правила категоризации" });
+
+    for (const [label, value, caption] of [
+      ["Счёт правила", "account-archived", "Текущий счёт недоступен"],
+      ["Получатель правила", "payee-archived", "Текущий получатель недоступен"],
+      ["Целевая категория", "category-archived", "Текущая категория недоступна"],
+    ] as const) {
+      const select = dialog.findByProps({ "aria-label": label });
+      assert.equal(select.props.value, value);
+      const options = select.findAllByType("option");
+      const fallback = options.find((option) => renderedText(option.props.children) === caption);
+      assert.ok(fallback, `Missing fallback option for ${label}`);
+      assert.equal(fallback.props.value, value);
+    }
+
+    // The unavailable matchers must be explicitly clearable rather than silently resubmitted.
+    await act(async () => { dialog.findByProps({ "aria-label": "Счёт правила" }).props.onChange({ target: { value: "" } }); });
+    await act(async () => { harness.renderer.root.findByProps({ "aria-label": "Редактирование правила категоризации" }).findByProps({ "aria-label": "Получатель правила" }).props.onChange({ target: { value: "" } }); });
+    await act(async () => { harness.renderer.root.findByProps({ "aria-label": "Редактирование правила категоризации" }).findByProps({ "aria-label": "Целевая категория" }).props.onChange({ target: { value: "category-1" } }); });
+
+    const reopened = harness.renderer.root.findByProps({ "aria-label": "Редактирование правила категоризации" });
+    assert.equal(reopened.findAllByType("option").some((option) => renderedText(option.props.children) === "Текущий счёт недоступен"), false);
+    assert.equal(reopened.findAllByType("option").some((option) => renderedText(option.props.children) === "Текущий получатель недоступен"), false);
+    assert.equal(reopened.findAllByType("option").some((option) => renderedText(option.props.children) === "Текущая категория недоступна"), false);
+
+    await act(async () => { reopened.findByProps({ className: "categorization-rule-form" }).props.onSubmit({ preventDefault: () => undefined }); await settle(); });
+    const patchCall = harness.calls.find((item) => item.method === "PATCH");
+    assert.ok(patchCall);
+    assert.deepEqual(patchCall.body, { account_id: null, category_id: "category-1", counterparty_contains: "COFFEE", description_contains: null, is_active: true, name: "Кофе", payee_id: null, priority: 10, transaction_type: "expense", version: 1 });
   } finally { await harness.cleanup(); }
 });
