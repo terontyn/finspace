@@ -1461,9 +1461,10 @@ def test_rule_set_revision_tracks_only_matching_relevant_mutations(client: TestC
     identity, headers = _register(client, "Revision semantics")
     category = _category(client, headers, "Revision target")
     # The migration backfills workspaces that already existed; a workspace created afterwards
-    # materializes its control row lazily through get_or_create on first rule-set use.
+    # materializes its control row lazily through get_or_create on first rule-set use, starting at
+    # revision 1 for the empty rule set. Every bump below is relative to that starting point.
     assert asyncio.run(_rule_set_version(identity)) is None
-    baseline = 0
+    baseline = 1
 
     created = _rule(
         client,
