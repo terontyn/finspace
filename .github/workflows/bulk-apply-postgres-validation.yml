@@ -152,10 +152,6 @@ jobs:
           python scripts/test_runner.py -- tests/test_categorization_previews.py -q
           python scripts/test_runner.py -- tests/test_categorization_rules.py -q
 
-      - name: Full backend PostgreSQL suite
-        working-directory: backend
-        run: python scripts/test_runner.py -- -q
-
       - name: Backend static gates
         run: |
           python -m ruff check backend
@@ -166,3 +162,7 @@ jobs:
 
       - name: Patch hygiene
         run: git diff --check
+
+      - name: Full backend PostgreSQL suite
+        working-directory: backend
+        run: python scripts/test_runner.py -- -q
