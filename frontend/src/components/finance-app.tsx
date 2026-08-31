@@ -9,6 +9,7 @@ import { AccountsScreen } from "@/components/screens/accounts-screen";
 import { AutomationsScreen } from "@/components/screens/automations-screen";
 import { BudgetScreen } from "@/components/screens/budget-screen";
 import { CategoriesScreen } from "@/components/screens/categories-screen";
+import { CategorizationRulesScreen } from "@/components/screens/categorization-rules-screen";
 import { ComingSoonScreen } from "@/components/screens/coming-soon-screen";
 import { GoogleSheetsScreen } from "@/components/screens/google-sheets-screen";
 import { GoalsScreen } from "@/components/screens/goals-screen";
@@ -63,7 +64,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       session={auth.session}
     >
       {screen === "today" && <TodayScreen onError={showError} timezone={auth.session.workspace.timezone} />}
-      {screen === "transactions" && <TransactionsScreen initialAccountId={initialTransactionAccountId} onError={showError} openForm={openTransactionForm} />}
+      {screen === "transactions" && <TransactionsScreen initialAccountId={initialTransactionAccountId} onError={showError} openForm={openTransactionForm} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "accounts" && (accountId ? <AccountDetailsScreen accountId={accountId} onError={showError} timezone={auth.session.workspace.timezone} /> : <AccountsScreen onError={showError} />)}
       {screen === "categories" && <CategoriesScreen onError={showError} />}
       {screen === "imports" && <ImportScreen onError={showError} />}
@@ -76,7 +77,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       {screen === "budget" && <BudgetScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} timezone={auth.session.workspace.timezone} />}
       {screen === "reports" && <ReportsScreen onError={showError} timezone={auth.session.workspace.timezone} />}
       {screen === "payees" && <PayeesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
-      {screen === "rules" && <ComingSoonScreen description="Правила категоризации — отдельный механизм и не заменяют recurring rules." requiresApi title="Правила" />}
+      {screen === "rules" && <CategorizationRulesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "goals" && <GoalsScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} />}
       {screen === "settings" && <ComingSoonScreen description="Настройки пространства будут перенесены после завершения интеграции рабочих финансовых экранов." title="Настройки" />}
     </AppShell>
