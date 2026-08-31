@@ -59,9 +59,9 @@ python3 backend/scripts/validate_compose_topology.py all
 ```
 
 Перед первым production-запуском и после изменения runtime storage contract подготовьте
-три writable bind mount’а от имени root. Скрипт читает UID/GID backend image из
-`backend/runtime-identity.env`, не использует world-writable permissions и не делает
-рекурсивный `chown`:
+три writable bind mount’а от имени root. Скрипт сохраняет владельцу checkout доступ для
+Git, предоставляет backend доступ через runtime GID из `backend/runtime-identity.env`,
+не использует world-writable permissions и не делает рекурсивный `chown`:
 
 ```bash
 sudo ./scripts/prepare-runtime-storage.sh /opt/finspace

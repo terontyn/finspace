@@ -59,13 +59,13 @@ prepare_directory() {
 
   # Deliberately not recursive: existing files and sibling data are outside this
   # ownership initialization contract.
-  chown "$runtime_uid:$runtime_gid" "$target_path"
-  chmod 0750 "$target_path"
+  chown "$repository_uid:$runtime_gid" "$target_path"
+  chmod 2770 "$target_path"
 
   actual_uid=$(stat -c '%u' "$target_path")
   actual_gid=$(stat -c '%g' "$target_path")
   actual_mode=$(stat -c '%a' "$target_path")
-  if [ "$actual_uid:$actual_gid:$actual_mode" != "$runtime_uid:$runtime_gid:750" ]; then
+  if [ "$actual_uid:$actual_gid:$actual_mode" != "$repository_uid:$runtime_gid:2770" ]; then
     fail "runtime path verification failed: $relative_path"
   fi
   if ! setpriv --reuid="$runtime_uid" --regid="$runtime_gid" --clear-groups \
@@ -102,6 +102,7 @@ runtime_uid=$(read_numeric_setting FINSPACE_RUNTIME_UID "$identity_file")
 runtime_gid=$(read_numeric_setting FINSPACE_RUNTIME_GID "$identity_file")
 [ "$runtime_uid" -gt 0 ] || fail "FINSPACE_RUNTIME_UID must not be root"
 [ "$runtime_gid" -gt 0 ] || fail "FINSPACE_RUNTIME_GID must not be root"
+repository_uid=$(stat -c '%u' "$project_root")
 
 prepare_directory data/imports
 prepare_directory data/acceptance
