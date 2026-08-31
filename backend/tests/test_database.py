@@ -19,6 +19,7 @@ async def test_postgresql_connection_and_migrated_table() -> None:
         "workspace_members",
         "accounts",
         "categories",
+        "categorization_rules",
         "transactions",
         "transaction_splits",
         "audit_log",

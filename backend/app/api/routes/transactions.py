@@ -9,8 +9,14 @@ from app.dependencies.database import DbSession
 from app.repositories import transactions as repository
 from app.schemas.accounts import VersionRequest
 from app.schemas.audit import AuditPage, AuditResponse
+from app.schemas.categorization_rules import (
+    CategorizationApplyRequest,
+    CategorizationApplyResponse,
+    CategorizationRuleResponse,
+)
 from app.schemas.common import PageMeta
 from app.schemas.transactions import (
+    EntityRef,
     TransactionCreate,
     TransactionPage,
     TransactionResponse,
@@ -18,6 +24,7 @@ from app.schemas.transactions import (
     TransactionType,
     TransactionUpdate,
 )
+from app.services import categorization_rules as categorization_service
 from app.services import transactions as service
 from app.services.audit import list_audit_entries
 
@@ -138,6 +145,31 @@ async def transaction_confirm(
 ) -> TransactionResponse:
     transaction = await service.confirm_transaction(session, context, transaction_id, data.version)
     return await service.transaction_response(session, transaction)
+
+
+@router.post("/{transaction_id}/apply-categorization", response_model=CategorizationApplyResponse)
+async def transaction_apply_categorization(
+    transaction_id: uuid.UUID,
+    data: CategorizationApplyRequest,
+    context: EditorContext,
+    session: DbSession,
+) -> CategorizationApplyResponse:
+    result = await categorization_service.apply_to_transaction(
+        session,
+        context,
+        transaction_id,
+        data.version,
+    )
+    match = result.match
+    return CategorizationApplyResponse(
+        applied=result.applied,
+        reason=result.reason,
+        rule=(CategorizationRuleResponse.model_validate(match.rule) if match is not None else None),
+        category=(
+            EntityRef(id=match.category.id, name=match.category.name) if match is not None else None
+        ),
+        transaction=await service.transaction_response(session, result.transaction),
+    )
 
 
 @router.get("/{transaction_id}/history", response_model=AuditPage)

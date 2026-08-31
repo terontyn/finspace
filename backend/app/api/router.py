@@ -7,6 +7,7 @@ from app.api.routes import (
     automation,
     budgets,
     categories,
+    categorization_rules,
     dev,
     goals,
     google_oauth,
@@ -46,6 +47,11 @@ api_router.include_router(month_close.router, prefix="/month-close", tags=["mont
 api_router.include_router(users.router, tags=["users", "workspaces"])
 api_router.include_router(accounts.router, prefix="/accounts", tags=["accounts"])
 api_router.include_router(categories.router, prefix="/categories", tags=["categories"])
+api_router.include_router(
+    categorization_rules.router,
+    prefix="/categorization-rules",
+    tags=["categorization-rules"],
+)
 api_router.include_router(budgets.router, prefix="/budgets", tags=["budgets"])
 api_router.include_router(goals.router, prefix="/goals", tags=["goals"])
 api_router.include_router(payees.router, prefix="/payees", tags=["payees"])
