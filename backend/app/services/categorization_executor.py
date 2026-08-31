@@ -115,6 +115,10 @@ class ApplyOutcome:
     transaction: FinancialTransaction | None = None
     expected_version: int | None = None
     current_version: int | None = None
+    # The original ApiError when one was raised by the authoritative mutation path. Callers that
+    # must preserve an existing public contract (single apply) re-raise it verbatim, keeping its
+    # status, code and details intact.
+    error: ApiError | None = None
 
     @property
     def applied(self) -> bool:
@@ -127,6 +131,7 @@ def _outcome(
     transaction: FinancialTransaction | None = None,
     expected_version: int | None = None,
     current_version: int | None = None,
+    error: ApiError | None = None,
 ) -> ApplyOutcome:
     return ApplyOutcome(
         status=status,
@@ -134,6 +139,7 @@ def _outcome(
         transaction=transaction,
         expected_version=expected_version,
         current_version=current_version,
+        error=error,
     )
 
 
@@ -272,15 +278,16 @@ async def execute_apply(
         )
     except ApiError as error:
         if error.code == "MONTH_CLOSED":
-            return _outcome(CLOSED_PERIOD, transaction=transaction)
+            return _outcome(CLOSED_PERIOD, transaction=transaction, error=error)
         if error.code == "RECONCILED_TRANSACTION_IMMUTABLE":
-            return _outcome(RECONCILED, transaction=transaction)
+            return _outcome(RECONCILED, transaction=transaction, error=error)
         if error.code == "VERSION_CONFLICT":
             return _outcome(
                 TRANSACTION_CHANGED,
                 transaction=transaction,
                 expected_version=expectation.transaction_version,
                 current_version=transaction.version,
+                error=error,
             )
         raise
     return ApplyOutcome(

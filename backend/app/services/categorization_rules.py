@@ -532,6 +532,10 @@ async def apply_to_transaction(
             applied=False,
             reason="already_categorized",
         )
+    if outcome.error is not None:
+        # Month-close, reconciliation and version conflicts keep their original status, code and
+        # details, exactly as the endpoint reported them before the executor refactor.
+        raise outcome.error
     if outcome.status == executor.TRANSACTION_CHANGED:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
     if outcome.status == executor.RECONCILED:

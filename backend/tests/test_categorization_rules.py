@@ -1348,19 +1348,24 @@ def test_rule_mutation_waits_for_an_apply_holding_the_shared_rule_set_lock(
     )
     shared_lock_held = asyncio.Event()
     allow_apply_to_finish = asyncio.Event()
-    original_lock = categorization_service._lock_proposed_match
+    # The proof and the mutation now live in the shared executor, so the barrier pauses there. The
+    # pause point is the same instant as before: after the shared rule-set lock has been taken and
+    # the proposal proved, and before the apply transaction commits.
+    original_execute = categorization_service.executor.execute_apply
 
-    async def paused_proof(
+    async def paused_execute(
         session: AsyncSession,
-        workspace_id: uuid.UUID,
-        transaction: FinancialTransaction,
-        match: categorization_service.CategorizationMatch,
-    ) -> None:
-        await original_lock(session, workspace_id, transaction, match)
+        context: RequestContext,
+        expectation: categorization_service.executor.ApplyExpectation,
+        *,
+        commit: bool,
+    ) -> categorization_service.executor.ApplyOutcome:
+        outcome = await original_execute(session, context, expectation, commit=commit)
         shared_lock_held.set()
         await allow_apply_to_finish.wait()
+        return outcome
 
-    monkeypatch.setattr(categorization_service, "_lock_proposed_match", paused_proof)
+    monkeypatch.setattr(categorization_service.executor, "execute_apply", paused_execute)
 
     async def run_barrier() -> tuple[str, bool]:
         async with AsyncSessionFactory() as apply_session:
