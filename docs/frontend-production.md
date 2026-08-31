@@ -85,9 +85,12 @@ bindings и networks наследуются из base Compose.
 
 Три read-write каталога создаются и приводятся к контракту backend image командой
 `sudo ./scripts/prepare-runtime-storage.sh /opt/finspace`. Источник UID/GID —
-`backend/runtime-identity.env`; текущий контракт `app` равен `100:101`, mode каталогов —
-`0750`. Скрипт не меняет содержимое каталогов рекурсивно, `./backups` целиком,
-PostgreSQL/Redis/n8n volumes или другие пути. Production sync-worker mounts не имеет.
+`backend/runtime-identity.env`; текущий runtime-контракт `app` равен `100:101`.
+Владелец каталога берётся из владельца корня checkout, группа — runtime GID `101`, mode —
+`2770` с setgid. Поэтому обычный владелец repository сохраняет Git-доступ, а backend
+пишет через runtime group; world-access отсутствует. Скрипт не меняет содержимое
+каталогов рекурсивно, `./backups` целиком, PostgreSQL/Redis/n8n volumes или другие пути.
+Production sync-worker mounts не имеет.
 
 ### Детерминированная проверка
 

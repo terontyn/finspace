@@ -62,7 +62,7 @@ Script ID `1Ldrqn4OW62A-iK3R-mPkvftMsCLnXshVtvV12LSBMqd94DevwXDpdkah` — ста
 ssh finspace
 cd /opt/finspace
 git rev-parse --short HEAD
-git status --short
+./scripts/git-status-strict.sh
 sudo finspace-compose ps
 tailscale serve status
 tailscale funnel status
@@ -232,11 +232,21 @@ cd /opt/finspace
 sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
 ```
 
-Команда идемпотентно создаёт отсутствующие каталоги, устанавливает owner/group из
-image-контракта и mode `0750`, проверяет результат и отклоняет symlink в allowlisted
-пути. `chown` не рекурсивный: существующие файлы, остальные backup, PostgreSQL, Redis и
-n8n data не затрагиваются. `/app/backups`, Apps Script package и n8n package остаются
-read-only для backend; production sync-worker не имеет filesystem mounts.
+Команда идемпотентно создаёт отсутствующие каталоги. Owner берётся из владельца
+`/opt/finspace`, group — runtime GID `101`, mode — `2770` с setgid. Владелец checkout
+сохраняет доступ к tracked `.gitkeep` и обычным Git-операциям, backend UID `100` пишет
+через свою primary group `101`, world-access отсутствует. `chown` не рекурсивный:
+существующие файлы, остальные backup, PostgreSQL, Redis и n8n data не затрагиваются.
+`/app/backups`, Apps Script package и n8n package остаются read-only для backend;
+production sync-worker не имеет filesystem mounts.
+
+`git status` способен завершиться с кодом 0 одновременно с permission diagnostics в
+stderr. Поэтому server runbook использует `./scripts/git-status-strict.sh`: helper
+печатает обычный short status, но завершает release gate ошибкой при любом Git stderr.
+При одноразовом переходе с прежнего контракта `100:101/0750` сначала выберите точный
+release с этим исправлением, затем немедленно запустите storage preparation и только
+после неё strict status. Tracked `.gitkeep` не удаляются, поэтому переход не требует
+записи Git в закрытые runtime-каталоги.
 
 ### Полный deploy на Ubuntu
 
@@ -261,7 +271,7 @@ Commit/push и deploy выполняются только после разре�
 ssh finspace
 cd /opt/finspace
 
-git status --short
+./scripts/git-status-strict.sh
 git rev-parse HEAD
 sudo finspace-compose --profile tools run --rm backup \
   sh /scripts/verify-backup.sh --create
@@ -272,9 +282,8 @@ git fetch --tags origin
 release_ref="EXACT_TAG_OR_COMMIT"
 git switch --detach "$release_ref"
 git rev-parse HEAD
-git status --short
-
 sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
+./scripts/git-status-strict.sh
 
 sudo cp -a /etc/finspace/compose.server.yml \
   "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
