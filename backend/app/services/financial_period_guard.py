@@ -68,24 +68,39 @@ def _local_date(value: datetime | date, timezone: str) -> date:
     return value
 
 
+def closed_dates(
+    control: MonthCloseControl,
+    timezone: str,
+    affected_dates: Iterable[datetime | date],
+) -> list[date]:
+    """Return the affected local dates that fall inside the closed period.
+
+    Extracted so advisory callers (such as bulk categorization preview classification) can ask the
+    same question without raising and without taking the exclusive month-close lock.
+    """
+    if control.closed_through is None:
+        return []
+    local_dates = sorted({_local_date(item, timezone) for item in affected_dates})
+    return [item for item in local_dates if item <= control.closed_through]
+
+
 def assert_dates_open(
     control: MonthCloseControl,
     timezone: str,
     affected_dates: Iterable[datetime | date],
 ) -> None:
-    if control.closed_through is None:
-        return
-    local_dates = sorted({_local_date(item, timezone) for item in affected_dates})
-    closed_dates = [item for item in local_dates if item <= control.closed_through]
-    if not closed_dates:
+    closed = closed_dates(control, timezone, affected_dates)
+    if not closed:
         return
     raise ApiError(
         status_code=409,
         code="MONTH_CLOSED",
         message="Financial history is closed for the affected period",
         details={
-            "closed_through": control.closed_through.isoformat(),
-            "affected_periods": sorted({item.strftime("%Y-%m") for item in closed_dates}),
+            "closed_through": (
+                control.closed_through.isoformat() if control.closed_through else None
+            ),
+            "affected_periods": sorted({item.strftime("%Y-%m") for item in closed}),
         },
     )
 

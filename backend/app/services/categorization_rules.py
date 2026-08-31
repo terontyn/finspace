@@ -1,5 +1,3 @@
-import re
-import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,8 +23,12 @@ from app.schemas.transactions import TransactionUpdate
 from app.services import payees as payee_service
 from app.services import transactions as transaction_service
 from app.services.audit import record_audit, snapshot
-
-_UNICODE_WHITESPACE = re.compile(r"\s+", flags=re.UNICODE)
+from app.services.categorization_matcher import (
+    MatchCandidate,
+    category_compatible,
+    normalize_match_text,
+    prepare_rule_set,
+)
 
 # Fields that can change which rule matches first, or in what order rules are evaluated. ``name``
 # is deliberately absent: renaming a rule cannot affect matching or ordering, so it does not
@@ -58,14 +60,6 @@ class CategorizationApplyResult:
     reason: CategorizationApplyReason
 
 
-def normalize_match_text(value: str | None) -> str:
-    if value is None:
-        return ""
-    normalized = unicodedata.normalize("NFKC", value)
-    normalized = _UNICODE_WHITESPACE.sub(" ", normalized.strip())
-    return unicodedata.normalize("NFKC", normalized.casefold())
-
-
 def _not_found() -> ApiError:
     return ApiError(
         status_code=404,
@@ -79,12 +73,7 @@ def _check_version(rule: CategorizationRule, version: int) -> None:
         raise ApiError(status_code=409, code="VERSION_CONFLICT", message="Version is stale")
 
 
-def _category_compatible(transaction_type: str, category_type: str) -> bool:
-    if transaction_type == "income":
-        return category_type in {"income", "both"}
-    if transaction_type == "expense":
-        return category_type in {"expense", "both"}
-    return transaction_type != "transfer"
+_category_compatible = category_compatible
 
 
 def _rule_changed_during_apply() -> ApiError:
@@ -419,21 +408,21 @@ async def restore_rule(
 
 
 def _matches(rule: CategorizationRule, transaction: FinancialTransaction) -> bool:
-    if transaction.transaction_type == "transfer":
+    """Matcher-only check for one rule, used by the selected-rule re-proof during apply."""
+    candidate = MatchCandidate.from_transaction(transaction)
+    if candidate.transaction_type == "transfer":
         return False
-    if rule.transaction_type is not None and rule.transaction_type != transaction.transaction_type:
+    if rule.transaction_type is not None and rule.transaction_type != candidate.transaction_type:
         return False
-    if rule.account_id is not None and rule.account_id != transaction.account_id:
+    if rule.account_id is not None and rule.account_id != candidate.account_id:
         return False
-    if rule.payee_id is not None and rule.payee_id != transaction.payee_id:
+    if rule.payee_id is not None and rule.payee_id != candidate.payee_id:
         return False
     if rule.counterparty_contains is not None:
-        needle = normalize_match_text(rule.counterparty_contains)
-        if needle not in normalize_match_text(transaction.counterparty):
+        if normalize_match_text(rule.counterparty_contains) not in candidate.counterparty:
             return False
     if rule.description_contains is not None:
-        needle = normalize_match_text(rule.description_contains)
-        if needle not in normalize_match_text(transaction.description):
+        if normalize_match_text(rule.description_contains) not in candidate.description:
             return False
     return True
 
@@ -445,16 +434,16 @@ async def match_transaction(
     *,
     refresh: bool = False,
 ) -> CategorizationMatch | None:
-    for rule in await repository.active_rules(session, workspace_id, refresh=refresh):
-        if not _matches(rule, transaction):
-            continue
-        category = await category_repository.get_category(session, workspace_id, rule.category_id)
-        if category is None or category.is_archived:
-            continue
-        if not _category_compatible(transaction.transaction_type, category.category_type):
-            continue
-        return CategorizationMatch(rule=rule, category=category)
-    return None
+    """Deterministic first valid match for one transaction.
+
+    Backed by the shared prepared matcher, so this is two bounded queries rather than one active
+    rule query plus a category lookup per candidate rule.
+    """
+    rule_set = await prepare_rule_set(session, workspace_id, refresh=refresh)
+    match = rule_set.match_transaction(transaction)
+    if match is None:
+        return None
+    return CategorizationMatch(rule=match.rule, category=match.category)
 
 
 async def preview_transaction(
