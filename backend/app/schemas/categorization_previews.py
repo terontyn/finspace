@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.common import ApiModel, PageMeta
 from app.schemas.transactions import TransactionSource, TransactionStatus, TransactionType
@@ -23,7 +23,18 @@ CategorizationPreviewItemStatus = Literal[
 ]
 
 
-class CategorizationPreviewIdsSelection(ApiModel):
+class SelectionModel(BaseModel):
+    """Base for the discriminated selection variants.
+
+    ``ApiModel`` installs a wildcard ``mode="before"`` field validator, and pydantic forbids a
+    before-validator on a discriminator field. These variants carry no numeric fields, so the same
+    configuration without that guard is equivalent for them.
+    """
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+
+class CategorizationPreviewIdsSelection(SelectionModel):
     mode: Literal["ids"]
     transaction_ids: list[uuid.UUID] = Field(min_length=1, max_length=MAX_EXPLICIT_IDS)
 
@@ -36,7 +47,7 @@ class CategorizationPreviewIdsSelection(ApiModel):
         return self
 
 
-class CategorizationPreviewFilterSelection(ApiModel):
+class CategorizationPreviewFilterSelection(SelectionModel):
     mode: Literal["filter"]
     occurred_from: datetime | None = None
     occurred_to: datetime | None = None
