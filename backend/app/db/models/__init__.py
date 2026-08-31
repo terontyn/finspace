@@ -21,6 +21,10 @@ from app.db.models.automations import (
 )
 from app.db.models.budgets import BudgetAllocation, BudgetPeriod, BudgetPlanRevision
 from app.db.models.categories import Category
+from app.db.models.categorization_previews import (
+    CategorizationPreview,
+    CategorizationPreviewItem,
+)
 from app.db.models.categorization_rule_sets import CategorizationRuleSetControl
 from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.goals import Goal, GoalCommandResult, GoalContribution
@@ -49,6 +53,8 @@ __all__ = [
     "BudgetAllocation",
     "BudgetPeriod",
     "BudgetPlanRevision",
+    "CategorizationPreview",
+    "CategorizationPreviewItem",
     "CategorizationRule",
     "CategorizationRuleSetControl",
     "Category",
