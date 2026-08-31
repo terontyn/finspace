@@ -58,6 +58,15 @@ sync-worker и frontend работают из собранных images без s
 python3 backend/scripts/validate_compose_topology.py all
 ```
 
+Перед первым production-запуском и после изменения runtime storage contract подготовьте
+три writable bind mount’а от имени root. Скрипт читает UID/GID backend image из
+`backend/runtime-identity.env`, не использует world-writable permissions и не делает
+рекурсивный `chown`:
+
+```bash
+sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
+```
+
 Безопасный production release-порядок описан в
 [эксплуатационной инструкции](docs/operations-runbook.md#6-безопасный-deploy).
 

@@ -4,7 +4,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN addgroup --system app && adduser --system --ingroup app app
+COPY runtime-identity.env /usr/local/share/finspace/runtime-identity.env
+
+RUN set -eu; \
+    . /usr/local/share/finspace/runtime-identity.env; \
+    addgroup --system --gid "$FINSPACE_RUNTIME_GID" app; \
+    adduser --system --uid "$FINSPACE_RUNTIME_UID" --ingroup app app; \
+    test "$(id -u app)" = "$FINSPACE_RUNTIME_UID"; \
+    test "$(id -g app)" = "$FINSPACE_RUNTIME_GID"
 
 WORKDIR /app
 

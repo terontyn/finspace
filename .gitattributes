@@ -13,6 +13,7 @@
 *.gs text eol=lf
 Dockerfile text eol=lf
 Makefile text eol=lf
+backend/runtime-identity.env text eol=lf
 
 # Windows scripts
 *.ps1 text eol=crlf
