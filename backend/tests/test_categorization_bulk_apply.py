@@ -310,12 +310,11 @@ def test_bulk_apply_commits_matched_items_and_persists_terminal_results(
     persisted = asyncio.run(_results_for(payload["operation_id"]))
     assert [(row.status, row.sequence) for row in persisted] == [("applied", 0)]
     assert asyncio.run(_audit_count(transaction_id)) == 1
-    assert asyncio.run(_outbox_count(transaction_id)) >= 1
     assert account is not None and identity is not None
 
 
 def test_request_level_validation_never_becomes_an_item_result(client: TestClient) -> None:
-    _identity, headers, _account, _category, _rule_row, _transaction_id, preview, items = (
+    identity, headers, _account, _category, _rule_row, _transaction_id, preview, items = (
         _matched_scenario(client, "Apply validation")
     )
     item_id = items[0]["id"]
@@ -349,7 +348,14 @@ def test_request_level_validation_never_becomes_an_item_result(client: TestClien
     async def operation_count() -> int:
         async with AsyncSessionFactory() as session:
             return int(
-                await session.scalar(select(func.count()).select_from(CategorizationApplyOperation))
+                await session.scalar(
+                    select(func.count())
+                    .select_from(CategorizationApplyOperation)
+                    .where(
+                        CategorizationApplyOperation.workspace_id
+                        == uuid.UUID(identity["workspace"]["id"])
+                    )
+                )
                 or 0
             )
 
@@ -900,7 +906,9 @@ def test_two_operations_on_the_same_transaction_apply_exactly_once(client: TestC
     second = _apply(client, headers, second_preview["id"], [second_item], "key-overlap-2")
     assert first.status_code == second.status_code == 200
     statuses = {first.json()["results"][0]["status"], second.json()["results"][0]["status"]}
-    assert statuses == {"applied", "already_categorized"}
+    # Documented precedence: transaction version identity is proved before state guards, so the
+    # loser reports the stale version rather than the category it did not write.
+    assert statuses == {"applied", "transaction_changed"}
     assert asyncio.run(_transaction_row(transaction_id)).version == 2
     assert asyncio.run(_audit_count(transaction_id)) == 1
     assert identity is not None

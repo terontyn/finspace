@@ -16,7 +16,8 @@ Lock order (identical for every caller, never reversed):
 3. ``FinancialTransaction`` ``FOR UPDATE``
 4. proposed ``CategorizationRule`` ``FOR SHARE`` — pins the row the proposal names.
 5. target ``Category`` ``FOR SHARE`` — closes the concurrency gap deferred from A1/A2.
-6. ``transactions.update_transaction`` — re-acquires (2) and (3), already held here.
+6. deterministic re-match under the locks held above.
+7. ``transactions.update_transaction`` — re-acquires (2) and (3), already held here.
 
 Steps 2 and 3 are taken in exactly the order ``transactions.update_transaction`` already uses, and
 deliberately *before* the rule and category locks. Taking them later would invert that order against
@@ -226,18 +227,10 @@ async def execute_apply(
     ):
         return _outcome(RULE_CHANGED, transaction=transaction)
 
-    rule_set = await prepare_rule_set(session, workspace_id, refresh=True)
-    confirmed = rule_set.match_transaction(transaction)
-    if confirmed is None:
-        return _outcome(NO_MATCH, transaction=transaction)
-    if (
-        confirmed.rule.id != expectation.rule_id
-        or confirmed.rule.version != expectation.rule_version
-        or confirmed.category.id != expectation.category_id
-    ):
-        return _outcome(RULE_CHANGED, transaction=transaction)
-
-    # 5. Live target category, locked, in this same transaction.
+    # 5. Live target category, locked, in this same transaction. This is proved *before* the
+    # deterministic re-match on purpose: an archived, retyped or re-versioned target category also
+    # removes its rule from the matcher, and "category_changed" is the specific, actionable reason a
+    # caller needs — "no_match" would hide why the proposal became invalid.
     category = await _lock_category(session, workspace_id, expectation.category_id)
     if (
         category is None
@@ -251,7 +244,19 @@ async def execute_apply(
     ):
         return _outcome(CATEGORY_CHANGED, transaction=transaction)
 
-    # 6. The authoritative mutation path: month-close guard, transaction lock, version bump,
+    # 6. The proposal must still be the deterministic first valid match.
+    rule_set = await prepare_rule_set(session, workspace_id, refresh=True)
+    confirmed = rule_set.match_transaction(transaction)
+    if confirmed is None:
+        return _outcome(NO_MATCH, transaction=transaction)
+    if (
+        confirmed.rule.id != expectation.rule_id
+        or confirmed.rule.version != expectation.rule_version
+        or confirmed.category.id != expectation.category_id
+    ):
+        return _outcome(RULE_CHANGED, transaction=transaction)
+
+    # 7. The authoritative mutation path: month-close guard, transaction lock, version bump,
     # audit and sync outbox all stay owned by transactions.update_transaction.
     try:
         updated = await transaction_service.update_transaction(

@@ -355,8 +355,11 @@ async def apply_preview_items(
             # Lost the race to a concurrent request carrying the same key for something else.
             raise _idempotency_conflict()
 
+    # Plain values, captured once: a rollback later in the loop expires the ORM instances, and
+    # reading an expired attribute would attempt implicit IO outside the async context.
+    operation_id = operation.id
     rule_set_version = preview.rule_set_version if preview is not None else None
-    persisted = await repository.results_for(session, operation.id)
+    persisted = await repository.results_for(session, operation_id)
     items = await repository.load_items(session, preview_id, item_ids)
 
     results: list[ItemResult] = []
@@ -373,7 +376,7 @@ async def apply_preview_items(
                 await _process_item(
                     session,
                     context,
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     sequence=sequence,
                     item=None,
                     item_id=item_id,
@@ -386,7 +389,7 @@ async def apply_preview_items(
                 await _process_item(
                     session,
                     context,
-                    operation_id=operation.id,
+                    operation_id=operation_id,
                     sequence=sequence,
                     item=items.get(item_id),
                     item_id=item_id,
@@ -397,7 +400,7 @@ async def apply_preview_items(
             # A concurrent request holding the same key committed this item first. Its terminal
             # result is authoritative; re-read it rather than mutating anything again.
             await session.rollback()
-            replay = await repository.results_for(session, operation.id)
+            replay = await repository.results_for(session, operation_id)
             existing_result = replay.get(item_id)
             if existing_result is None:
                 raise
@@ -410,7 +413,7 @@ async def apply_preview_items(
             logger.exception(
                 "Categorization apply item failed",
                 extra={
-                    "operation_id": str(operation.id),
+                    "operation_id": str(operation_id),
                     "preview_item_id": str(item_id),
                     "request_id": context.request_id,
                 },
@@ -418,7 +421,7 @@ async def apply_preview_items(
             item = items.get(item_id)
             failure = await _record_failure(
                 session,
-                operation_id=operation.id,
+                operation_id=operation_id,
                 item_id=item_id,
                 sequence=sequence,
                 transaction_id=item.transaction_id if item is not None else None,
@@ -428,6 +431,6 @@ async def apply_preview_items(
             results.append(failure)
 
     if len(results) == len(item_ids):
-        await repository.complete_operation(session, operation.id, datetime.now(UTC))
+        await repository.complete_operation(session, operation_id, datetime.now(UTC))
         await session.commit()
-    return BulkApplyOutcome(preview_id=preview_id, operation_id=operation.id, results=results)
+    return BulkApplyOutcome(preview_id=preview_id, operation_id=operation_id, results=results)
