@@ -1,0 +1,144 @@
+name: Categorization Rule-Set Concurrency PostgreSQL Validation
+
+on:
+  push:
+    branches:
+      - codex/v012-ruleset-concurrency-validation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: finspace
+          POSTGRES_PASSWORD: finspace
+          POSTGRES_DB: finspace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U finspace -d finspace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/finspace
+      TEST_DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/test_finspace_base
+      REDIS_URL: redis://127.0.0.1:6379/0
+      TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      ENVIRONMENT: development
+      TESTING: "true"
+      JWT_SECRET_KEY: github-actions-validation-key-not-for-production-0123456789
+      CORS_ORIGINS: http://localhost:3000
+
+    steps:
+      - name: Check out validation branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e "backend[dev]"
+
+      - name: Mirror production Apps Script package mount
+        run: |
+          sudo install -d -m 0755 /app
+          sudo ln -s "$GITHUB_WORKSPACE/google-apps-script" /app/google-apps-script
+
+      - name: Runtime evidence
+        run: |
+          python --version
+          python -m pip --version
+          PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d finspace -c "SELECT version();"
+          python -c "import redis; assert redis.Redis.from_url('redis://127.0.0.1:6379/0').ping(); print('redis_ping=PASS')"
+
+      - name: Fresh migration proof
+        env:
+          DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/categorization_test
+        run: |
+          PGPASSWORD=finspace createdb -h 127.0.0.1 -U finspace categorization_test
+          (cd backend && alembic -c alembic.ini upgrade head)
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d categorization_test -Atc 'select version_num from alembic_version')" = "0013_categorization_rule_sets"
+          PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d categorization_test -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT to_regclass('public.categorization_rule_set_controls') IS NOT NULL AS table_exists;
+          SELECT conname, contype FROM pg_constraint
+          WHERE conrelid = 'categorization_rule_set_controls'::regclass
+          ORDER BY conname;
+          SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns
+          WHERE table_name = 'categorization_rule_set_controls'
+          ORDER BY ordinal_position;
+          SQL
+
+      - name: Downgrade and re-upgrade proof
+        env:
+          DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/categorization_test
+        run: |
+          (cd backend && alembic -c alembic.ini downgrade 0012_categorization_rules)
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d categorization_test -Atc 'select version_num from alembic_version')" = "0012_categorization_rules"
+          REMOVED=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d categorization_test -Atc "SELECT CASE WHEN to_regclass('public.categorization_rule_set_controls') IS NULL THEN 1 ELSE 0 END;")
+          test "$REMOVED" = "1"
+          KEPT=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d categorization_test -Atc "SELECT CASE WHEN to_regclass('public.categorization_rules') IS NOT NULL THEN 1 ELSE 0 END;")
+          test "$KEPT" = "1"
+          (cd backend && alembic -c alembic.ini upgrade head)
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d categorization_test -Atc 'select version_num from alembic_version')" = "0013_categorization_rule_sets"
+
+      - name: Backfill proof from the exact v0.11 schema
+        env:
+          DATABASE_URL: postgresql+asyncpg://finspace:finspace@127.0.0.1:5432/v011_schema_test
+        run: |
+          PGPASSWORD=finspace createdb -h 127.0.0.1 -U finspace v011_schema_test
+          (cd backend && alembic -c alembic.ini upgrade 0012_categorization_rules)
+          PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO workspaces (id, name, base_currency, timezone, created_at, updated_at)
+          VALUES (gen_random_uuid(), 'Legacy v0.11 workspace', 'RUB', 'Asia/Yekaterinburg', now(), now());
+          SQL
+          (cd backend && alembic -c alembic.ini upgrade 0013_categorization_rule_sets)
+          WORKSPACES=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -Atc "SELECT count(*) FROM workspaces;")
+          CONTROLS=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -Atc "SELECT count(*) FROM categorization_rule_set_controls;")
+          echo "workspaces=$WORKSPACES controls=$CONTROLS"
+          test "$WORKSPACES" = "$CONTROLS"
+          test "$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d v011_schema_test -Atc 'SELECT count(*) FROM categorization_rule_set_controls WHERE version <> 1;')" = "0"
+
+      - name: Focused Categorization Rules suite
+        working-directory: backend
+        run: python scripts/test_runner.py -- tests/test_categorization_rules.py -vv
+
+      - name: Full backend PostgreSQL suite
+        working-directory: backend
+        run: python scripts/test_runner.py -- -q
+
+      - name: Backend static gates
+        run: |
+          python -m ruff check backend
+          python -m ruff format --check backend
+          python -m mypy backend/app
+          python -m compileall -q backend/app
+          PYTHONPATH=backend python -c "from app.main import app; print('backend_import_smoke=PASS', app.title)"
+
+      - name: Patch hygiene
+        run: git diff --check
