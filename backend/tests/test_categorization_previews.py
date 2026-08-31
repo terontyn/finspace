@@ -15,10 +15,13 @@ from app.db.session import AsyncSessionFactory, engine
 from app.dependencies.context import RequestContext
 from app.schemas.categorization_previews import (
     CategorizationPreviewCreate,
+    CategorizationPreviewFilterSelection,
     CategorizationPreviewIdsSelection,
 )
+from app.schemas.transactions import SplitInput, TransactionUpdate
 from app.services import categorization_previews as preview_service
 from app.services import categorization_rules as rule_service
+from app.services import transactions as transaction_service
 from app.services.financial_period_guard import get_or_create_control
 
 PASSWORD = "correct horse battery staple"
@@ -813,10 +816,13 @@ def test_preview_evaluation_uses_bounded_rule_category_and_split_queries(
         item for item in statements if "from categories" in item and "categorization" not in item
     ]
     split_queries = [item for item in statements if "from transaction_splits" in item]
-    # 100 transactions must not cause per-transaction rule, category or split lookups.
+    transaction_queries = [item for item in statements if "from transactions" in item]
+    # 100 transactions must not cause per-transaction rule, category or split lookups. Transaction
+    # state and correlated split existence are deliberately folded into the same statement.
     assert len(rule_queries) <= 2, rule_queries
     assert len(category_queries) <= 2, category_queries
-    assert len(split_queries) <= 2, split_queries
+    assert len(transaction_queries) == 1, transaction_queries
+    assert len(split_queries) == 1, split_queries
 
 
 def test_workspace_isolation_roles_and_creator_do_not_gate_reads(client: TestClient) -> None:
@@ -1001,6 +1007,167 @@ def test_persisted_items_are_immutable_after_rule_and_transaction_changes(
     assert after_header.json()["rule_set_version"] == captured_revision
     after = _all_items(client, headers, created["id"])[0]
     assert after == before
+
+
+def test_candidate_version_and_split_state_share_one_statement_snapshot(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Preview transaction split race")
+    account = _account(client, headers, "Atomic snapshot card")
+    category = _category(client, headers, "Atomic split category")
+    transaction_id = asyncio.run(
+        _insert_transaction(identity, account["id"], counterparty="Atomic snapshot shop")
+    )
+
+    snapshot_read = asyncio.Event()
+    release_preview = asyncio.Event()
+    original_filtered_candidates = preview_service.repository.filtered_candidates
+
+    async def paused_filtered_candidates(*args: object, **kwargs: object):
+        candidates = await original_filtered_candidates(*args, **kwargs)  # type: ignore[arg-type]
+        snapshot_read.set()
+        await release_preview.wait()
+        return candidates
+
+    monkeypatch.setattr(
+        preview_service.repository,
+        "filtered_candidates",
+        paused_filtered_candidates,
+    )
+
+    async def race() -> str:
+        async with AsyncSessionFactory() as preview_session:
+            preview_task = asyncio.create_task(
+                preview_service.create_preview(
+                    preview_session,
+                    await _context_for(identity, preview_session),
+                    CategorizationPreviewCreate(
+                        selection=CategorizationPreviewFilterSelection(
+                            mode="filter",
+                            account_id=uuid.UUID(account["id"]),
+                        )
+                    ),
+                )
+            )
+            await asyncio.wait_for(snapshot_read.wait(), timeout=5)
+            try:
+                async with AsyncSessionFactory() as mutation_session:
+                    await transaction_service.update_transaction(
+                        mutation_session,
+                        await _context_for(identity, mutation_session),
+                        uuid.UUID(transaction_id),
+                        TransactionUpdate(
+                            version=1,
+                            splits=[
+                                SplitInput(
+                                    category_id=uuid.UUID(category["id"]),
+                                    amount=Decimal("1250.2500"),
+                                )
+                            ],
+                        ),
+                    )
+            finally:
+                release_preview.set()
+            preview = await asyncio.wait_for(preview_task, timeout=5)
+            return str(preview.id)
+
+    preview_id = asyncio.run(race())
+    item = asyncio.run(_persisted_items(preview_id))[0]
+    # The mutation committed after the candidate statement. The preview may therefore preserve v1,
+    # but it must never combine that version with v2 split existence.
+    assert item.transaction_version == 1
+    assert item.transaction_snapshot is not None
+    assert item.transaction_snapshot["version"] == 1
+    assert item.status == "no_match"
+
+    async def current_state() -> tuple[int, int]:
+        async with AsyncSessionFactory() as session:
+            transaction = await session.get(FinancialTransaction, uuid.UUID(transaction_id))
+            assert transaction is not None
+            splits = list(
+                (
+                    await session.scalars(
+                        select(TransactionSplit).where(
+                            TransactionSplit.transaction_id == uuid.UUID(transaction_id)
+                        )
+                    )
+                ).all()
+            )
+            return transaction.version, len(splits)
+
+    assert asyncio.run(current_state()) == (2, 1)
+
+
+def test_filter_soft_delete_after_candidate_snapshot_never_becomes_not_found(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Preview filter deletion race")
+    account = _account(client, headers, "Deletion snapshot card")
+    transaction_id = asyncio.run(
+        _insert_transaction(identity, account["id"], counterparty="Deletion snapshot shop")
+    )
+
+    snapshot_read = asyncio.Event()
+    release_preview = asyncio.Event()
+    original_filtered_candidates = preview_service.repository.filtered_candidates
+
+    async def paused_filtered_candidates(*args: object, **kwargs: object):
+        candidates = await original_filtered_candidates(*args, **kwargs)  # type: ignore[arg-type]
+        snapshot_read.set()
+        await release_preview.wait()
+        return candidates
+
+    monkeypatch.setattr(
+        preview_service.repository,
+        "filtered_candidates",
+        paused_filtered_candidates,
+    )
+
+    async def race() -> str:
+        async with AsyncSessionFactory() as preview_session:
+            preview_task = asyncio.create_task(
+                preview_service.create_preview(
+                    preview_session,
+                    await _context_for(identity, preview_session),
+                    CategorizationPreviewCreate(
+                        selection=CategorizationPreviewFilterSelection(
+                            mode="filter",
+                            account_id=uuid.UUID(account["id"]),
+                        )
+                    ),
+                )
+            )
+            await asyncio.wait_for(snapshot_read.wait(), timeout=5)
+            try:
+                async with AsyncSessionFactory() as mutation_session:
+                    await transaction_service.delete_transaction(
+                        mutation_session,
+                        await _context_for(identity, mutation_session),
+                        uuid.UUID(transaction_id),
+                        version=1,
+                    )
+            finally:
+                release_preview.set()
+            preview = await asyncio.wait_for(preview_task, timeout=5)
+            return str(preview.id)
+
+    preview_id = asyncio.run(race())
+    item = asyncio.run(_persisted_items(preview_id))[0]
+    # Filter membership and row state linearize together. A delete after that point cannot turn a
+    # real filter candidate into the explicit-ID-only ``not_found`` classification.
+    assert item.transaction_id == uuid.UUID(transaction_id)
+    assert item.transaction_version == 1
+    assert item.status == "no_match"
+
+    async def deleted_state() -> tuple[int, bool]:
+        async with AsyncSessionFactory() as session:
+            transaction = await session.get(FinancialTransaction, uuid.UUID(transaction_id))
+            assert transaction is not None
+            return transaction.version, transaction.deleted_at is not None
+
+    assert asyncio.run(deleted_state()) == (2, True)
 
 
 def test_rule_mutation_waits_for_a_preview_holding_the_shared_rule_set_lock(

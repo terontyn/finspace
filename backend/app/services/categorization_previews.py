@@ -8,8 +8,9 @@ Concurrency model:
 * the Stage A1 workspace rule-set control is held ``FOR SHARE`` for the whole construction
   transaction, so the deterministic rule set cannot change halfway through and rule mutations
   serialize behind the preview;
-* individual financial transactions stay optimistic and may change concurrently, which is why every
-  item persists the exact transaction version it evaluated;
+* candidate membership, compact transaction state and split existence come from the same bounded
+  PostgreSQL statement snapshot. Individual transactions remain optimistic and may change after
+  that read, which is why every item persists the exact version it evaluated;
 * the persisted proposal is immutable afterwards. Stage A3 apply revalidates live state.
 """
 
@@ -21,7 +22,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ApiError
 from app.db.models.categorization_previews import CategorizationPreview, CategorizationPreviewItem
-from app.db.models.transactions import FinancialTransaction
 from app.dependencies.context import RequestContext
 from app.repositories import categorization_previews as repository
 from app.repositories import categorization_rules as rule_repository
@@ -79,7 +79,7 @@ def _not_found() -> ApiError:
     )
 
 
-def _snapshot(transaction: FinancialTransaction) -> dict[str, object]:
+def _snapshot(transaction: repository.PreviewCandidate) -> dict[str, object]:
     return {
         "transaction_id": str(transaction.id),
         "version": transaction.version,
@@ -97,9 +97,9 @@ def _snapshot(transaction: FinancialTransaction) -> dict[str, object]:
 
 
 def _classify(
-    transaction: FinancialTransaction,
+    transaction: repository.PreviewCandidate,
     *,
-    split_count: int,
+    has_splits: bool,
     is_closed: bool,
     rule_set: PreparedRuleSet,
 ) -> tuple[str, PreparedMatch | None]:
@@ -108,7 +108,7 @@ def _classify(
         return "transfer", None
     if transaction.category_id is not None:
         return "already_categorized", None
-    if split_count:
+    if has_splits:
         return "split", None
     if transaction.status == "reconciled":
         return "reconciled", None
@@ -124,11 +124,16 @@ async def _resolve_selection(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     data: CategorizationPreviewCreate,
-) -> list[uuid.UUID]:
+) -> tuple[list[uuid.UUID], dict[uuid.UUID, repository.PreviewCandidate]]:
     selection = data.selection
     if isinstance(selection, CategorizationPreviewIdsSelection):
         # Caller order is preserved so the reviewer sees the list they submitted.
-        return list(selection.transaction_ids)
+        selected_ids = list(selection.transaction_ids)
+        return selected_ids, await repository.explicit_candidates(
+            session,
+            workspace_id,
+            selected_ids,
+        )
     if not isinstance(selection, CategorizationPreviewFilterSelection):
         raise ApiError(
             status_code=422,
@@ -146,7 +151,7 @@ async def _resolve_selection(
         source=selection.source,
     )
     # limit + 1 detects overflow without counting or scanning the whole table.
-    candidates = await repository.candidate_ids(
+    candidates = await repository.filtered_candidates(
         session,
         filters,
         limit=MAX_FILTER_CANDIDATES + 1,
@@ -158,7 +163,8 @@ async def _resolve_selection(
             message="The selection matches more transactions than one preview may hold",
             details={"maximum": MAX_FILTER_CANDIDATES},
         )
-    return candidates
+    selected_ids = [candidate.id for candidate in candidates]
+    return selected_ids, {candidate.id: candidate for candidate in candidates}
 
 
 async def create_preview(
@@ -176,13 +182,11 @@ async def create_preview(
     rule_set_version = control.version
     rule_set = await prepare_rule_set(session, workspace_id)
 
-    selected_ids = await _resolve_selection(session, workspace_id, data)
-    transactions = await repository.load_transactions(session, workspace_id, selected_ids)
-    present_ids = [item for item in selected_ids if item in transactions]
-    splits = await repository.split_counts(session, present_ids)
+    selected_ids, transactions = await _resolve_selection(session, workspace_id, data)
 
-    # Advisory only: month-close state is read without taking the exclusive control lock, and
-    # Stage A3 apply revalidates authoritatively.
+    # Advisory only: month-close state is read after the candidate statement without taking the
+    # exclusive control lock. Its independent read point does not weaken the atomic transaction /
+    # split candidate snapshot; Stage A3 apply revalidates month-close state authoritatively.
     month_control = await get_or_create_control(session, workspace_id, for_update=False)
     timezone = context.workspace.timezone
 
@@ -220,7 +224,7 @@ async def create_preview(
         is_closed = bool(closed_dates(month_control, timezone, [transaction.occurred_at]))
         status, match = _classify(
             transaction,
-            split_count=splits.get(transaction.id, 0),
+            has_splits=transaction.has_splits,
             is_closed=is_closed,
             rule_set=rule_set,
         )

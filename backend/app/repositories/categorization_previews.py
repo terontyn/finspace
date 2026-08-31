@@ -1,7 +1,11 @@
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.categorization_previews import CategorizationPreview, CategorizationPreviewItem
@@ -9,6 +13,26 @@ from app.db.models.transactions import FinancialTransaction, TransactionSplit
 
 # Detail loading is chunked so a large selection never becomes one enormous IN list.
 DETAIL_CHUNK = 500
+
+
+@dataclass(slots=True)
+class PreviewCandidate:
+    """Compact transaction state evaluated by one PostgreSQL statement snapshot."""
+
+    id: uuid.UUID
+    version: int
+    occurred_at: datetime
+    transaction_type: str
+    amount: Decimal
+    currency: str
+    account_id: uuid.UUID
+    payee_id: uuid.UUID | None
+    counterparty: str | None
+    description: str | None
+    status: str
+    source: str
+    category_id: uuid.UUID | None
+    has_splits: bool
 
 
 def candidate_filters(
@@ -21,7 +45,7 @@ def candidate_filters(
     transaction_type: str | None,
     status: str | None,
     source: str | None,
-) -> list:
+) -> list[Any]:
     """Filter-mode candidate predicate.
 
     Mirrors ``transactions.list_transactions`` semantics (including the account filter matching
@@ -55,64 +79,96 @@ def candidate_filters(
     return filters
 
 
-async def candidate_ids(
+def _candidate_statement(filters: list[Any]) -> Select[Any]:
+    split_exists = (
+        exists(
+            select(TransactionSplit.id).where(
+                TransactionSplit.transaction_id == FinancialTransaction.id
+            )
+        )
+        .correlate(FinancialTransaction)
+        .label("has_splits")
+    )
+    return select(
+        FinancialTransaction.id.label("transaction_id"),
+        FinancialTransaction.version.label("transaction_version"),
+        FinancialTransaction.occurred_at,
+        FinancialTransaction.transaction_type,
+        FinancialTransaction.amount,
+        FinancialTransaction.currency,
+        FinancialTransaction.account_id,
+        FinancialTransaction.payee_id,
+        FinancialTransaction.counterparty,
+        FinancialTransaction.description,
+        FinancialTransaction.status,
+        FinancialTransaction.source,
+        FinancialTransaction.category_id,
+        split_exists,
+    ).where(*filters)
+
+
+def _candidate_rows(result: Sequence[Any]) -> list[PreviewCandidate]:
+    return [
+        PreviewCandidate(
+            id=row.transaction_id,
+            version=row.transaction_version,
+            occurred_at=row.occurred_at,
+            transaction_type=row.transaction_type,
+            amount=row.amount,
+            currency=row.currency,
+            account_id=row.account_id,
+            payee_id=row.payee_id,
+            counterparty=row.counterparty,
+            description=row.description,
+            status=row.status,
+            source=row.source,
+            category_id=row.category_id,
+            has_splits=bool(row.has_splits),
+        )
+        for row in result
+    ]
+
+
+async def filtered_candidates(
     session: AsyncSession,
-    filters: list,
+    filters: list[Any],
     *,
     limit: int,
-) -> list[uuid.UUID]:
-    """Fix candidate membership in one bounded query before any chunked detail loading.
+) -> list[PreviewCandidate]:
+    """Return filter membership and classification inputs from one statement snapshot.
 
-    Ordering is the canonical transaction order (``occurred_at DESC, id DESC``). Selecting the ids
-    up front means a concurrent ``occurred_at`` change cannot make a later keyset scan skip or
-    duplicate rows.
+    Ordering is the canonical transaction order (``occurred_at DESC, id DESC``). Because the same
+    bounded statement returns both the selected set and ``has_splits``, a concurrent update cannot
+    combine an old transaction version with new split state or turn a selected filter row into a
+    synthetic ``not_found`` item.
     """
-    statement: Select = (
-        select(FinancialTransaction.id)
-        .where(*filters)
+    statement: Select[Any] = (
+        _candidate_statement(filters)
         .order_by(FinancialTransaction.occurred_at.desc(), FinancialTransaction.id.desc())
         .limit(limit)
     )
-    return list((await session.scalars(statement)).all())
+    return _candidate_rows((await session.execute(statement)).all())
 
 
-async def load_transactions(
+async def explicit_candidates(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     transaction_ids: list[uuid.UUID],
-) -> dict[uuid.UUID, FinancialTransaction]:
-    """Load the fixed candidate set in bounded chunks, workspace-scoped."""
-    loaded: dict[uuid.UUID, FinancialTransaction] = {}
+) -> dict[uuid.UUID, PreviewCandidate]:
+    """Load workspace-visible explicit IDs with atomic row/split state per bounded statement."""
+    loaded: dict[uuid.UUID, PreviewCandidate] = {}
     for start in range(0, len(transaction_ids), DETAIL_CHUNK):
         chunk = transaction_ids[start : start + DETAIL_CHUNK]
-        rows = await session.scalars(
-            select(FinancialTransaction).where(
+        statement = _candidate_statement(
+            [
                 FinancialTransaction.workspace_id == workspace_id,
                 FinancialTransaction.deleted_at.is_(None),
                 FinancialTransaction.id.in_(chunk),
-            )
+            ]
         )
-        for transaction in rows.all():
-            loaded[transaction.id] = transaction
+        for candidate in _candidate_rows((await session.execute(statement)).all()):
+            loaded[candidate.id] = candidate
     return loaded
-
-
-async def split_counts(
-    session: AsyncSession,
-    transaction_ids: list[uuid.UUID],
-) -> dict[uuid.UUID, int]:
-    """One aggregate query per chunk instead of ``get_splits`` per transaction."""
-    counts: dict[uuid.UUID, int] = {}
-    for start in range(0, len(transaction_ids), DETAIL_CHUNK):
-        chunk = transaction_ids[start : start + DETAIL_CHUNK]
-        rows = await session.execute(
-            select(TransactionSplit.transaction_id, func.count())
-            .where(TransactionSplit.transaction_id.in_(chunk))
-            .group_by(TransactionSplit.transaction_id)
-        )
-        for transaction_id, count in rows.all():
-            counts[transaction_id] = int(count)
-    return counts
 
 
 async def get_preview(
