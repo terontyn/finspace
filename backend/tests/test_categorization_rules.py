@@ -1460,8 +1460,10 @@ def test_unrelated_transactions_categorize_concurrently_under_the_shared_lock(
 def test_rule_set_revision_tracks_only_matching_relevant_mutations(client: TestClient) -> None:
     identity, headers = _register(client, "Revision semantics")
     category = _category(client, headers, "Revision target")
-    baseline = asyncio.run(_rule_set_version(identity))
-    assert baseline is not None
+    # The migration backfills workspaces that already existed; a workspace created afterwards
+    # materializes its control row lazily through get_or_create on first rule-set use.
+    assert asyncio.run(_rule_set_version(identity)) is None
+    baseline = 0
 
     created = _rule(
         client,
