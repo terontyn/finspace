@@ -83,6 +83,12 @@ bindings и networks наследуются из base Compose.
 Ни один из этих mounts не заменяет `/app` целиком. PostgreSQL/Redis data продолжают
 храниться в именованных volumes своих сервисов.
 
+Три read-write каталога создаются и приводятся к контракту backend image командой
+`sudo ./scripts/prepare-runtime-storage.sh /opt/finspace`. Источник UID/GID —
+`backend/runtime-identity.env`; текущий контракт `app` равен `100:101`, mode каталогов —
+`0750`. Скрипт не меняет содержимое каталогов рекурсивно, `./backups` целиком,
+PostgreSQL/Redis/n8n volumes или другие пути. Production sync-worker mounts не имеет.
+
 ### Детерминированная проверка
 
 ```bash

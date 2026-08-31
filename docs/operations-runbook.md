@@ -214,6 +214,30 @@ sudo finspace-compose config --format json |
 Validator печатает только PASS/FAIL и не выводит environment. Полный `compose config` не
 прикладывайте к отчёту: он может содержать secrets после интерполяции.
 
+### Writable runtime storage
+
+Backend image намеренно запускает `app` с числовым контрактом из
+`backend/runtime-identity.env` (сейчас UID `100`, GID `101`). Перед первым запуском на
+новом host и после изменения этого контракта root должен подготовить только утверждённые
+read-write bind mounts:
+
+| Host path | Runtime writer |
+|---|---|
+| `/opt/finspace/data/imports` | Backend API: загрузка и удаление staging-файлов импорта |
+| `/opt/finspace/data/acceptance` | Backend live-acceptance tooling: registry |
+| `/opt/finspace/backups/acceptance-reports` | Backend live-acceptance tooling: отчёты |
+
+```bash
+cd /opt/finspace
+sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
+```
+
+Команда идемпотентно создаёт отсутствующие каталоги, устанавливает owner/group из
+image-контракта и mode `0750`, проверяет результат и отклоняет symlink в allowlisted
+пути. `chown` не рекурсивный: существующие файлы, остальные backup, PostgreSQL, Redis и
+n8n data не затрагиваются. `/app/backups`, Apps Script package и n8n package остаются
+read-only для backend; production sync-worker не имеет filesystem mounts.
+
 ### Полный deploy на Ubuntu
 
 Commit/push и deploy выполняются только после разрешения владельца. `release_ref` должен
@@ -224,13 +248,14 @@ Commit/push и deploy выполняются только после разре�
    восстановления.
 2. Остановить только application services; PostgreSQL и Redis оставить работающими.
 3. Получить и выбрать точный release.
-4. Установить version-controlled production override и проверить merged Compose.
-5. Собрать images target release.
-6. Выполнить migration из нового backend image.
-7. Запустить backend.
-8. Дождаться readiness.
-9. Запустить sync-worker и frontend.
-10. Выполнить smoke tests и проверить логи.
+4. Идемпотентно подготовить утверждённые writable runtime directories.
+5. Установить version-controlled production override и проверить merged Compose.
+6. Собрать images target release.
+7. Выполнить migration из нового backend image.
+8. Запустить backend.
+9. Дождаться readiness.
+10. Запустить sync-worker и frontend.
+11. Выполнить smoke tests и проверить логи.
 
 ```bash
 ssh finspace
@@ -248,6 +273,8 @@ release_ref="EXACT_TAG_OR_COMMIT"
 git switch --detach "$release_ref"
 git rev-parse HEAD
 git status --short
+
+sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
 
 sudo cp -a /etc/finspace/compose.server.yml \
   "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
