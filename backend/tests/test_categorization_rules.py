@@ -1,11 +1,12 @@
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,12 +14,14 @@ from app.core.config import settings
 from app.core.errors import ApiError
 from app.db.models.audit import AuditLog
 from app.db.models.categories import Category
+from app.db.models.categorization_rule_sets import CategorizationRuleSetControl
 from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import User, Workspace, WorkspaceMember
 from app.db.session import AsyncSessionFactory
 from app.dependencies.context import RequestContext
-from app.schemas.categorization_rules import CategorizationRuleUpdate
+from app.repositories import categorization_rules as categorization_repository
+from app.schemas.categorization_rules import CategorizationRuleCreate, CategorizationRuleUpdate
 from app.services import categorization_rules as categorization_service
 from app.services.categorization_rules import normalize_match_text
 from app.services.financial_period_guard import get_or_create_control
@@ -1084,3 +1087,485 @@ def test_categorization_rule_payee_reference_is_workspace_scoped(client: TestCli
         headers=headers_b,
     )
     assert still_scoped.status_code == 404
+
+
+async def _rule_set_version(identity: dict) -> int | None:
+    async with AsyncSessionFactory() as session:
+        return await session.scalar(
+            select(CategorizationRuleSetControl.version).where(
+                CategorizationRuleSetControl.workspace_id == uuid.UUID(identity["workspace"]["id"])
+            )
+        )
+
+
+async def _context_for(identity: dict, session: AsyncSession) -> RequestContext:
+    user = await session.get(User, uuid.UUID(identity["user"]["id"]))
+    workspace = await session.get(Workspace, uuid.UUID(identity["workspace"]["id"]))
+    assert user is not None
+    assert workspace is not None
+    return RequestContext(
+        user=user,
+        workspace=workspace,
+        role="owner",
+        request_id=str(uuid.uuid4()),
+    )
+
+
+async def _run_apply_against_committed_mutation(
+    identity: dict,
+    transaction_id: str,
+    mutate: "Callable[[AsyncSession, RequestContext], Awaitable[None]]",
+    monkeypatch: pytest.MonkeyPatch,
+) -> str:
+    """Pause apply right after its optimistic preview, commit a rule-set mutation, then resume.
+
+    The mutation commits before apply reaches its shared rule-set lock, so apply must observe the
+    new deterministic ordering and refuse the stale proposal.
+    """
+    preview_finished = asyncio.Event()
+    allow_apply_to_continue = asyncio.Event()
+    original_preview = categorization_service.preview_transaction
+
+    async def paused_preview(
+        session: AsyncSession,
+        workspace_id: uuid.UUID,
+        selected_transaction_id: uuid.UUID,
+    ) -> tuple[FinancialTransaction, categorization_service.CategorizationMatch | None]:
+        result = await original_preview(session, workspace_id, selected_transaction_id)
+        preview_finished.set()
+        await allow_apply_to_continue.wait()
+        return result
+
+    monkeypatch.setattr(categorization_service, "preview_transaction", paused_preview)
+
+    async with AsyncSessionFactory() as apply_session:
+        apply_context = await _context_for(identity, apply_session)
+        apply_task = asyncio.create_task(
+            categorization_service.apply_to_transaction(
+                apply_session,
+                apply_context,
+                uuid.UUID(transaction_id),
+                1,
+            )
+        )
+        await preview_finished.wait()
+        async with AsyncSessionFactory() as mutation_session:
+            await mutate(mutation_session, await _context_for(identity, mutation_session))
+        allow_apply_to_continue.set()
+        try:
+            await apply_task
+        except ApiError as exc:
+            await apply_session.rollback()
+            return exc.code
+        raise AssertionError("Stale categorization proposal was applied")
+
+
+def _assert_transaction_untouched(
+    client: TestClient,
+    headers: dict[str, str],
+    transaction_id: str,
+) -> None:
+    unchanged = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["category"] is None
+    assert unchanged.json()["version"] == 1
+    assert asyncio.run(_categorization_audit(transaction_id)) is None
+
+
+def _rule_set_race_fixture(
+    client: TestClient,
+    label: str,
+) -> tuple[dict, dict[str, str], dict, dict, dict, str]:
+    identity, headers = _register(client, label)
+    account = _account(client, headers, f"{label} card")
+    selected_category = _category(client, headers, f"{label} selected")
+    intruder_category = _category(client, headers, f"{label} intruder")
+    selected = _rule(
+        client,
+        headers,
+        name=f"{label} selected rule",
+        category_id=selected_category["id"],
+        priority=50,
+        counterparty_contains="race shop",
+    )
+    transaction_id = asyncio.run(
+        _insert_uncategorized(identity, account["id"], counterparty="Race Shop statement")
+    )
+    return identity, headers, selected, selected_category, intruder_category, transaction_id
+
+
+def test_apply_rejects_a_newly_created_higher_priority_rule(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers, _selected, _selected_category, intruder_category, transaction_id = (
+        _rule_set_race_fixture(client, "Race create")
+    )
+    before = asyncio.run(_rule_set_version(identity))
+
+    async def create_intruder(session: AsyncSession, context: RequestContext) -> None:
+        await categorization_service.create_rule(
+            session,
+            context,
+            CategorizationRuleCreate(
+                name="Race create intruder",
+                priority=1,
+                category_id=uuid.UUID(intruder_category["id"]),
+                counterparty_contains="race shop",
+            ),
+        )
+
+    code = asyncio.run(
+        _run_apply_against_committed_mutation(
+            identity,
+            transaction_id,
+            create_intruder,
+            monkeypatch,
+        )
+    )
+    assert code == "CATEGORIZATION_RULE_CHANGED"
+    _assert_transaction_untouched(client, headers, transaction_id)
+    assert asyncio.run(_rule_set_version(identity)) == (before or 0) + 1
+
+
+def test_apply_rejects_a_rule_reprioritized_above_the_selected_rule(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers, _selected, _selected_category, intruder_category, transaction_id = (
+        _rule_set_race_fixture(client, "Race priority")
+    )
+    lower = _rule(
+        client,
+        headers,
+        name="Race priority intruder",
+        category_id=intruder_category["id"],
+        priority=90,
+        counterparty_contains="race shop",
+    )
+    before = asyncio.run(_rule_set_version(identity))
+
+    async def reprioritize(session: AsyncSession, context: RequestContext) -> None:
+        await categorization_service.update_rule(
+            session,
+            context,
+            uuid.UUID(lower["id"]),
+            CategorizationRuleUpdate(version=lower["version"], priority=1),
+        )
+
+    code = asyncio.run(
+        _run_apply_against_committed_mutation(identity, transaction_id, reprioritize, monkeypatch)
+    )
+    assert code == "CATEGORIZATION_RULE_CHANGED"
+    _assert_transaction_untouched(client, headers, transaction_id)
+    assert asyncio.run(_rule_set_version(identity)) == (before or 0) + 1
+
+
+def test_apply_rejects_a_restored_higher_priority_rule(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers, _selected, _selected_category, intruder_category, transaction_id = (
+        _rule_set_race_fixture(client, "Race restore")
+    )
+    archived = _rule(
+        client,
+        headers,
+        name="Race restore intruder",
+        category_id=intruder_category["id"],
+        priority=1,
+        counterparty_contains="race shop",
+    )
+    archived_response = client.delete(
+        f"/api/v1/categorization-rules/{archived['id']}?version={archived['version']}",
+        headers=headers,
+    )
+    assert archived_response.status_code == 200, archived_response.text
+    archived_version = archived_response.json()["version"]
+    before = asyncio.run(_rule_set_version(identity))
+
+    async def restore(session: AsyncSession, context: RequestContext) -> None:
+        await categorization_service.restore_rule(
+            session,
+            context,
+            uuid.UUID(archived["id"]),
+            archived_version,
+        )
+
+    code = asyncio.run(
+        _run_apply_against_committed_mutation(identity, transaction_id, restore, monkeypatch)
+    )
+    assert code == "CATEGORIZATION_RULE_CHANGED"
+    _assert_transaction_untouched(client, headers, transaction_id)
+    assert asyncio.run(_rule_set_version(identity)) == (before or 0) + 1
+
+
+def test_apply_rejects_a_reactivated_higher_priority_rule(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers, _selected, _selected_category, intruder_category, transaction_id = (
+        _rule_set_race_fixture(client, "Race activate")
+    )
+    inactive = _rule(
+        client,
+        headers,
+        name="Race activate intruder",
+        category_id=intruder_category["id"],
+        priority=1,
+        counterparty_contains="race shop",
+        is_active=False,
+    )
+    before = asyncio.run(_rule_set_version(identity))
+
+    async def activate(session: AsyncSession, context: RequestContext) -> None:
+        await categorization_service.update_rule(
+            session,
+            context,
+            uuid.UUID(inactive["id"]),
+            CategorizationRuleUpdate(version=inactive["version"], is_active=True),
+        )
+
+    code = asyncio.run(
+        _run_apply_against_committed_mutation(identity, transaction_id, activate, monkeypatch)
+    )
+    assert code == "CATEGORIZATION_RULE_CHANGED"
+    _assert_transaction_untouched(client, headers, transaction_id)
+    assert asyncio.run(_rule_set_version(identity)) == (before or 0) + 1
+
+
+def test_rule_mutation_waits_for_an_apply_holding_the_shared_rule_set_lock(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other linearization arm: apply takes the shared lock first and wins.
+
+    The competing rule creation must block on the exclusive rule-set gate until apply commits, and
+    apply must complete using the rule it originally proposed.
+    """
+    identity, headers, selected, selected_category, intruder_category, transaction_id = (
+        _rule_set_race_fixture(client, "Race barrier")
+    )
+    shared_lock_held = asyncio.Event()
+    allow_apply_to_finish = asyncio.Event()
+    original_lock = categorization_service._lock_proposed_match
+
+    async def paused_proof(
+        session: AsyncSession,
+        workspace_id: uuid.UUID,
+        transaction: FinancialTransaction,
+        match: categorization_service.CategorizationMatch,
+    ) -> None:
+        await original_lock(session, workspace_id, transaction, match)
+        shared_lock_held.set()
+        await allow_apply_to_finish.wait()
+
+    monkeypatch.setattr(categorization_service, "_lock_proposed_match", paused_proof)
+
+    async def run_barrier() -> tuple[str, bool]:
+        async with AsyncSessionFactory() as apply_session:
+            apply_task = asyncio.create_task(
+                categorization_service.apply_to_transaction(
+                    apply_session,
+                    await _context_for(identity, apply_session),
+                    uuid.UUID(transaction_id),
+                    1,
+                )
+            )
+            await shared_lock_held.wait()
+            async with AsyncSessionFactory() as mutation_session:
+                mutation_task = asyncio.create_task(
+                    categorization_service.create_rule(
+                        mutation_session,
+                        await _context_for(identity, mutation_session),
+                        CategorizationRuleCreate(
+                            name="Race barrier intruder",
+                            priority=1,
+                            category_id=uuid.UUID(intruder_category["id"]),
+                            counterparty_contains="race shop",
+                        ),
+                    )
+                )
+                # The mutation must be parked on the exclusive rule-set gate, not racing ahead.
+                await asyncio.sleep(0.5)
+                blocked_while_apply_ran = not mutation_task.done()
+                allow_apply_to_finish.set()
+                result = await apply_task
+                await mutation_task
+            return result.match.rule.id if result.match else "", blocked_while_apply_ran
+
+    applied_rule_id, blocked = asyncio.run(run_barrier())
+    assert blocked is True
+    assert str(applied_rule_id) == selected["id"]
+
+    committed = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["category"]["id"] == selected_category["id"]
+    assert committed.json()["version"] == 2
+
+
+def test_unrelated_transactions_categorize_concurrently_under_the_shared_lock(
+    client: TestClient,
+) -> None:
+    identity, headers = _register(client, "Race parallel")
+    account = _account(client, headers, "Parallel card")
+    first_category = _category(client, headers, "Parallel first")
+    second_category = _category(client, headers, "Parallel second")
+    _rule(
+        client,
+        headers,
+        name="Parallel first rule",
+        category_id=first_category["id"],
+        priority=10,
+        counterparty_contains="alpha shop",
+    )
+    _rule(
+        client,
+        headers,
+        name="Parallel second rule",
+        category_id=second_category["id"],
+        priority=20,
+        counterparty_contains="beta shop",
+    )
+    first_id = asyncio.run(
+        _insert_uncategorized(identity, account["id"], counterparty="Alpha Shop statement")
+    )
+    second_id = asyncio.run(
+        _insert_uncategorized(identity, account["id"], counterparty="Beta Shop statement")
+    )
+    before = asyncio.run(_rule_set_version(identity))
+
+    async def apply_one(transaction_id: str) -> bool:
+        async with AsyncSessionFactory() as session:
+            result = await categorization_service.apply_to_transaction(
+                session,
+                await _context_for(identity, session),
+                uuid.UUID(transaction_id),
+                1,
+            )
+            return result.applied
+
+    async def run_parallel() -> list[bool]:
+        return list(await asyncio.gather(apply_one(first_id), apply_one(second_id)))
+
+    assert asyncio.run(run_parallel()) == [True, True]
+    for transaction_id, expected in ((first_id, first_category), (second_id, second_category)):
+        committed = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
+        assert committed.status_code == 200, committed.text
+        assert committed.json()["category"]["id"] == expected["id"]
+    # Applying never mutates the rule set.
+    assert asyncio.run(_rule_set_version(identity)) == before
+
+
+def test_rule_set_revision_tracks_only_matching_relevant_mutations(client: TestClient) -> None:
+    identity, headers = _register(client, "Revision semantics")
+    category = _category(client, headers, "Revision target")
+    baseline = asyncio.run(_rule_set_version(identity))
+    assert baseline is not None
+
+    created = _rule(
+        client,
+        headers,
+        name="Revision rule",
+        category_id=category["id"],
+        priority=10,
+        counterparty_contains="revision shop",
+    )
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 1
+
+    renamed = client.patch(
+        f"/api/v1/categorization-rules/{created['id']}",
+        headers=headers,
+        json={"version": created["version"], "name": "Revision rule renamed"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    # A rename cannot change matching or ordering: the rule version advances, the rule set does not.
+    assert renamed.json()["version"] == created["version"] + 1
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 1
+
+    reprioritized = client.patch(
+        f"/api/v1/categorization-rules/{created['id']}",
+        headers=headers,
+        json={"version": renamed.json()["version"], "priority": 5},
+    )
+    assert reprioritized.status_code == 200, reprioritized.text
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 2
+
+    idempotent = client.patch(
+        f"/api/v1/categorization-rules/{created['id']}",
+        headers=headers,
+        json={"version": reprioritized.json()["version"], "priority": 5},
+    )
+    assert idempotent.status_code == 200, idempotent.text
+    # Semantically empty PATCH: existing rule-version/audit contract is preserved, revision is not.
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 2
+
+    archived = client.delete(
+        f"/api/v1/categorization-rules/{created['id']}?version={idempotent.json()['version']}",
+        headers=headers,
+    )
+    assert archived.status_code == 200, archived.text
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 3
+
+    restored = client.post(
+        f"/api/v1/categorization-rules/{created['id']}/restore",
+        headers=headers,
+        json={"version": archived.json()["version"]},
+    )
+    assert restored.status_code == 200, restored.text
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 4
+
+    already_restored = client.post(
+        f"/api/v1/categorization-rules/{created['id']}/restore",
+        headers=headers,
+        json={"version": restored.json()["version"]},
+    )
+    assert already_restored.status_code == 200, already_restored.text
+    assert already_restored.json()["version"] == restored.json()["version"]
+    assert asyncio.run(_rule_set_version(identity)) == baseline + 4
+
+
+def test_rule_set_control_is_created_once_under_concurrent_first_use(client: TestClient) -> None:
+    identity, _headers = _register(client, "Control bootstrap")
+    workspace_id = uuid.UUID(identity["workspace"]["id"])
+
+    async def drop_control() -> None:
+        async with AsyncSessionFactory() as session:
+            await session.execute(
+                delete(CategorizationRuleSetControl).where(
+                    CategorizationRuleSetControl.workspace_id == workspace_id
+                )
+            )
+            await session.commit()
+
+    asyncio.run(drop_control())
+    assert asyncio.run(_rule_set_version(identity)) is None
+
+    async def bootstrap() -> int:
+        async with AsyncSessionFactory() as session:
+            control = await categorization_repository.get_or_create_rule_set_control(
+                session,
+                workspace_id,
+                for_update=True,
+            )
+            version = control.version
+            await session.commit()
+            return version
+
+    async def run_bootstrap_race() -> list[int]:
+        return list(await asyncio.gather(bootstrap(), bootstrap(), bootstrap()))
+
+    assert asyncio.run(run_bootstrap_race()) == [1, 1, 1]
+
+    async def control_rows() -> int:
+        async with AsyncSessionFactory() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(CategorizationRuleSetControl)
+                    .where(CategorizationRuleSetControl.workspace_id == workspace_id)
+                )
+                or 0
+            )
+
+    assert asyncio.run(control_rows()) == 1
