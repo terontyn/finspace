@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ApiError
 from app.db.models.categories import Category
+from app.db.models.categorization_rule_sets import CategorizationRuleSetControl
 from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.transactions import FinancialTransaction
 from app.dependencies.context import RequestContext
@@ -26,6 +27,21 @@ from app.services import transactions as transaction_service
 from app.services.audit import record_audit, snapshot
 
 _UNICODE_WHITESPACE = re.compile(r"\s+", flags=re.UNICODE)
+
+# Fields that can change which rule matches first, or in what order rules are evaluated. ``name``
+# is deliberately absent: renaming a rule cannot affect matching or ordering, so it does not
+# advance the rule-set revision even though it still advances the rule's own version and writes an
+# audit entry.
+RULE_SET_SEMANTIC_FIELDS = (
+    "priority",
+    "is_active",
+    "transaction_type",
+    "account_id",
+    "payee_id",
+    "counterparty_contains",
+    "description_contains",
+    "category_id",
+)
 
 
 @dataclass(frozen=True)
@@ -147,11 +163,36 @@ async def get_rule(
     return rule
 
 
+async def lock_rule_set_for_mutation(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+) -> CategorizationRuleSetControl:
+    """Acquire the exclusive rule-set gate.
+
+    Mandatory lock order is rule-set control -> categorization rule -> financial-period/transaction
+    locks. Every semantic rule mutation calls this first, which is also what makes rule mutations
+    wait for in-flight categorization applies holding the shared lock.
+    """
+    return await repository.get_or_create_rule_set_control(session, workspace_id, for_update=True)
+
+
+def bump_rule_set(control: CategorizationRuleSetControl) -> int:
+    """Advance the rule-set revision exactly once for a mutation that can affect matching."""
+    control.version += 1
+    control.updated_at = datetime.now(UTC)
+    return control.version
+
+
+def _rule_set_semantics(rule: CategorizationRule) -> tuple[object, ...]:
+    return (*(getattr(rule, field) for field in RULE_SET_SEMANTIC_FIELDS), rule.deleted_at)
+
+
 async def create_rule(
     session: AsyncSession,
     context: RequestContext,
     data: CategorizationRuleCreate,
 ) -> CategorizationRule:
+    control = await lock_rule_set_for_mutation(session, context.workspace.id)
     await _validate_references(
         session,
         context.workspace.id,
@@ -187,6 +228,8 @@ async def create_rule(
         after_data=snapshot("categorization_rule", rule),
         request_id=context.request_id,
     )
+    # A new rule always joins the deterministic set, so the revision always advances.
+    bump_rule_set(control)
     await session.commit()
     await session.refresh(rule)
     return rule
@@ -198,6 +241,7 @@ async def update_rule(
     rule_id: uuid.UUID,
     data: CategorizationRuleUpdate,
 ) -> CategorizationRule:
+    control = await lock_rule_set_for_mutation(session, context.workspace.id)
     rule = await repository.get_rule(
         session,
         context.workspace.id,
@@ -251,6 +295,7 @@ async def update_rule(
         category_id=category_id,
     )
     before = snapshot("categorization_rule", rule)
+    semantics_before = _rule_set_semantics(rule)
     for field, value in changes.items():
         setattr(rule, field, value)
     rule.updated_by = context.user.id
@@ -268,6 +313,10 @@ async def update_rule(
         after_data=snapshot("categorization_rule", rule),
         request_id=context.request_id,
     )
+    # The rule's own version and audit entry follow the existing v0.11 contract for every accepted
+    # PATCH, but the rule-set revision only advances when matching or ordering can actually change.
+    if _rule_set_semantics(rule) != semantics_before:
+        bump_rule_set(control)
     await session.commit()
     await session.refresh(rule)
     return rule
@@ -279,6 +328,7 @@ async def delete_rule(
     rule_id: uuid.UUID,
     version: int,
 ) -> CategorizationRule:
+    control = await lock_rule_set_for_mutation(session, context.workspace.id)
     rule = await repository.get_rule(
         session,
         context.workspace.id,
@@ -306,6 +356,9 @@ async def delete_rule(
         after_data=snapshot("categorization_rule", rule),
         request_id=context.request_id,
     )
+    # Archiving always removes the rule from the deterministic set. An already-archived rule cannot
+    # reach this point because the lookup excludes soft-deleted rows and raises 404 instead.
+    bump_rule_set(control)
     await session.commit()
     await session.refresh(rule)
     return rule
@@ -317,6 +370,7 @@ async def restore_rule(
     rule_id: uuid.UUID,
     version: int,
 ) -> CategorizationRule:
+    control = await lock_rule_set_for_mutation(session, context.workspace.id)
     rule = await repository.get_rule(
         session,
         context.workspace.id,
@@ -328,6 +382,8 @@ async def restore_rule(
         raise _not_found()
     _check_version(rule, version)
     if rule.deleted_at is None:
+        # Restoring an already-current rule is a no-op: no audit entry, no rule version bump and
+        # no rule-set revision bump.
         return rule
     await _validate_references(
         session,
@@ -355,6 +411,8 @@ async def restore_rule(
         after_data=snapshot("categorization_rule", rule),
         request_id=context.request_id,
     )
+    # A restored rule rejoins the deterministic set.
+    bump_rule_set(control)
     await session.commit()
     await session.refresh(rule)
     return rule
@@ -384,8 +442,10 @@ async def match_transaction(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     transaction: FinancialTransaction,
+    *,
+    refresh: bool = False,
 ) -> CategorizationMatch | None:
-    for rule in await repository.active_rules(session, workspace_id):
+    for rule in await repository.active_rules(session, workspace_id, refresh=refresh):
         if not _matches(rule, transaction):
             continue
         category = await category_repository.get_category(session, workspace_id, rule.category_id)
@@ -416,12 +476,26 @@ async def preview_transaction(
     return transaction, await match_transaction(session, workspace_id, transaction)
 
 
-async def _lock_current_match(
+async def _lock_proposed_match(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     transaction: FinancialTransaction,
     match: CategorizationMatch,
 ) -> None:
+    """Pin the proposed rule row and prove it is still the deterministic first valid match.
+
+    Must be called while the workspace rule-set control is held ``FOR SHARE``. Two things are
+    checked, and both are needed:
+
+    * the proposed rule row itself is unchanged and still matches — this is the v0.11 guarantee;
+    * recomputing the deterministic first match still yields the same rule, rule version and
+      category — this is what catches a rule that was created, restored, activated or reprioritized
+      into a higher-priority position after the optimistic preview.
+
+    The rule row is taken ``FOR SHARE`` rather than ``FOR UPDATE``: apply never writes to the rule,
+    so several applies may pin the same rule at once, while mutations are already excluded by the
+    exclusive rule-set gate they must take first.
+    """
     matched_version = match.rule.version
     matched_category_id = match.category.id
     current_rule = await repository.get_rule(
@@ -429,7 +503,7 @@ async def _lock_current_match(
         workspace_id,
         match.rule.id,
         include_deleted=True,
-        for_update=True,
+        for_share=True,
     )
     if (
         current_rule is None
@@ -438,6 +512,14 @@ async def _lock_current_match(
         or not current_rule.is_active
         or current_rule.category_id != matched_category_id
         or not _matches(current_rule, transaction)
+    ):
+        raise _rule_changed_during_apply()
+    confirmed = await match_transaction(session, workspace_id, transaction, refresh=True)
+    if (
+        confirmed is None
+        or confirmed.rule.id != match.rule.id
+        or confirmed.rule.version != matched_version
+        or confirmed.category.id != matched_category_id
     ):
         raise _rule_changed_during_apply()
 
@@ -470,7 +552,15 @@ async def apply_to_transaction(
             applied=False,
             reason="already_categorized",
         )
-    await _lock_current_match(
+    # Lock order: rule-set control -> categorization rule -> financial-period/transaction locks.
+    # The shared rule-set lock is held until the transaction mutation below commits, so a rule
+    # mutation cannot slip a higher-priority match in between the proof and the write.
+    await repository.get_or_create_rule_set_control(
+        session,
+        context.workspace.id,
+        for_share=True,
+    )
+    await _lock_proposed_match(
         session,
         context.workspace.id,
         transaction,
