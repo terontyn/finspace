@@ -129,11 +129,14 @@ jobs:
           BEFORE=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM workspaces;')
           (cd backend && alembic -c alembic.ini upgrade 0014_categorization_previews)
           AFTER=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM workspaces;')
-          CONTROLS=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM categorization_rule_set_controls;')
-          echo "workspaces_before=$BEFORE workspaces_after=$AFTER rule_set_controls=$CONTROLS"
+          PREVIEWS=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM categorization_previews;')
+          ITEMS=$(PGPASSWORD=finspace psql -h 127.0.0.1 -U finspace -d main_schema_test -Atc 'SELECT count(*) FROM categorization_preview_items;')
+          echo "workspaces_before=$BEFORE workspaces_after=$AFTER previews=$PREVIEWS items=$ITEMS"
+          # Existing workspace rows survive, and 0014 introduces empty preview storage only.
           test "$BEFORE" = "$AFTER"
           test "$AFTER" = "1"
-          test "$CONTROLS" = "1"
+          test "$PREVIEWS" = "0"
+          test "$ITEMS" = "0"
 
       - name: Focused bulk preview suite
         working-directory: backend
