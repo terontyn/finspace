@@ -24,7 +24,7 @@ from app.schemas.transactions import (
     TransactionUpdate,
 )
 from app.services import payees as payee_service
-from app.services.audit import record_audit, snapshot
+from app.services.audit import AuditCause, record_audit, snapshot
 from app.services.financial_period_guard import (
     assert_dates_open,
     get_or_create_control,
@@ -282,6 +282,7 @@ async def update_transaction(
     *,
     commit: bool = True,
     audit_source: str = "api",
+    audit_cause: AuditCause | None = None,
 ) -> FinancialTransaction:
     control = await get_or_create_control(session, context.workspace.id, for_update=True)
     transaction = await repository.get_transaction(
@@ -372,6 +373,7 @@ async def update_transaction(
         after_data=snapshot("transaction", transaction),
         request_id=context.request_id,
         source=audit_source,
+        cause=audit_cause,
     )
     await enqueue_entity(
         session,

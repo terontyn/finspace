@@ -21,7 +21,12 @@ from app.schemas.categorization_rules import (
 )
 from app.services import categorization_executor as executor
 from app.services import payees as payee_service
-from app.services.audit import record_audit, snapshot
+from app.services.audit import (
+    CAUSE_SOURCE_SINGLE_APPLY,
+    categorization_cause,
+    record_audit,
+    snapshot,
+)
 from app.services.categorization_matcher import (
     MatchCandidate,
     category_compatible,
@@ -507,6 +512,10 @@ async def apply_to_transaction(
             rule_id=match.rule.id,
             rule_version=match.rule.version,
             category_id=match.category.id,
+            audit_cause=categorization_cause(
+                match.rule.id,
+                source=CAUSE_SOURCE_SINGLE_APPLY,
+            ),
         ),
         commit=True,
     )

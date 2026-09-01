@@ -41,6 +41,7 @@ from app.repositories import categorization_previews as preview_repository
 from app.schemas.categorization_apply import CategorizationApplyRequest
 from app.services import categorization_executor as executor
 from app.services import categorization_previews as preview_service
+from app.services.audit import CAUSE_SOURCE_BULK_APPLY, categorization_cause
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,7 @@ async def _process_item(
     context: RequestContext,
     *,
     operation_id: uuid.UUID,
+    preview_id: uuid.UUID,
     sequence: int,
     item: CategorizationPreviewItem | None,
     item_id: uuid.UUID,
@@ -244,6 +246,12 @@ async def _process_item(
             category_id=item.category_id,
             category_version=item.category_version,
             rule_set_version=rule_set_version,
+            audit_cause=categorization_cause(
+                item.rule_id,
+                source=CAUSE_SOURCE_BULK_APPLY,
+                preview_id=preview_id,
+                operation_id=operation_id,
+            ),
         ),
         # The mutation and the terminal result must land in one commit, so the executor never
         # commits on its own here.
@@ -408,6 +416,7 @@ async def apply_preview_items(
                     session,
                     context,
                     operation_id=operation_id,
+                    preview_id=preview_id,
                     sequence=sequence,
                     item=None,
                     item_id=item_id,
@@ -421,6 +430,7 @@ async def apply_preview_items(
                     session,
                     context,
                     operation_id=operation_id,
+                    preview_id=preview_id,
                     sequence=sequence,
                     item=items.get(item_id),
                     item_id=item_id,

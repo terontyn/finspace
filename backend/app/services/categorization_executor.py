@@ -43,6 +43,7 @@ from app.repositories import categorization_rules as rule_repository
 from app.repositories import transactions as transaction_repository
 from app.schemas.transactions import TransactionUpdate
 from app.services import transactions as transaction_service
+from app.services.audit import AuditCause
 from app.services.categorization_matcher import category_compatible, prepare_rule_set
 from app.services.financial_period_guard import get_or_create_control
 
@@ -106,6 +107,10 @@ class ApplyExpectation:
     category_id: uuid.UUID
     category_version: int | None = None
     rule_set_version: int | None = None
+    # Why this apply is happening. NOT an expectation: it is never revalidated, it is carried
+    # verbatim to the audit entry. It rides here rather than in a new ``execute_apply`` keyword
+    # so the executor signature stays exactly what the A1/A3 concurrency tests patch.
+    audit_cause: AuditCause | None = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +280,9 @@ async def execute_apply(
             ),
             commit=commit,
             audit_source="api",
+            # Causation rides the one authoritative mutation path, so single and bulk cannot
+            # drift apart and no second audit writer exists.
+            audit_cause=expectation.audit_cause,
         )
     except ApiError as error:
         if error.code == "MONTH_CLOSED":

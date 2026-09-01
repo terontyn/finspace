@@ -22,6 +22,11 @@ class AuditLog(Base):
     after_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     source: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Generic mutation cause (Stage B). Nullable: most mutations have no cause.
+    # Deliberately not a foreign key, so historical evidence survives rule deletion.
+    cause_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    cause_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    cause_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

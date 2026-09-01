@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -7,6 +8,41 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.audit import AuditLog
+
+# Stable machine-readable cause vocabulary. Never store human prose here.
+CAUSE_CATEGORIZATION_RULE = "categorization_rule"
+CAUSE_SOURCE_SINGLE_APPLY = "single_apply"
+CAUSE_SOURCE_BULK_APPLY = "bulk_apply"
+
+
+@dataclass(frozen=True)
+class AuditCause:
+    """Why a mutation happened, in a form the audit log can store generically.
+
+    ``cause_id`` is immutable UUID evidence: it is recorded, never resolved against a live row, so
+    the audit entry stays readable after the causing entity is archived or hard-deleted.
+    """
+
+    cause_type: str
+    cause_id: uuid.UUID
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def categorization_cause(
+    rule_id: uuid.UUID,
+    *,
+    source: str,
+    preview_id: uuid.UUID | None = None,
+    operation_id: uuid.UUID | None = None,
+) -> AuditCause:
+    """Build the cause for a categorization-driven transaction mutation."""
+    metadata: dict[str, Any] = {"source": source}
+    if preview_id is not None:
+        metadata["preview_id"] = str(preview_id)
+    if operation_id is not None:
+        metadata["operation_id"] = str(operation_id)
+    return AuditCause(cause_type=CAUSE_CATEGORIZATION_RULE, cause_id=rule_id, metadata=metadata)
+
 
 AUDIT_FIELDS: dict[str, tuple[str, ...]] = {
     "account": (
@@ -166,6 +202,7 @@ async def record_audit(
     after_data: dict[str, Any] | None,
     request_id: str,
     source: str = "api",
+    cause: AuditCause | None = None,
 ) -> AuditLog:
     entry = AuditLog(
         workspace_id=workspace_id,
@@ -177,6 +214,9 @@ async def record_audit(
         after_data=after_data,
         request_id=request_uuid(request_id),
         source=source,
+        cause_type=None if cause is None else cause.cause_type,
+        cause_id=None if cause is None else cause.cause_id,
+        cause_metadata=None if cause is None else (cause.metadata or None),
     )
     session.add(entry)
     await session.flush()
