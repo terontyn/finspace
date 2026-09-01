@@ -39,6 +39,7 @@ class PreviewCandidate:
 def candidate_filters(
     workspace_id: uuid.UUID,
     *,
+    import_batch_id: uuid.UUID | None,
     occurred_from: datetime | None,
     occurred_to: datetime | None,
     account_id: uuid.UUID | None,
@@ -58,6 +59,8 @@ def candidate_filters(
         FinancialTransaction.deleted_at.is_(None),
         FinancialTransaction.category_id.is_(None),
     ]
+    if import_batch_id is not None:
+        filters.append(FinancialTransaction.import_batch_id == import_batch_id)
     if occurred_from is not None:
         filters.append(FinancialTransaction.occurred_at >= occurred_from)
     if occurred_to is not None:

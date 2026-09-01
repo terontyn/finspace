@@ -26,15 +26,17 @@ import { TransactionsScreen } from "@/components/screens/transactions-screen";
 import { AppShell } from "@/components/shell/app-shell";
 import type { AppScreen } from "@/components/shell/navigation";
 import { ApiClientError } from "@/lib/api-client";
+import type { CategorizationReviewImportScope } from "@/lib/categorization-review-scope";
 
 interface FinanceAppProps {
   accountId?: string;
+  categorizationReviewScope?: CategorizationReviewImportScope;
   initialTransactionAccountId?: string;
   openTransactionForm?: boolean;
   screen: AppScreen;
 }
 
-export function FinanceApp({ accountId, initialTransactionAccountId, openTransactionForm = false, screen }: FinanceAppProps) {
+export function FinanceApp({ accountId, categorizationReviewScope, initialTransactionAccountId, openTransactionForm = false, screen }: FinanceAppProps) {
   const auth = useAuth();
   const [error, setError] = useState<string | null>(null);
 
@@ -79,7 +81,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       {screen === "reports" && <ReportsScreen onError={showError} timezone={auth.session.workspace.timezone} />}
       {screen === "payees" && <PayeesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "rules" && <CategorizationRulesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
-      {screen === "rules-review" && <CategorizationReviewScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
+      {screen === "rules-review" && <CategorizationReviewScreen importScope={categorizationReviewScope ?? { kind: "none" }} onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "goals" && <GoalsScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} />}
       {screen === "settings" && <ComingSoonScreen description="Настройки пространства будут перенесены после завершения интеграции рабочих финансовых экранов." title="Настройки" />}
     </AppShell>

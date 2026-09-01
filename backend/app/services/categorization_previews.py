@@ -142,6 +142,7 @@ async def _resolve_selection(
         )
     filters = repository.candidate_filters(
         workspace_id,
+        import_batch_id=selection.import_batch_id,
         occurred_from=selection.occurred_from,
         occurred_to=selection.occurred_to,
         account_id=selection.account_id,

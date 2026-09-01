@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CategorizationApplyResults } from "@/components/screens/categorization-apply-results";
@@ -11,6 +12,7 @@ import {
 } from "@/components/screens/categorization-review-filters";
 import { CategorizationReviewTable } from "@/components/screens/categorization-review-table";
 import { ApiClientError, apiClient, type WorkspaceRole } from "@/lib/api-client";
+import type { CategorizationReviewImportScope } from "@/lib/categorization-review-scope";
 import {
   MAX_APPLY_ITEMS,
   REVIEW_PAGE_SIZE,
@@ -32,6 +34,7 @@ import type {
 import type { Account, Paged, Payee } from "@/types/finance";
 
 interface CategorizationReviewScreenProps {
+  importScope?: CategorizationReviewImportScope;
   onError: (error: unknown) => void;
   role: WorkspaceRole | null;
   roleLoading: boolean;
@@ -57,8 +60,12 @@ function isAmbiguous(error: unknown): boolean {
   return error instanceof ApiClientError && error.status === 0;
 }
 
-function buildSelection(filters: ReviewFilters): CategorizationPreviewFilterSelection {
+function buildSelection(
+  filters: ReviewFilters,
+  importScope: CategorizationReviewImportScope,
+): CategorizationPreviewFilterSelection {
   const selection: CategorizationPreviewFilterSelection = { mode: "filter" };
+  if (importScope.kind === "valid") selection.import_batch_id = importScope.importBatchId;
   if (filters.occurredFrom) selection.occurred_from = `${filters.occurredFrom}T00:00:00Z`;
   if (filters.occurredTo) selection.occurred_to = `${filters.occurredTo}T23:59:59Z`;
   if (filters.accountId) selection.account_id = filters.accountId;
@@ -70,6 +77,7 @@ function buildSelection(filters: ReviewFilters): CategorizationPreviewFilterSele
 }
 
 export function CategorizationReviewScreen({
+  importScope = { kind: "none" },
   onError,
   role,
   roleLoading,
@@ -145,7 +153,7 @@ export function CategorizationReviewScreen({
   );
 
   const createPreview = useCallback(async () => {
-    if (creating) return;
+    if (creating || importScope.kind === "invalid") return;
     const token = generation.current + 1;
     generation.current = token;
     setCreating(true);
@@ -159,7 +167,7 @@ export function CategorizationReviewScreen({
     setTotal(0);
     setOffset(0);
     try {
-      const created = await createCategorizationPreview(buildSelection(filters));
+      const created = await createCategorizationPreview(buildSelection(filters, importScope));
       if (token !== generation.current) return;
       setHeader(created);
       setStage("review");
@@ -173,7 +181,7 @@ export function CategorizationReviewScreen({
       setError(toUiError(createError));
     }
     if (token === generation.current) setCreating(false);
-  }, [creating, filters, loadItems]);
+  }, [creating, filters, importScope, loadItems]);
 
   const eligible = useMemo(() => items.filter((item) => item.status === "matched"), [items]);
 
@@ -296,6 +304,25 @@ export function CategorizationReviewScreen({
         </div>
       </header>
 
+      {importScope.kind === "valid" ? (
+        <div className="notice notice--info" role="status">
+          <span>Только операции этого импорта</span>
+          <Link className="text-button" href="/rules/review">
+            Снять ограничение импорта
+          </Link>
+        </div>
+      ) : null}
+
+      {importScope.kind === "invalid" ? (
+        <div className="categorization-inline-error" role="alert">
+          <strong>Ограничение по импорту задано неверно.</strong>
+          <span>Проверка не запущена, чтобы случайно не перейти к операциям всех импортов.</span>
+          <Link className="text-button" href="/rules/review">
+            Открыть общую проверку
+          </Link>
+        </div>
+      ) : null}
+
       {!roleLoading && role === "viewer" ? (
         <div className="notice notice--info" role="status">
           <span>У вас доступ только на чтение.</span>
@@ -311,6 +338,9 @@ export function CategorizationReviewScreen({
         <div className="categorization-inline-error" role="alert">
           <strong>{error.message}</strong>
           <code>{error.code}</code>
+          {error.code === "CATEGORIZATION_PREVIEW_LIMIT_EXCEEDED" ? (
+            <span>Слишком много операций. Сузьте период или другие фильтры и повторите.</span>
+          ) : null}
           {error.requestId ? <small>Запрос {error.requestId}</small> : null}
         </div>
       ) : null}
@@ -326,7 +356,7 @@ export function CategorizationReviewScreen({
         </div>
       ) : null}
 
-      {stage === "select" || !header ? (
+      {importScope.kind !== "invalid" && (stage === "select" || !header) ? (
         <CategorizationReviewFilters
           accounts={accounts}
           busy={creating}

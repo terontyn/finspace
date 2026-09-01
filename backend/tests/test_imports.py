@@ -1,12 +1,25 @@
+import asyncio
 import io
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
+from sqlalchemy import select
 
 from app.core.config import settings
+from app.db.models.imports import ImportBatch, ImportRow
+from app.db.models.users import WorkspaceMember
+from app.db.session import AsyncSessionFactory
+from app.services import (
+    categorization_apply,
+    categorization_executor,
+    categorization_matcher,
+    categorization_previews,
+    categorization_rules,
+)
 
 PASSWORD = "correct horse battery staple"
 
@@ -101,6 +114,145 @@ def _close_july(client: TestClient, headers: dict[str, str]) -> None:
         },
     )
     assert confirmed.status_code == 200, confirmed.text
+
+
+async def _seed_ready_mixed_type_import(
+    workspace_id: str,
+    account_id: str,
+    target_account_id: str,
+    category_id: str,
+) -> str:
+    async with AsyncSessionFactory() as session:
+        member = await session.scalar(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == uuid.UUID(workspace_id))
+            .order_by(WorkspaceMember.created_at)
+        )
+        assert member is not None
+        batch = ImportBatch(
+            workspace_id=uuid.UUID(workspace_id),
+            created_by=member.user_id,
+            filename="stage-d-counts.csv",
+            stored_filename=f"{uuid.uuid4().hex}.csv",
+            file_type="csv",
+            file_size=1,
+            file_sha256=uuid.uuid4().hex + uuid.uuid4().hex,
+            status="ready",
+            summary={"total": 5, "valid": 5, "invalid": 0, "duplicate": 0, "skipped": 0},
+        )
+        session.add(batch)
+        await session.flush()
+        rows = [
+            ("expense", category_id, None),
+            ("expense", None, None),
+            ("transfer", None, target_account_id),
+            ("adjustment", None, None),
+            ("adjustment", None, None),
+        ]
+        for index, (transaction_type, row_category_id, row_target_id) in enumerate(rows, start=1):
+            session.add(
+                ImportRow(
+                    batch_id=batch.id,
+                    source_row_number=index + 1,
+                    raw_data={"row": index},
+                    normalized_data={
+                        "workspace_id": workspace_id,
+                        "occurred_at": datetime(2026, 8, index, 12, 0, tzinfo=UTC).isoformat(),
+                        "transaction_type": transaction_type,
+                        "amount": "10.0000",
+                        "currency": "RUB",
+                        "account_id": account_id,
+                        "target_account_id": row_target_id,
+                        "category_id": row_category_id,
+                        "counterparty": f"Stage D {transaction_type}",
+                        "description": None,
+                        "comment": None,
+                        "status": "confirmed",
+                        "external_id": None,
+                    },
+                    status="valid",
+                )
+            )
+        await session.commit()
+        return str(batch.id)
+
+
+def test_import_commit_persists_factual_review_counts_without_categorization_calls(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers, workspace_id = _auth(client, monkeypatch)
+    account_name, category_name = _references(client, headers)
+    account = next(
+        item
+        for item in client.get("/api/v1/accounts?limit=200", headers=headers).json()["items"]
+        if item["name"] == account_name
+    )
+    category = next(
+        item
+        for item in client.get("/api/v1/categories?limit=200", headers=headers).json()["items"]
+        if item["name"] == category_name
+    )
+    target = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={
+            "name": f"Stage D target {uuid.uuid4().hex[:8]}",
+            "account_type": "debit_card",
+            "currency": "RUB",
+            "opening_balance": "0.0000",
+            "opening_balance_at": "2026-01-01T00:00:00Z",
+        },
+    ).json()
+    batch_id = asyncio.run(
+        _seed_ready_mixed_type_import(
+            workspace_id,
+            account["id"],
+            target["id"],
+            category["id"],
+        )
+    )
+
+    def categorization_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("categorization service called during import commit")
+
+    monkeypatch.setattr(categorization_matcher, "prepare_rule_set", categorization_must_not_run)
+    monkeypatch.setattr(categorization_previews, "create_preview", categorization_must_not_run)
+    monkeypatch.setattr(categorization_rules, "apply_to_transaction", categorization_must_not_run)
+    monkeypatch.setattr(categorization_apply, "apply_preview_items", categorization_must_not_run)
+    monkeypatch.setattr(categorization_executor, "execute_apply", categorization_must_not_run)
+
+    key = str(uuid.uuid4())
+    committed = client.post(
+        f"/api/v1/imports/{batch_id}/commit",
+        headers={**headers, "X-Idempotency-Key": key},
+        json={"confirm": True},
+    )
+    assert committed.status_code == 200, committed.text
+    assert committed.json()["affected_transactions"] == 5
+    summary = committed.json()["batch"]["summary"]
+    assert summary["affected_transactions"] == 5
+    assert summary["uncategorized_at_commit"] == 4
+    assert summary["review_candidates_at_commit"] == 3
+
+    replayed = client.post(
+        f"/api/v1/imports/{batch_id}/commit",
+        headers={**headers, "X-Idempotency-Key": key},
+        json={"confirm": True},
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["batch"]["summary"] == summary
+
+    imported = [
+        item
+        for item in client.get("/api/v1/transactions?limit=200", headers=headers).json()["items"]
+        if item["source"] == "import"
+    ]
+    assert len(imported) == 5
+    categorized = next(
+        item for item in imported if item["transaction_type"] == "expense" and item["category"]
+    )
+    assert categorized["category"]["id"] == category["id"]
 
 
 def test_csv_staging_validate_commit_duplicate_and_rollback(
