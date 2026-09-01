@@ -568,16 +568,23 @@ def test_a_failing_workspace_does_not_block_later_ones_and_is_retried(
     preview = _preview(client, headers, [transaction_id])
     asyncio.run(_expire(preview["id"]))
     poisoned = uuid.UUID(identity["workspace"]["id"])
+    # Two workspaces guaranteed to sort after the poisoned one, so "later" is never empty.
+    for index in range(2):
+        _register(client, f"Prune poison follower {index}")
 
     async def all_ids() -> list[uuid.UUID]:
         async with AsyncSessionFactory() as session:
             return await preview_repository.list_workspace_ids_after(
-                session, after_id=None, limit=1000
+                session, after_id=None, limit=10000
             )
 
     ordered = asyncio.run(all_ids())
-    assert poisoned in ordered
-    later = ordered[ordered.index(poisoned) + 1 :]
+    position = ordered.index(poisoned)
+    # Start immediately before the poisoned workspace and examine a short page, so the assertion
+    # does not depend on how many workspaces the rest of the suite has created.
+    cursor = ordered[position - 1] if position else None
+    expected = ordered[position : position + 3]
+    monkeypatch.setattr(settings, "categorization_prune_max_workspaces_per_cycle", len(expected))
 
     original = worker.service.prune_workspace_previews
     attempts: list[uuid.UUID] = []
@@ -589,16 +596,16 @@ def test_a_failing_workspace_does_not_block_later_ones_and_is_retried(
         return await original(session, workspace_id, now=now, batch_size=batch_size)
 
     monkeypatch.setattr(worker.service, "prune_workspace_previews", failing)
-    result = asyncio.run(worker.run_cycle(None))
+    result = asyncio.run(worker.run_cycle(cursor))
 
     assert result.workspaces_failed == 1
-    # The cursor moved past the failure, so everything after it was still examined.
-    assert [item for item in attempts if item in later] == later
+    # The cursor moved past the failure, so every workspace after it was still examined.
+    assert attempts == expected
     assert asyncio.run(_preview_exists(preview["id"])) is True
 
     # The next rotation retries it, and with the failure gone the preview is reclaimed.
     monkeypatch.setattr(worker.service, "prune_workspace_previews", original)
-    retried = asyncio.run(worker.run_cycle(None))
+    retried = asyncio.run(worker.run_cycle(cursor))
     assert retried.workspaces_failed == 0
     assert asyncio.run(_preview_exists(preview["id"])) is False
 
