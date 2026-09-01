@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { CategorizationApplyResults } from "@/components/screens/categorization-apply-results";
+import { CategorizationApplyHistory } from "@/components/screens/categorization-apply-history";
 import { CategorizationPreviewSummary } from "@/components/screens/categorization-preview-summary";
 import {
   CategorizationReviewFilters,
@@ -183,6 +184,32 @@ export function CategorizationReviewScreen({
     if (token === generation.current) setCreating(false);
   }, [creating, filters, importScope, loadItems]);
 
+  const createPreviewFromHistory = useCallback(
+    async (transactionIds: string[]) => {
+      if (transactionIds.length === 0) return;
+      const token = generation.current + 1;
+      generation.current = token;
+      setError(null);
+      setExpired(false);
+      setAmbiguous(false);
+      setApplyResponse(null);
+      setAttempt(null);
+      setSelected(new Set());
+      setItems([]);
+      setTotal(0);
+      setOffset(0);
+      const created = await createCategorizationPreview({
+        mode: "ids",
+        transaction_ids: transactionIds,
+      });
+      if (token !== generation.current) return;
+      setHeader(created);
+      setStage("review");
+      await loadItems(created.id, 0, token);
+    },
+    [loadItems],
+  );
+
   const eligible = useMemo(() => items.filter((item) => item.status === "matched"), [items]);
 
   const resultsById = useMemo(() => {
@@ -306,7 +333,9 @@ export function CategorizationReviewScreen({
 
       {importScope.kind === "valid" ? (
         <div className="notice notice--info" role="status">
-          <span>Только операции этого импорта</span>
+          <span>
+            Только операции этого импорта. История применений доступна отдельно в общей проверке.
+          </span>
           <Link className="text-button" href="/rules/review">
             Снять ограничение импорта
           </Link>
@@ -495,6 +524,13 @@ export function CategorizationReviewScreen({
             </button>
           </div>
         </>
+      ) : null}
+
+      {importScope.kind === "none" ? (
+        <CategorizationApplyHistory
+          onError={onError}
+          onReReview={createPreviewFromHistory}
+        />
       ) : null}
     </section>
   );

@@ -2,6 +2,9 @@ import { apiClient } from "./api-client";
 
 import type {
   CategorizationApplyResponse,
+  CategorizationApplyHistoryDetail,
+  CategorizationApplyHistoryOperationPage,
+  CategorizationApplyHistoryResult,
   CategorizationApplyStatus,
   CategorizationPreviewHeader,
   CategorizationPreviewItemPage,
@@ -18,6 +21,7 @@ export const MAX_ITEMS_PAGE = 200;
 export const REVIEW_PAGE_SIZE = 50;
 
 const PREVIEWS = "/api/v1/categorization-previews";
+const APPLY_OPERATIONS = "/api/v1/categorization-apply-operations";
 
 // --- typed API client -------------------------------------------------------
 
@@ -51,6 +55,51 @@ export function applyCategorizationPreview(
     { item_ids: itemIds },
     { "X-Idempotency-Key": idempotencyKey },
   );
+}
+
+export function fetchCategorizationApplyHistory({
+  limit,
+  offset,
+}: {
+  limit: number;
+  offset: number;
+}): Promise<CategorizationApplyHistoryOperationPage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return apiClient.get<CategorizationApplyHistoryOperationPage>(`${APPLY_OPERATIONS}?${query}`);
+}
+
+export function fetchCategorizationApplyHistoryDetail(
+  operationId: string,
+  { limit, offset }: { limit: number; offset: number },
+): Promise<CategorizationApplyHistoryDetail> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return apiClient.get<CategorizationApplyHistoryDetail>(
+    `${APPLY_OPERATIONS}/${operationId}?${query}`,
+  );
+}
+
+/** The exact persisted terminal outcomes that may be proposed for a new current preview. */
+export const REREVIEW_ELIGIBLE_STATUSES = new Set<CategorizationApplyStatus>([
+  "transaction_changed",
+  "rule_changed",
+  "category_changed",
+  "no_match",
+  "failed",
+]);
+
+/** Preserve historical sequence order, exclude nulls/ineligible rows, and deduplicate defensively. */
+export function reReviewTransactionIds(
+  results: readonly CategorizationApplyHistoryResult[],
+): string[] {
+  const seen = new Set<string>();
+  return [...results]
+    .sort((left, right) => left.sequence - right.sequence)
+    .flatMap((result) => {
+      const id = result.transaction_id;
+      if (!id || !REREVIEW_ELIGIBLE_STATUSES.has(result.status) || seen.has(id)) return [];
+      seen.add(id);
+      return [id];
+    });
 }
 
 // --- idempotent apply attempts ---------------------------------------------
