@@ -60,6 +60,14 @@ import type { BudgetCategoryForecast } from "@/types/budget-forecast";
 import type { Category, Paged } from "@/types/finance";
 
 interface BudgetScreenProps {
+  /**
+   * Reference instant used to resolve "the current month".
+   *
+   * Production never passes it, so the screen keeps reading the wall clock exactly as before. It
+   * exists so tests can state the reference date they exercise instead of inheriting the machine's
+   * real month, which silently changed their meaning at every month boundary.
+   */
+  now?: Date;
   onError: (error: unknown) => void;
   preferredCurrency: string;
   timezone: string;
@@ -234,8 +242,12 @@ function HistoryDrawer({
   return <EntityDrawer ariaLabel="История изменений бюджета" eyebrow="Immutable revisions" onClose={onClose} subtitle={`${group.currency} · ${budgetPeriodLabel(group.period)}`} title="История изменений"><div className="budget-history-list">{error ? <div className="notice notice--error" role="alert">{error}</div> : null}{items.map((revision) => <article key={revision.id}><span className="budget-history-number">#{revision.revision_number}</span><div><strong>{budgetRevisionLabels[revision.action]}</strong><span>{new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short" }).format(new Date(revision.created_at))}</span><small>actor: {revision.actor_user_id}</small></div></article>)}{!items.length && !loading ? <div className="empty-state"><strong>История пуста</strong><span>Revision появится после первой команды.</span></div> : null}{loading ? <div className="budget-history-loading">Загружаем revisions…</div> : null}{hasMore ? <button className="secondary-button" disabled={loading} onClick={onLoadMore} type="button">Загрузить ещё</button> : null}</div></EntityDrawer>;
 }
 
-export function BudgetScreen({ onError, preferredCurrency, timezone }: BudgetScreenProps) {
-  const todayPeriod = useMemo(() => currentBudgetPeriod(timezone), [timezone]);
+export function BudgetScreen({ now, onError, preferredCurrency, timezone }: BudgetScreenProps) {
+  const nowTime = now?.getTime();
+  const todayPeriod = useMemo(
+    () => currentBudgetPeriod(timezone, nowTime === undefined ? new Date() : new Date(nowTime)),
+    [nowTime, timezone],
+  );
   const [period, setPeriod] = useState(todayPeriod);
   const [month, setMonth] = useState<Awaited<ReturnType<typeof getBudgetMonth>> | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);

@@ -269,7 +269,20 @@ async def execute_rule(
     initiated_by: uuid.UUID | None,
     request_id: str,
     trigger_type: str,
+    now: datetime | None = None,
 ) -> tuple[RecurringRuleExecution, bool]:
+    """Execute one due occurrence of a recurring rule.
+
+    ``now`` is the reference instant for "the present": the due-window guard, the execution
+    timestamps and the advanced cursor. Every production caller omits it and gets
+    ``datetime.now(UTC)``, exactly as before. It exists so tests can state the moment they are
+    exercising rather than inheriting the machine's wall clock, which silently changed what a
+    "next occurrence still inside this month" assertion meant at every month boundary.
+
+    It must be timezone-aware; it is normalised to UTC here so callers cannot introduce a naive
+    datetime into cursor arithmetic.
+    """
+    reference_now = datetime.now(UTC) if now is None else now.astimezone(UTC)
     scheduled = scheduled_for.astimezone(UTC).replace(microsecond=0)
     run, duplicate = await automation_runs.begin_run(
         session,
@@ -310,7 +323,7 @@ async def execute_rule(
         if (
             expected is None
             or scheduled != expected
-            or expected > datetime.now(UTC)
+            or expected > reference_now
             or rule.deleted_at is not None
             or not rule.is_active
         ):
@@ -324,7 +337,7 @@ async def execute_rule(
         scheduled_for=scheduled,
         automation_run_id=run.id,
         status="created",
-        created_at=datetime.now(UTC),
+        created_at=reference_now,
     )
     session.add(execution)
     try:
@@ -353,7 +366,7 @@ async def execute_rule(
             )
         except ApiError as exc:
             execution.status = "failed"
-            execution.completed_at = datetime.now(UTC)
+            execution.completed_at = reference_now
             automation_runs.fail_run(run, exc.code, exc.message)
             await record_audit(
                 session,
@@ -379,16 +392,15 @@ async def execute_rule(
             run,
             {"status": execution.status, "transaction_id": str(transaction.id)},
         )
-    now = datetime.now(UTC)
-    execution.completed_at = now
+    execution.completed_at = reference_now
     rule.last_run_at = scheduled
     rule.next_run_at = recurrence.next_occurrence(
         rule.schedule_rrule,
         rule.timezone,
-        after=max(now, scheduled),
+        after=max(reference_now, scheduled),
         anchor=rule.created_at,
     )
-    rule.updated_at = now
+    rule.updated_at = reference_now
     await record_audit(
         session,
         workspace_id=rule.workspace_id,

@@ -10,6 +10,19 @@ import type { Category, Paged } from "@/types/finance";
 
 import { BudgetScreen } from "./budget-screen";
 
+/**
+ * The reference instant every Budget screen test is written against.
+ *
+ * All fixtures below describe August 2026, so the screen must resolve "the current month" to
+ * 2026-08 for those expectations to mean anything. Pinning it here makes the suite independent of
+ * the machine's real date: before this, every assertion silently changed meaning on 1 September.
+ *
+ * 2026-08-20T09:00:00Z is 14:00 on 20 August in Asia/Yekaterinburg (UTC+5), the workspace timezone
+ * used by the harness, so the instant is unambiguously mid-August in both UTC and workspace-local
+ * terms.
+ */
+const REFERENCE_NOW = new Date("2026-08-20T09:00:00Z");
+
 const categoryBase = {
   color: "#00d68f",
   created_at: "2026-01-01T00:00:00Z",
@@ -194,6 +207,8 @@ interface HarnessOptions {
   groups?: BudgetGroup[];
   history?: (path: string) => Promise<BudgetRevisionPage>;
   month?: (read: number, path: string) => BudgetMonth | Promise<BudgetMonth>;
+  /** Override the reference instant to exercise a different "current month". */
+  now?: Date;
   onRequest?: (path: string, init: RequestInit) => Promise<unknown>;
   preferredCurrency?: string;
   role?: string;
@@ -234,7 +249,7 @@ async function createHarness(options: HarnessOptions = {}) {
     return options.onRequest(path, init) as Promise<T>;
   }) as typeof apiClient.request;
   await act(async () => {
-    renderer = create(<BudgetScreen onError={(error) => errors.push(error)} preferredCurrency={options.preferredCurrency ?? "RUB"} timezone="Asia/Yekaterinburg"/>);
+    renderer = create(<BudgetScreen now={options.now ?? REFERENCE_NOW} onError={(error) => errors.push(error)} preferredCurrency={options.preferredCurrency ?? "RUB"} timezone="Asia/Yekaterinburg"/>);
     await settle();
   });
   if (!renderer) throw new Error("Budget renderer was not created");
@@ -949,4 +964,26 @@ test("failed forecast refresh keeps prior data only with an explicit stale warni
     assert.match(text, /Показан предыдущий успешный расчёт/);
     assert.match(text, /сетевой ошибки/);
   } finally { await harness.cleanup(); }
+});
+
+
+test("the current month follows the injected reference instant, not the machine clock", async () => {
+  // Same calendar day in UTC, either side of midnight in Asia/Yekaterinburg (UTC+5). The screen
+  // must resolve the current month from the workspace timezone applied to the reference instant,
+  // so this pins both the determinism and the timezone semantics in one place: were the month
+  // derived in UTC instead, both cases would report August.
+  const cases = [
+    { expectedLabel: /август 2026 г\./i, expectedPeriod: "2026-08", now: new Date("2026-08-31T18:00:00Z") },
+    { expectedLabel: /сентябрь 2026 г\./i, expectedPeriod: "2026-09", now: new Date("2026-08-31T19:00:00Z") },
+  ];
+  for (const { expectedLabel, expectedPeriod, now } of cases) {
+    const harness = await createHarness({ month: () => budgetMonth([]), now });
+    try {
+      assert.equal(
+        harness.budgetPaths[0],
+        `/api/v1/budgets/${expectedPeriod}?include_deleted=true`,
+      );
+      assert.match(renderedText(harness.renderer.toJSON()), expectedLabel);
+    } finally { await harness.cleanup(); }
+  }
 });

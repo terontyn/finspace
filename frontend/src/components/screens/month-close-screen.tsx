@@ -18,12 +18,20 @@ import type {
 } from "@/types/automations";
 import type { Currency, Money } from "@/types/finance";
 
-const previousMonth = (() => {
-  const value = new Date();
+/**
+ * The month before the reference instant, in local calendar terms.
+ *
+ * This used to be a module-level IIFE evaluated once at import time from the wall clock, which made
+ * the default period — and every test written against it — silently change meaning at each month
+ * boundary. Taking the instant as an argument keeps the identical result for production, which
+ * still passes the real current time.
+ */
+function monthBefore(now: Date): string {
+  const value = new Date(now.getTime());
   value.setDate(1);
   value.setMonth(value.getMonth() - 1);
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}`;
-})();
+}
 
 const statusLabels: Record<MonthClosePeriodSummary["status"], string> = {
   not_prepared: "Не подготовлен",
@@ -200,7 +208,19 @@ function MonthCloseSkeleton() {
   return <div aria-label="Загружаем закрытие месяца" className="month-close-skeleton">{Array.from({ length: 10 }, (_, index) => <i key={index}/>)}</div>;
 }
 
-export function MonthCloseScreen({ onError }: { onError: (error: unknown) => void }) {
+export function MonthCloseScreen({
+  now,
+  onError,
+}: {
+  /**
+   * Reference instant used for the default period and the month picker's upper bound.
+   * Production never passes it, so the screen keeps reading the wall clock exactly as before.
+   */
+  now?: Date;
+  onError: (error: unknown) => void;
+}) {
+  const reference = useMemo(() => (now === undefined ? new Date() : new Date(now.getTime())), [now]);
+  const previousMonth = useMemo(() => monthBefore(reference), [reference]);
   const [period, setPeriod] = useState(previousMonth);
   const [page, setPage] = useState<MonthClosurePage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -235,7 +255,9 @@ export function MonthCloseScreen({ onError }: { onError: (error: unknown) => voi
     } finally {
       setLoading(false);
     }
-  }, [onError]);
+    // previousMonth is derived from the reference instant, which production never changes, so this
+    // dependency is stable at runtime and adds no extra load.
+  }, [onError, previousMonth]);
 
   useEffect(() => {
     queueMicrotask(() => void load());
@@ -453,7 +475,7 @@ export function MonthCloseScreen({ onError }: { onError: (error: unknown) => voi
     {notice ? <div className="notice notice--warning" role="status"><span>{notice}</span><button className="text-button" onClick={() => setNotice(null)} type="button">Закрыть</button></div> : null}
 
     <div className="month-close-workspace">
-      <aside className="panel month-close-periods"><div className="panel-heading"><div><span className="kicker">Периоды</span><h2>Текущий год и история</h2></div></div><label className="month-close-picker">Выбрать месяц<input max={new Date().toISOString().slice(0, 7)} onChange={(event) => selectPeriod(event.target.value)} type="month" value={period}/></label><div className="month-close-period-list">{page?.periods.map((item) => <button aria-pressed={monthKey(item.period_month) === period} className={monthKey(item.period_month) === period ? "month-close-period month-close-period--active" : "month-close-period"} key={item.period_month} onClick={() => selectPeriod(monthKey(item.period_month))} type="button"><div><strong>{monthLabel(item.period_month)}</strong><small>{item.current_revision ? `Revision ${item.current_revision}` : item.prepared ? `Версия ${item.version}` : "Не готовился"}</small></div><span className={`month-close-status month-close-status--${item.status}`}>{statusLabels[item.status]}</span>{item.blocker_count || item.warning_count ? <small>{item.blocker_count} блок. · {item.warning_count} предупр.</small> : null}</button>)}</div>{!page?.items.length ? <div className="empty-state month-close-empty"><strong>Подготовленных месяцев нет</strong><span>Выберите завершённый период и запустите prepare.</span></div> : null}</aside>
+      <aside className="panel month-close-periods"><div className="panel-heading"><div><span className="kicker">Периоды</span><h2>Текущий год и история</h2></div></div><label className="month-close-picker">Выбрать месяц<input max={reference.toISOString().slice(0, 7)} onChange={(event) => selectPeriod(event.target.value)} type="month" value={period}/></label><div className="month-close-period-list">{page?.periods.map((item) => <button aria-pressed={monthKey(item.period_month) === period} className={monthKey(item.period_month) === period ? "month-close-period month-close-period--active" : "month-close-period"} key={item.period_month} onClick={() => selectPeriod(monthKey(item.period_month))} type="button"><div><strong>{monthLabel(item.period_month)}</strong><small>{item.current_revision ? `Revision ${item.current_revision}` : item.prepared ? `Версия ${item.version}` : "Не готовился"}</small></div><span className={`month-close-status month-close-status--${item.status}`}>{statusLabels[item.status]}</span>{item.blocker_count || item.warning_count ? <small>{item.blocker_count} блок. · {item.warning_count} предупр.</small> : null}</button>)}</div>{!page?.items.length ? <div className="empty-state month-close-empty"><strong>Подготовленных месяцев нет</strong><span>Выберите завершённый период и запустите prepare.</span></div> : null}</aside>
 
       <main className="month-close-content">
         <section className="panel month-close-selected"><div className="panel-heading"><div><span className="kicker">Выбранный период</span><h2>{monthLabel(`${period}-01`)}</h2><p>{selected ? `Backend preview · версия ${selected.version}` : "Снимок ещё не сформирован"}</p></div><span className={`month-close-status month-close-status--${periodSummary?.status ?? "not_prepared"}`}>{statusLabels[periodSummary?.status ?? "not_prepared"]}</span></div>

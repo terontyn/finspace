@@ -94,6 +94,18 @@ async def _set_rule_state(
         await session.commit()
 
 
+# The reference instant every forecast test is written against.
+#
+# All fixtures below plan and project August 2026, and a recurring rule's cursor may only advance
+# forward from "now". Before this constant existed the suite inherited the machine's wall clock, so
+# on 1 September every August occurrence was already in the past and the projections these tests
+# assert on collapsed to zero. Pinning the instant states the moment under test explicitly.
+#
+# Timezone-aware UTC on purpose: the cursor arithmetic it feeds is UTC-normalised, and a naive
+# value would be rejected there.
+REFERENCE_NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+
+
 async def _forecast(
     workspace_id: str,
     period: date,
@@ -602,6 +614,7 @@ def test_pending_draft_follows_current_period_currency_and_splits(client: TestCl
                 session,
                 rule,
                 scheduled_for=scheduled_for,
+                now=REFERENCE_NOW,
                 idempotency_key=f"moved-draft-{uuid.uuid4()}",
                 service_account_id=None,
                 initiated_by=rule.created_by,
@@ -739,6 +752,7 @@ def test_effective_recurring_transaction_is_actual_not_forecast(
                 session,
                 rule,
                 scheduled_for=scheduled_for,
+                now=REFERENCE_NOW,
                 idempotency_key=f"actual-{uuid.uuid4()}",
                 service_account_id=None,
                 initiated_by=rule.created_by,
@@ -791,6 +805,7 @@ def test_deleted_linked_transaction_is_exception_not_primary_forecast(
                 session,
                 rule,
                 scheduled_for=scheduled_for,
+                now=REFERENCE_NOW,
                 idempotency_key=f"deleted-linked-{uuid.uuid4()}",
                 service_account_id=None,
                 initiated_by=rule.created_by,
@@ -1012,6 +1027,7 @@ def test_skipped_executor_advances_cursor_and_does_not_block_later_forecast(
                 session,
                 rule,
                 scheduled_for=scheduled_for,
+                now=REFERENCE_NOW,
                 idempotency_key=f"skipped-{uuid.uuid4()}",
                 service_account_id=None,
                 initiated_by=rule.created_by,
@@ -1068,6 +1084,7 @@ def test_reminder_executor_advances_cursor_and_remains_advisory_only(
                 session,
                 rule,
                 scheduled_for=scheduled_for,
+                now=REFERENCE_NOW,
                 idempotency_key=f"reminder-{uuid.uuid4()}",
                 service_account_id=None,
                 initiated_by=rule.created_by,
@@ -1459,3 +1476,56 @@ def test_repeatable_read_snapshot_never_mixes_new_actual_with_old_schedule(
     assert new.actual.income == Decimal("10.0000")
     assert new.forecast.income == ZERO
     print("forecast_snapshot_race before=old_actual+scheduled after=new_actual+excluded")
+
+
+def test_execution_cursor_follows_the_injected_reference_instant(client: TestClient) -> None:
+    """The advanced cursor depends on the stated reference instant, not the machine clock.
+
+    Two references a month apart must move the cursor into their own month. Before ``execute_rule``
+    accepted ``now`` this came from ``datetime.now(UTC)``, so on 1 September every August occurrence
+    was already behind "now" and the August projections this suite asserts on collapsed to zero.
+    """
+    identity, headers = _register(client, "Forecast reference")
+    account, expense, _ = _create_budget_references(client, headers, "2026-08")
+    scheduled_for = datetime(2026, 8, 12, tzinfo=UTC)
+    rule_payload = _rule(
+        client,
+        headers,
+        name="Reference cursor",
+        account_id=account["id"],
+        category_id=expense["id"],
+        transaction_type="expense",
+        amount="5.0000",
+        rrule="FREQ=DAILY;BYHOUR=0;BYMINUTE=0",
+    )
+
+    async def advance(reference: datetime) -> datetime:
+        async with AsyncSessionFactory() as session:
+            rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
+            assert rule is not None
+            await recurring_rules.execute_rule(
+                session,
+                rule,
+                scheduled_for=scheduled_for,
+                idempotency_key=f"reference-{uuid.uuid4()}",
+                service_account_id=None,
+                initiated_by=rule.created_by,
+                request_id=str(uuid.uuid4()),
+                trigger_type="test",
+                now=reference,
+            )
+            assert rule.next_run_at is not None
+            advanced = rule.next_run_at
+            await session.rollback()
+            return advanced
+
+    august = asyncio.run(advance(datetime(2026, 8, 12, 12, 0, tzinfo=UTC)))
+    september = asyncio.run(advance(datetime(2026, 9, 1, 12, 0, tzinfo=UTC)))
+
+    # Each cursor lands strictly after its own reference, and inside that reference's month.
+    assert august > datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    assert august.astimezone(UTC).month == 8
+    assert september > datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    assert september.astimezone(UTC).month == 9
+    assert august < september
+    assert identity is not None
