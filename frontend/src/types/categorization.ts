@@ -78,6 +78,7 @@ export type CategorizationApplyStatus =
 /** Only the backend-supported filters. Nothing here is invented client-side. */
 export interface CategorizationPreviewFilterSelection {
   mode: "filter";
+  import_batch_id?: string;
   occurred_from?: string;
   occurred_to?: string;
   account_id?: string;

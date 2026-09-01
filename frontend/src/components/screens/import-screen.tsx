@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   importMappingTargets,
@@ -42,7 +42,8 @@ function formatSize(bytes: number): string {
 }
 
 function importSummaryHeading(batch: ImportBatch): string {
-  const count = number(batch.summary, "valid");
+  const count =
+    number(batch.summary, "affected_transactions") || number(batch.summary, "valid");
   if (batch.status === "imported") return `Импортировано операций: ${count}`;
   if (batch.status === "rolled_back") return "Импорт отменён откатом";
   if (batch.status === "cancelled") return "Batch отменён";
@@ -62,13 +63,14 @@ export function ImportScreen({ onError }: ImportScreenProps) {
   const [loading, setLoading] = useState(true);
   const [confirmed, setConfirmed] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
+  const generation = useRef(0);
 
   const loadBatches = useCallback(async () => {
     const page = await apiClient.get<Paged<ImportBatch>>("/api/v1/imports?limit=50");
     setBatches(page.items);
   }, []);
 
-  const loadRows = useCallback(async (batchId: string, filter: string) => {
+  const loadRows = useCallback(async (batchId: string, filter: string, token = generation.current) => {
     const query = filter === "all"
       ? ""
       : filter === "errors"
@@ -77,6 +79,7 @@ export function ImportScreen({ onError }: ImportScreenProps) {
           ? "?duplicate=true"
           : `?status=${filter}`;
     const page = await apiClient.get<Paged<ImportRow>>(`/api/v1/imports/${batchId}/rows${query}`);
+    if (token !== generation.current) return;
     setRows(page.items);
   }, []);
 
@@ -106,32 +109,42 @@ export function ImportScreen({ onError }: ImportScreenProps) {
   );
 
   function selectBatch(batch: ImportBatch): void {
+    const token = generation.current + 1;
+    generation.current = token;
     setActive(batch);
+    setRows([]);
     setMapping(batch.mapping?.fields ?? {});
     setLocale(batch.mapping?.locale === "en-US" ? "en-US" : "ru-RU");
     setConfirmed(false);
     setResult(null);
-    void loadRows(batch.id, rowFilter).catch(onError);
+    setBusy(false);
+    void loadRows(batch.id, rowFilter, token).catch((error) => {
+      if (token === generation.current) onError(error);
+    });
   }
 
   async function run(action: () => Promise<ImportBatch>): Promise<ImportBatch | null> {
+    const token = generation.current;
     setBusy(true);
     setResult(null);
     try {
       const next = await action();
+      if (token !== generation.current) return null;
       setActive(next);
-      await Promise.all([loadBatches(), loadRows(next.id, rowFilter)]);
+      await Promise.all([loadBatches(), loadRows(next.id, rowFilter, token)]);
       return next;
     } catch (error) {
-      onError(error);
+      if (token === generation.current) onError(error);
       return null;
     } finally {
-      setBusy(false);
+      if (token === generation.current) setBusy(false);
     }
   }
 
   async function upload(): Promise<void> {
     if (!file) return;
+    const token = generation.current + 1;
+    generation.current = token;
     setBusy(true);
     setResult(null);
     try {
@@ -139,14 +152,19 @@ export function ImportScreen({ onError }: ImportScreenProps) {
       form.set("file", file);
       form.set("force_duplicate", String(forceDuplicate));
       const batch = await apiClient.upload<ImportBatch>("/api/v1/imports", form);
+      if (token !== generation.current) return;
       setFile(null);
       setForceDuplicate(false);
-      selectBatch(batch);
-      await loadBatches();
+      setActive(batch);
+      setRows([]);
+      setMapping(batch.mapping?.fields ?? {});
+      setLocale(batch.mapping?.locale === "en-US" ? "en-US" : "ru-RU");
+      setConfirmed(false);
+      await Promise.all([loadBatches(), loadRows(batch.id, rowFilter, token)]);
     } catch (error) {
-      onError(error);
+      if (token === generation.current) onError(error);
     } finally {
-      setBusy(false);
+      if (token === generation.current) setBusy(false);
     }
   }
 
@@ -160,38 +178,44 @@ export function ImportScreen({ onError }: ImportScreenProps) {
 
   async function commit(): Promise<void> {
     if (!active || !confirmed) return;
+    const batchId = active.id;
+    const token = generation.current;
     setBusy(true);
     try {
       const response = await apiClient.post<ImportResult>(
-        `/api/v1/imports/${active.id}/commit`,
+        `/api/v1/imports/${batchId}/commit`,
         { confirm: true },
-        { "X-Idempotency-Key": `import-${active.id}` },
+        { "X-Idempotency-Key": `import-${batchId}` },
       );
+      if (token !== generation.current) return;
       setActive(response.batch);
       setResult(response);
       setConfirmed(false);
-      await Promise.all([loadBatches(), loadRows(active.id, rowFilter)]);
+      await Promise.all([loadBatches(), loadRows(batchId, rowFilter, token)]);
     } catch (error) {
-      onError(error);
+      if (token === generation.current) onError(error);
     } finally {
-      setBusy(false);
+      if (token === generation.current) setBusy(false);
     }
   }
 
   async function importDuplicateAsNew(row: ImportRow): Promise<void> {
     if (!active) return;
+    const batchId = active.id;
+    const token = generation.current;
     setBusy(true);
     try {
-      await apiClient.patch(`/api/v1/imports/${active.id}/rows/${row.id}`, {
+      await apiClient.patch(`/api/v1/imports/${batchId}/rows/${row.id}`, {
         import_as_new: true,
       });
-      const refreshed = await apiClient.get<ImportBatch>(`/api/v1/imports/${active.id}`);
+      const refreshed = await apiClient.get<ImportBatch>(`/api/v1/imports/${batchId}`);
+      if (token !== generation.current) return;
       setActive(refreshed);
-      await loadRows(active.id, rowFilter);
+      await loadRows(batchId, rowFilter, token);
     } catch (error) {
-      onError(error);
+      if (token === generation.current) onError(error);
     } finally {
-      setBusy(false);
+      if (token === generation.current) setBusy(false);
     }
   }
 
@@ -290,8 +314,11 @@ export function ImportScreen({ onError }: ImportScreenProps) {
             <div className="filters import-filters">
               <select aria-label="Фильтр строк" value={rowFilter} onChange={(event) => {
                 const value = event.target.value;
+                const token = generation.current;
                 setRowFilter(value);
-                void loadRows(active.id, value).catch(onError);
+                void loadRows(active.id, value, token).catch((error) => {
+                  if (token === generation.current) onError(error);
+                });
               }}>
                 <option value="all">Все строки</option>
                 <option value="valid">Готовы</option>
@@ -319,8 +346,17 @@ export function ImportScreen({ onError }: ImportScreenProps) {
           {result ? (
             <div className="notice notice--success import-success" role="status">
               <strong>Импорт завершён</strong>
-              <span>Создано операций: {result.affected_transactions}. Исключено: {excluded}.</span>
+              <span>
+                Создано операций: {result.affected_transactions}. Без категории:{" "}
+                {number(result.batch.summary, "uncategorized_at_commit")}. Исключено: {excluded}.
+              </span>
               <Link href="/transactions">Открыть операции</Link>
+              {result.batch.status === "imported" &&
+              number(result.batch.summary, "review_candidates_at_commit") > 0 ? (
+                <Link href={`/rules/review?import_batch_id=${result.batch.id}`}>
+                  Проверить категоризацию этого импорта
+                </Link>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -329,7 +365,7 @@ export function ImportScreen({ onError }: ImportScreenProps) {
       <section className="panel import-history">
         <div className="panel-heading"><div><span className="kicker">История</span><h2>Пакеты импорта</h2></div></div>
         {!loading && !batches.length ? <div className="empty-state">Импортов пока нет.</div> : null}
-        {batches.length ? <div className="table-scroll"><table><thead><tr><th>Файл</th><th>Дата</th><th>Строк</th><th>Статус</th><th>Действия</th></tr></thead><tbody>{batches.map((batch) => <tr key={batch.id}><td><button className="text-button" type="button" onClick={() => selectBatch(batch)}>{batch.filename}</button></td><td>{new Date(batch.created_at).toLocaleString("ru-RU")}</td><td>{number(batch.summary, "total") || number(batch.summary, "valid") + number(batch.summary, "invalid") + number(batch.summary, "duplicate") + number(batch.summary, "skipped")}</td><td><span className={`status-chip status-chip--${batch.status}`}>{importStatusLabel(batch.status)}</span></td><td className="table-actions">{batch.status === "imported" ? <button className="text-button text-button--danger" type="button" disabled={busy} onClick={() => { if (window.confirm("Отменить этот импорт? Изменённые после импорта операции требуют отдельного принудительного решения.")) { setActive(batch); void run(async () => (await apiClient.post<ImportResult>(`/api/v1/imports/${batch.id}/rollback`, { force: false })).batch); } }}>Откатить</button> : null}{["mapping_required", "parsed", "validated", "ready"].includes(batch.status) ? <button className="text-button" type="button" onClick={() => void run(() => apiClient.post(`/api/v1/imports/${batch.id}/cancel`))}>Отменить</button> : null}</td></tr>)}</tbody></table></div> : null}
+        {batches.length ? <div className="table-scroll"><table><thead><tr><th>Файл</th><th>Дата</th><th>Строк</th><th>Статус</th><th>Действия</th></tr></thead><tbody>{batches.map((batch) => <tr key={batch.id}><td><button className="text-button" type="button" onClick={() => selectBatch(batch)}>{batch.filename}</button></td><td>{new Date(batch.created_at).toLocaleString("ru-RU")}</td><td>{number(batch.summary, "total") || number(batch.summary, "valid") + number(batch.summary, "invalid") + number(batch.summary, "duplicate") + number(batch.summary, "skipped")}</td><td><span className={`status-chip status-chip--${batch.status}`}>{importStatusLabel(batch.status)}</span></td><td className="table-actions">{batch.status === "imported" ? <button className="text-button text-button--danger" type="button" disabled={busy} onClick={() => { if (window.confirm("Отменить этот импорт? Изменённые после импорта операции требуют отдельного принудительного решения.")) { selectBatch(batch); void run(async () => (await apiClient.post<ImportResult>(`/api/v1/imports/${batch.id}/rollback`, { force: false })).batch); } }}>Откатить</button> : null}{["mapping_required", "parsed", "validated", "ready"].includes(batch.status) ? <button className="text-button" type="button" onClick={() => void run(() => apiClient.post(`/api/v1/imports/${batch.id}/cancel`))}>Отменить</button> : null}</td></tr>)}</tbody></table></div> : null}
       </section>
     </section>
   );

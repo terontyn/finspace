@@ -9,6 +9,7 @@ from sqlalchemy import event, insert, select, update
 
 from app.core.config import settings
 from app.db.models.categorization_previews import CategorizationPreview, CategorizationPreviewItem
+from app.db.models.imports import ImportBatch
 from app.db.models.transactions import FinancialTransaction, TransactionSplit
 from app.db.models.users import User, Workspace, WorkspaceMember
 from app.db.session import AsyncSessionFactory, engine
@@ -123,6 +124,7 @@ async def _insert_transaction(
     target_account_id: str | None = None,
     occurred_at: datetime | None = None,
     source: str = "import",
+    import_batch_id: str | None = None,
 ) -> str:
     async with AsyncSessionFactory() as session:
         transaction = FinancialTransaction(
@@ -139,6 +141,7 @@ async def _insert_transaction(
             description=description,
             status=status,
             source=source,
+            import_batch_id=uuid.UUID(import_batch_id) if import_batch_id else None,
             created_by=uuid.UUID(identity["user"]["id"]),
             updated_by=uuid.UUID(identity["user"]["id"]),
         )
@@ -146,6 +149,25 @@ async def _insert_transaction(
         await session.commit()
         await session.refresh(transaction)
         return str(transaction.id)
+
+
+async def _insert_import_batch(identity: dict, label: str) -> str:
+    async with AsyncSessionFactory() as session:
+        batch = ImportBatch(
+            workspace_id=uuid.UUID(identity["workspace"]["id"]),
+            created_by=uuid.UUID(identity["user"]["id"]),
+            filename=f"{label}.csv",
+            stored_filename=f"{uuid.uuid4().hex}.csv",
+            file_type="csv",
+            file_size=1,
+            file_sha256=uuid.uuid4().hex + uuid.uuid4().hex,
+            status="imported",
+            summary={},
+        )
+        session.add(batch)
+        await session.commit()
+        await session.refresh(batch)
+        return str(batch.id)
 
 
 async def _add_split(transaction_id: str, category_id: str) -> None:
@@ -373,6 +395,81 @@ def test_filter_preview_selects_uncategorized_transactions_in_canonical_order(
     assert [item["transaction_id"] for item in items] == [newer, older]
 
 
+def test_import_batch_filter_is_exact_workspace_scoped_and_composes_with_filters(
+    client: TestClient,
+) -> None:
+    identity, headers = _register(client, "Preview import batch")
+    foreign_identity, _foreign_headers = _register(client, "Preview foreign batch")
+    account = _account(client, headers, "Import batch card")
+    other_account = _account(client, headers, "Import batch other")
+    foreign_account = _account(client, _foreign_headers, "Foreign import card")
+    batch_id = asyncio.run(_insert_import_batch(identity, "target-batch"))
+    other_batch_id = asyncio.run(_insert_import_batch(identity, "other-batch"))
+    foreign_batch_id = asyncio.run(_insert_import_batch(foreign_identity, "foreign-batch"))
+
+    expected = asyncio.run(
+        _insert_transaction(
+            identity,
+            account["id"],
+            counterparty="Exact imported row",
+            import_batch_id=batch_id,
+        )
+    )
+    asyncio.run(
+        _insert_transaction(
+            identity,
+            other_account["id"],
+            counterparty="Same batch, filtered account",
+            import_batch_id=batch_id,
+        )
+    )
+    # Same source/date/account but a different batch must not bleed into the selection.
+    asyncio.run(
+        _insert_transaction(
+            identity,
+            account["id"],
+            counterparty="Other imported batch",
+            import_batch_id=other_batch_id,
+        )
+    )
+    # A manual row with otherwise identical filter facts is not part of any import batch.
+    asyncio.run(
+        _insert_transaction(
+            identity,
+            account["id"],
+            counterparty="Manual row",
+            source="manual",
+        )
+    )
+    asyncio.run(
+        _insert_transaction(
+            foreign_identity,
+            foreign_account["id"],
+            counterparty="Foreign row",
+            import_batch_id=foreign_batch_id,
+        )
+    )
+
+    created = _create(
+        client,
+        headers,
+        {"mode": "filter", "import_batch_id": batch_id, "account_id": account["id"]},
+    )
+    assert created["summary"]["selected"] == 1
+    assert [item["transaction_id"] for item in _all_items(client, headers, created["id"])] == [
+        expected
+    ]
+
+    # A syntactically valid batch UUID from another workspace is indistinguishable from no rows.
+    foreign_scope = _create(
+        client,
+        headers,
+        {"mode": "filter", "import_batch_id": foreign_batch_id},
+    )
+    assert foreign_scope["summary"]["selected"] == 0
+    assert _all_items(client, headers, foreign_scope["id"]) == []
+
+
 def test_item_pagination_is_stable_and_uses_persisted_sequence(client: TestClient) -> None:
     identity, headers = _register(client, "Preview paging")
     account = _account(client, headers, "Paging card")
@@ -468,6 +565,7 @@ def test_filter_overflow_is_rejected_with_the_maximum_in_details(client: TestCli
     workspace_id = uuid.UUID(identity["workspace"]["id"])
     user_id = uuid.UUID(identity["user"]["id"])
     limit = preview_service.MAX_FILTER_CANDIDATES
+    batch_id = asyncio.run(_insert_import_batch(identity, "overflow-batch"))
 
     async def seed(count: int) -> None:
         base = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
@@ -483,6 +581,7 @@ def test_filter_overflow_is_rejected_with_the_maximum_in_details(client: TestCli
                 "counterparty": f"Overflow {index}",
                 "status": "confirmed",
                 "source": "import",
+                "import_batch_id": uuid.UUID(batch_id),
                 "version": 1,
                 "created_by": user_id,
                 "updated_by": user_id,
@@ -496,7 +595,11 @@ def test_filter_overflow_is_rejected_with_the_maximum_in_details(client: TestCli
 
     asyncio.run(seed(limit + 1))
 
-    rejected = client.post(PREVIEWS, headers=headers, json={"selection": {"mode": "filter"}})
+    rejected = client.post(
+        PREVIEWS,
+        headers=headers,
+        json={"selection": {"mode": "filter", "import_batch_id": batch_id}},
+    )
     assert rejected.status_code == 422, rejected.text
     error = rejected.json()["error"]
     assert error["code"] == "CATEGORIZATION_PREVIEW_LIMIT_EXCEEDED"
@@ -507,7 +610,13 @@ def test_filter_overflow_is_rejected_with_the_maximum_in_details(client: TestCli
     accepted = client.post(
         PREVIEWS,
         headers=headers,
-        json={"selection": {"mode": "filter", "occurred_to": boundary.isoformat()}},
+        json={
+            "selection": {
+                "mode": "filter",
+                "import_batch_id": batch_id,
+                "occurred_to": boundary.isoformat(),
+            }
+        },
     )
     assert accepted.status_code == 201, accepted.text
     assert accepted.json()["summary"]["selected"] == limit

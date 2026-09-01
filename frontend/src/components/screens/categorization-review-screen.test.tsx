@@ -4,6 +4,7 @@ import test from "node:test";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import { ApiClientError, apiClient, type WorkspaceRole } from "@/lib/api-client";
+import type { CategorizationReviewImportScope } from "@/lib/categorization-review-scope";
 import { canonicalItemIds, nextApplyAttempt, sameItemSet } from "@/lib/categorization-review";
 
 import type {
@@ -120,12 +121,14 @@ function checkboxes(root: ReactTestInstance): ReactTestInstance[] {
 }
 
 interface ApplyCall { body: unknown; headers: unknown; path: string }
+interface CreateCall { body: unknown; path: string }
 
 interface HarnessOptions {
+  importScope?: CategorizationReviewImportScope;
   items?: CategorizationPreviewItem[];
   itemsPages?: CategorizationPreviewItemPage[];
   onApply?: (call: ApplyCall) => unknown;
-  onCreate?: () => unknown;
+  onCreate?: (call: CreateCall) => unknown;
   role?: WorkspaceRole;
 }
 
@@ -148,10 +151,13 @@ async function createHarness(options: HarnessOptions = {}) {
   const originalGet = apiClient.get;
   const originalPost = apiClient.post;
   const applyCalls: ApplyCall[] = [];
+  const createCalls: CreateCall[] = [];
+  const getCalls: string[] = [];
   const itemRequests: string[] = [];
   let itemsPageIndex = 0;
 
   apiClient.get = (<T,>(path: string) => {
+    getCalls.push(path);
     if (path.startsWith("/api/v1/accounts")) return Promise.resolve(page([account]) as T);
     if (path.startsWith("/api/v1/payees")) return Promise.resolve(page([payee]) as T);
     if (path.includes("/items")) {
@@ -175,19 +181,23 @@ async function createHarness(options: HarnessOptions = {}) {
       if (outcome instanceof Error) return Promise.reject(outcome);
       return Promise.resolve((outcome ?? applyResponse(["applied"], (body as { item_ids: string[] }).item_ids)) as T);
     }
-    const created = options.onCreate?.();
+    const call = { body, path };
+    createCalls.push(call);
+    const created = options.onCreate?.(call);
     if (created instanceof Error) return Promise.reject(created);
     return Promise.resolve((created ?? header()) as T);
   }) as typeof apiClient.post;
 
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
-    renderer = create(<CategorizationReviewScreen onError={() => {}} role={options.role ?? "editor"} roleLoading={false} />);
+    renderer = create(<CategorizationReviewScreen importScope={options.importScope} onError={() => {}} role={options.role ?? "editor"} roleLoading={false} />);
   });
   await act(async () => { await settle(); });
 
   return {
     applyCalls,
+    createCalls,
+    getCalls,
     itemRequests,
     get renderer() { return renderer as ReactTestRenderer; },
     get root() { return (renderer as ReactTestRenderer).root; },
@@ -215,6 +225,88 @@ async function toggleRow(harness: Awaited<ReturnType<typeof createHarness>>, ind
   await act(async () => { boxes[index]?.props.onChange(); });
   await act(async () => { await settle(); });
 }
+
+const scopedBatchId = "152eabf4-4447-4f22-8ada-95647ff80f30";
+
+test("import scope is explicit, retained with narrower filters, and does not auto-preview", async () => {
+  const harness = await createHarness({
+    importScope: { kind: "valid", importBatchId: scopedBatchId },
+    items: [item("a", "matched")],
+    role: "viewer",
+  });
+  try {
+    const initialText = renderedText(harness.renderer.toJSON());
+    assert.match(initialText, /Только операции этого импорта/);
+    assert.match(initialText, /Снять ограничение импорта/);
+    assert.equal(harness.createCalls.length, 0, "scope initialization must not create a preview");
+    assert.equal(
+      harness.getCalls.some((path) => path.startsWith("/api/v1/imports")),
+      false,
+      "review initialization must not probe the import endpoint",
+    );
+
+    const accountSelect = harness.root.findAllByType("select")[0];
+    await act(async () => accountSelect.props.onChange({ target: { value: account.id } }));
+    await submitFilters(harness);
+
+    assert.equal(harness.createCalls.length, 1);
+    assert.deepEqual(harness.createCalls[0].body, {
+      selection: {
+        account_id: account.id,
+        import_batch_id: scopedBatchId,
+        mode: "filter",
+      },
+    });
+    assert.match(renderedText(harness.renderer.toJSON()), /У вас доступ только на чтение/);
+    assert.equal(findButton(harness.root, "Применить выбранные"), undefined);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("invalid or duplicate import query fails closed with an explicit broad-review link", async () => {
+  const harness = await createHarness({
+    importScope: { kind: "invalid", reason: "duplicate" },
+  });
+  try {
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /Ограничение по импорту задано неверно/);
+    assert.match(text, /Открыть общую проверку/);
+    assert.equal(harness.root.findAllByType("form").length, 0);
+    assert.equal(harness.createCalls.length, 0);
+    const link = harness.root.findAllByType("a").find((node) => node.props.href === "/rules/review");
+    assert.ok(link);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("scoped preview overflow keeps the scope and suggests narrowing", async () => {
+  const harness = await createHarness({
+    importScope: { kind: "valid", importBatchId: scopedBatchId },
+    onCreate: () =>
+      new ApiClientError(
+        "Too many candidate transactions",
+        "CATEGORIZATION_PREVIEW_LIMIT_EXCEEDED",
+        422,
+      ),
+  });
+  try {
+    await submitFilters(harness);
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /Слишком много операций/);
+    assert.match(text, /Сузьте период или другие фильтры/);
+    assert.match(text, /Только операции этого импорта/);
+    assert.ok(harness.root.findByType("form"));
+    assert.equal(
+      (harness.createCalls[0].body as { selection: { import_batch_id: string } }).selection
+        .import_batch_id,
+      scopedBatchId,
+    );
+  } finally {
+    await harness.cleanup();
+  }
+});
 
 // 1
 test("viewer can build a preview but has no apply control", async () => {

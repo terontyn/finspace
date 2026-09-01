@@ -791,6 +791,18 @@ async def commit_import(
     assert_dates_open(control, context.workspace.timezone, affected_dates)
     batch.status = "importing"
     batch.idempotency_key = idempotency_key
+    summary = dict(batch.summary or {})
+    summary["affected_transactions"] = len(rows)
+    summary["uncategorized_at_commit"] = sum(
+        1 for row in rows if not (row.normalized_data or {}).get("category_id")
+    )
+    summary["review_candidates_at_commit"] = sum(
+        1
+        for row in rows
+        if not (row.normalized_data or {}).get("category_id")
+        and (row.normalized_data or {}).get("transaction_type") != "transfer"
+    )
+    batch.summary = summary
     for row in rows:
         data = row.normalized_data or {}
         transaction = FinancialTransaction(

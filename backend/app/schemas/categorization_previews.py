@@ -49,6 +49,7 @@ class CategorizationPreviewIdsSelection(SelectionModel):
 
 class CategorizationPreviewFilterSelection(SelectionModel):
     mode: Literal["filter"]
+    import_batch_id: uuid.UUID | None = None
     occurred_from: datetime | None = None
     occurred_to: datetime | None = None
     account_id: uuid.UUID | None = None
