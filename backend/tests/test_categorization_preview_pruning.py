@@ -610,14 +610,43 @@ def test_a_failing_workspace_does_not_block_later_ones_and_is_retried(
     assert asyncio.run(_preview_exists(preview["id"])) is False
 
 
-def test_empty_cycle_succeeds_and_repeats_cleanly(client: TestClient) -> None:
-    _register(client, "Prune empty")
-    first = asyncio.run(worker.run_cycle(None))
+def test_empty_cycle_succeeds_and_repeats_cleanly(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cycle with nothing to reclaim succeeds, deletes nothing, and repeats identically.
+
+    Scoped to one freshly created workspace: the suite shares a database, so a cycle over every
+    workspace would legitimately find other tests' expired previews.
+    """
+    identity, _headers = _register(client, "Prune empty")
+    empty_workspace = uuid.UUID(identity["workspace"]["id"])
+
+    async def all_ids() -> list[uuid.UUID]:
+        async with AsyncSessionFactory() as session:
+            return await preview_repository.list_workspace_ids_after(
+                session, after_id=None, limit=10000
+            )
+
+    ordered = asyncio.run(all_ids())
+    position = ordered.index(empty_workspace)
+    cursor = ordered[position - 1] if position else None
+    monkeypatch.setattr(settings, "categorization_prune_max_workspaces_per_cycle", 1)
+
+    first = asyncio.run(worker.run_cycle(cursor))
+    assert first.workspaces_examined == 1
     assert first.workspaces_failed == 0
     assert first.previews_deleted == 0
-    second = asyncio.run(worker.run_cycle(None))
-    assert second.previews_deleted == 0
-    assert second.workspaces_examined == first.workspaces_examined
+    assert first.next_cursor == empty_workspace
+
+    # Idempotent: running the same cycle again changes nothing.
+    second = asyncio.run(worker.run_cycle(cursor))
+    assert (
+        second.workspaces_examined,
+        second.workspaces_failed,
+        second.previews_deleted,
+        second.next_cursor,
+    ) == (1, 0, 0, empty_workspace)
 
 
 def test_once_mode_runs_one_cycle_and_reports_exit_codes(
