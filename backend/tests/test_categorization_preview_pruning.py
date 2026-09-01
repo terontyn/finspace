@@ -659,6 +659,22 @@ def test_once_mode_runs_one_cycle_and_reports_exit_codes(
     preview = _preview(client, headers, [transaction_id])
     asyncio.run(_expire(preview["id"]))
 
+    # The suite shares one database and workspace ids are random UUIDv4, so the real enumeration
+    # returns whichever workspaces sort lowest — this test's workspace is not guaranteed to be
+    # among the first `max_workspaces_per_cycle` of them. Only workspace discovery is isolated:
+    # run_once, run_cycle, the prune service, delete_expired and the PostgreSQL delete stay real,
+    # and the page still asserts that production boundedness is the limit actually applied.
+    target_workspace_id = uuid.UUID(identity["workspace"]["id"])
+    enumerations: list[uuid.UUID | None] = []
+
+    async def target_workspace_page(_session, *, after_id, limit):
+        enumerations.append(after_id)
+        assert after_id is None
+        assert limit == settings.categorization_prune_max_workspaces_per_cycle
+        return [target_workspace_id]
+
+    monkeypatch.setattr(worker.repository, "list_workspace_ids_after", target_workspace_page)
+
     cycles: list[uuid.UUID | None] = []
     original = worker.run_cycle
 
@@ -673,15 +689,18 @@ def test_once_mode_runs_one_cycle_and_reports_exit_codes(
 
     assert asyncio.run(worker.run_once()) == 0
     assert cycles == [None]
+    assert enumerations == [None]
     assert asyncio.run(_preview_exists(preview["id"])) is False
 
-    # Disabled: no cycle, no deletion, still a clean exit.
+    # Disabled: no cycle, no enumeration, no deletion, still a clean exit.
     second = _preview(client, headers, [transaction_id])
     asyncio.run(_expire(second["id"]))
     cycles.clear()
+    enumerations.clear()
     monkeypatch.setattr(settings, "categorization_prune_enabled", False)
     assert asyncio.run(worker.run_once()) == 0
     assert cycles == []
+    assert enumerations == []
     assert asyncio.run(_preview_exists(second["id"])) is True
 
     # A cycle-wide failure is fatal for --once only.
