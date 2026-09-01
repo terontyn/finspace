@@ -13,10 +13,13 @@ Recovery: the operation row is claimed before any item is processed and complete
 requested item has a terminal result. A process that dies mid-request therefore leaves an operation
 whose finished items are terminal and whose remaining items were simply never attempted; retrying
 with the same idempotency key replays the former and processes only the latter. No background worker
-is involved. A new claim holds ``FOR SHARE`` on its live preview until the operation commits;
-physical expiry cleanup takes ``FOR UPDATE`` on that same row and retains previews referenced by a
-committed in-progress operation. Completed operations need only their independently persisted
-results and remain replayable after physical preview pruning.
+is involved. Durable result sequences always follow the same canonical UUID ordering used by the
+request hash; retries may submit any permutation without reallocating a sequence. Responses are
+reordered to the current caller's submitted order at the boundary. A new claim holds ``FOR SHARE``
+on its live preview until the operation commits; physical expiry cleanup takes ``FOR UPDATE`` on
+that same row and retains previews referenced by a committed in-progress operation. Completed
+operations need only their independently persisted results and remain replayable after physical
+preview pruning.
 """
 
 import hashlib
@@ -79,6 +82,11 @@ class BulkApplyOutcome:
     results: list[ItemResult]
 
 
+def canonical_item_order(item_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """One durable ordering for a logical operation, independent of request permutations."""
+    return sorted(item_ids, key=str)
+
+
 def canonical_request_hash(
     workspace_id: uuid.UUID,
     preview_id: uuid.UUID,
@@ -95,7 +103,7 @@ def canonical_request_hash(
         {
             "workspace_id": str(workspace_id),
             "preview_id": str(preview_id),
-            "item_ids": sorted(str(item) for item in item_ids),
+            "item_ids": [str(item) for item in canonical_item_order(item_ids)],
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -304,6 +312,18 @@ async def _record_failure(
     )
 
 
+async def _reload_after_rollback(
+    session: AsyncSession,
+    context: RequestContext,
+    preview_id: uuid.UUID,
+    item_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, CategorizationPreviewItem]:
+    """Restore ORM state needed by later items after SQLAlchemy expires it on rollback."""
+    await session.refresh(context.user)
+    await session.refresh(context.workspace)
+    return await repository.load_items(session, preview_id, item_ids)
+
+
 async def apply_preview_items(
     session: AsyncSession,
     context: RequestContext,
@@ -312,8 +332,9 @@ async def apply_preview_items(
     idempotency_key: str,
 ) -> BulkApplyOutcome:
     workspace_id = context.workspace.id
-    item_ids = list(data.item_ids)
-    request_hash = canonical_request_hash(workspace_id, preview_id, item_ids)
+    caller_item_ids = list(data.item_ids)
+    operation_item_ids = canonical_item_order(caller_item_ids)
+    request_hash = canonical_request_hash(workspace_id, preview_id, operation_item_ids)
 
     # An operation already claimed by this key is replayed or resumed without re-checking preview
     # expiry: a caller retrying an interrupted request must be able to recover its results even if
@@ -334,8 +355,8 @@ async def apply_preview_items(
             preview_id,
             for_share=True,
         )
-        items = await repository.load_items(session, preview_id, item_ids)
-        missing = [item for item in item_ids if item not in items]
+        items = await repository.load_items(session, preview_id, operation_item_ids)
+        missing = [item for item in operation_item_ids if item not in items]
         if missing:
             # Foreign and nonexistent identifiers are indistinguishable: the lookup is already
             # scoped to this workspace's preview, so nothing cross-workspace can be inferred.
@@ -352,7 +373,7 @@ async def apply_preview_items(
                 actor_user_id=context.user.id,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
-                requested_count=len(item_ids),
+                requested_count=len(operation_item_ids),
             )
             await session.commit()
         except IntegrityError:
@@ -370,19 +391,19 @@ async def apply_preview_items(
     operation_id = operation.id
     rule_set_version = preview.rule_set_version if preview is not None else None
     persisted = await repository.results_for(session, operation_id)
-    items = await repository.load_items(session, preview_id, item_ids)
+    items = await repository.load_items(session, preview_id, operation_item_ids)
 
-    results: list[ItemResult] = []
-    for sequence, item_id in enumerate(item_ids):
+    canonical_results: list[ItemResult] = []
+    for sequence, item_id in enumerate(operation_item_ids):
         recorded = persisted.get(item_id)
         if recorded is not None:
             # Terminal results are replayed, never retried. This is what keeps an applied
             # transaction from being mutated twice and a conflict from being silently re-run.
-            results.append(_from_row(recorded))
+            canonical_results.append(_from_row(recorded))
             continue
         if rule_set_version is None:
             # The preview is gone, so nothing about this item can be proved any more.
-            results.append(
+            canonical_results.append(
                 await _process_item(
                     session,
                     context,
@@ -395,7 +416,7 @@ async def apply_preview_items(
             )
             continue
         try:
-            results.append(
+            canonical_results.append(
                 await _process_item(
                     session,
                     context,
@@ -408,13 +429,20 @@ async def apply_preview_items(
             )
         except IntegrityError:
             # A concurrent request holding the same key committed this item first. Its terminal
-            # result is authoritative; re-read it rather than mutating anything again.
+            # result is authoritative; re-read it rather than mutating anything again. Rollback
+            # expires the remaining ORM preview items, so reload those before continuing too.
             await session.rollback()
             replay = await repository.results_for(session, operation_id)
             existing_result = replay.get(item_id)
             if existing_result is None:
                 raise
-            results.append(_from_row(existing_result))
+            items = await _reload_after_rollback(
+                session,
+                context,
+                preview_id,
+                operation_item_ids,
+            )
+            canonical_results.append(_from_row(existing_result))
         except ApiError:
             raise
         except Exception:
@@ -438,9 +466,20 @@ async def apply_preview_items(
             )
             if failure is None:
                 raise
-            results.append(failure)
+            items = await _reload_after_rollback(
+                session,
+                context,
+                preview_id,
+                operation_item_ids,
+            )
+            canonical_results.append(failure)
 
-    if len(results) == len(item_ids):
+    if len(canonical_results) == len(operation_item_ids):
         await repository.complete_operation(session, operation_id, datetime.now(UTC))
         await session.commit()
-    return BulkApplyOutcome(preview_id=preview_id, operation_id=operation_id, results=results)
+    result_by_item_id = {result.item_id: result for result in canonical_results}
+    return BulkApplyOutcome(
+        preview_id=preview_id,
+        operation_id=operation_id,
+        results=[result_by_item_id[item_id] for item_id in caller_item_ids],
+    )

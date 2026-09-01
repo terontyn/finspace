@@ -575,7 +575,10 @@ def test_same_key_with_a_different_item_set_is_an_idempotency_conflict(
     ]
 
 
-def test_interrupted_operation_resumes_only_unattempted_items(client: TestClient) -> None:
+def test_interrupted_operation_resumes_only_unattempted_items(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     identity, headers = _register(client, "Apply resume")
     account = _account(client, headers, "Resume card")
     category = _category(client, headers, "Resume target")
@@ -596,38 +599,54 @@ def test_interrupted_operation_resumes_only_unattempted_items(client: TestClient
     preview = _preview(client, headers, ids)
     items = _items(client, headers, preview["id"])
     item_ids = [item["id"] for item in items]
+    item_by_id = {item["id"]: item for item in items}
+    canonical_item_ids = sorted(item_ids)
+    key = "key-partial"
 
     # Simulate an interruption: the first item committed, the rest were never attempted.
-    partial = _apply(client, headers, preview["id"], [item_ids[0]], "key-partial")
-    assert partial.status_code == 200
+    class SimulatedProcessDeath(BaseException):
+        pass
 
-    async def rewrite_operation() -> None:
+    original_process_item = apply_service._process_item
+    attempted = 0
+
+    async def stop_before_second_item(*args: object, **kwargs: object):
+        nonlocal attempted
+        attempted += 1
+        if attempted == 2:
+            raise SimulatedProcessDeath
+        return await original_process_item(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_service, "_process_item", stop_before_second_item)
+
+    async def start_and_interrupt() -> None:
         async with AsyncSessionFactory() as session:
-            await session.execute(
-                update(CategorizationApplyOperation)
-                .where(CategorizationApplyOperation.id == uuid.UUID(partial.json()["operation_id"]))
-                .values(
-                    request_hash=apply_service.canonical_request_hash(
-                        uuid.UUID(identity["workspace"]["id"]),
-                        uuid.UUID(preview["id"]),
-                        [uuid.UUID(value) for value in item_ids],
-                    ),
-                    requested_count=3,
-                    status="in_progress",
-                    completed_at=None,
-                )
+            await apply_service.apply_preview_items(
+                session,
+                await _context_for(identity, session),
+                uuid.UUID(preview["id"]),
+                CategorizationApplyRequest(item_ids=[uuid.UUID(value) for value in item_ids]),
+                key,
             )
-            await session.commit()
 
-    asyncio.run(rewrite_operation())
+    with pytest.raises(SimulatedProcessDeath):
+        asyncio.run(start_and_interrupt())
+    monkeypatch.setattr(apply_service, "_process_item", original_process_item)
 
-    resumed = _apply(client, headers, preview["id"], item_ids, "key-partial")
+    operation = asyncio.run(_operation_for(identity, key))
+    assert operation.status == "in_progress"
+    assert len(asyncio.run(_results_for(str(operation.id)))) == 1
+    first_transaction_id = item_by_id[canonical_item_ids[0]]["transaction_id"]
+    assert asyncio.run(_transaction_row(first_transaction_id)).version == 2
+    assert asyncio.run(_audit_count(first_transaction_id)) == 1
+
+    resumed = _apply(client, headers, preview["id"], item_ids, key)
     assert resumed.status_code == 200, resumed.text
     statuses = [row["status"] for row in resumed.json()["results"]]
     assert statuses == ["applied", "applied", "applied"]
     # The already terminal item was replayed, not applied twice.
-    assert asyncio.run(_transaction_row(ids[0])).version == 2
-    assert asyncio.run(_audit_count(ids[0])) == 1
+    assert [asyncio.run(_transaction_row(value)).version for value in ids] == [2, 2, 2]
+    assert [asyncio.run(_audit_count(value)) for value in ids] == [1, 1, 1]
     assert len(asyncio.run(_results_for(resumed.json()["operation_id"]))) == 3
 
     async def operation_status() -> tuple[str, bool]:
@@ -639,6 +658,111 @@ def test_interrupted_operation_resumes_only_unattempted_items(client: TestClient
             return row.status, row.completed_at is not None
 
     assert asyncio.run(operation_status()) == ("completed", True)
+
+
+def test_interrupted_operation_resumes_in_stable_order_after_reordered_retry(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Apply reordered resume")
+    account = _account(client, headers, "Reordered resume card")
+    category = _category(client, headers, "Reordered resume target")
+    _rule(
+        client,
+        headers,
+        name="Reordered resume rule",
+        category_id=category["id"],
+        priority=10,
+        counterparty_contains="apply shop",
+    )
+    transaction_ids = [
+        asyncio.run(
+            _insert_transaction(
+                identity,
+                account["id"],
+                counterparty=f"Apply Shop reordered {index}",
+            )
+        )
+        for index in range(3)
+    ]
+    preview = _preview(client, headers, transaction_ids)
+    items = _items(client, headers, preview["id"])
+    item_by_id = {item["id"]: item for item in items}
+    canonical_item_ids = sorted(item_by_id)
+    retry_item_ids = list(reversed(canonical_item_ids))
+    key = "key-reordered-interrupted"
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    original_process_item = apply_service._process_item
+    attempted = 0
+
+    async def stop_before_second_item(*args: object, **kwargs: object):
+        nonlocal attempted
+        attempted += 1
+        if attempted == 2:
+            raise SimulatedProcessDeath
+        return await original_process_item(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_service, "_process_item", stop_before_second_item)
+
+    async def start_and_interrupt() -> None:
+        async with AsyncSessionFactory() as session:
+            await apply_service.apply_preview_items(
+                session,
+                await _context_for(identity, session),
+                uuid.UUID(preview["id"]),
+                CategorizationApplyRequest(
+                    item_ids=[uuid.UUID(value) for value in canonical_item_ids]
+                ),
+                key,
+            )
+
+    with pytest.raises(SimulatedProcessDeath):
+        asyncio.run(start_and_interrupt())
+    monkeypatch.setattr(apply_service, "_process_item", original_process_item)
+
+    operation = asyncio.run(_operation_for(identity, key))
+    initial_results = asyncio.run(_results_for(str(operation.id)))
+    assert operation.status == "in_progress"
+    assert [(str(row.item_id), row.sequence) for row in initial_results] == [
+        (canonical_item_ids[0], 0)
+    ]
+    first_transaction_id = item_by_id[canonical_item_ids[0]]["transaction_id"]
+    assert asyncio.run(_transaction_row(first_transaction_id)).version == 2
+    assert asyncio.run(_audit_count(first_transaction_id)) == 1
+
+    resumed = _apply(client, headers, preview["id"], retry_item_ids, key)
+    assert resumed.status_code == 200, resumed.text
+    assert [row["item_id"] for row in resumed.json()["results"]] == retry_item_ids
+    assert [row["status"] for row in resumed.json()["results"]] == [
+        "applied",
+        "applied",
+        "applied",
+    ]
+
+    persisted = asyncio.run(_results_for(str(operation.id)))
+    assert [(str(row.item_id), row.sequence) for row in persisted] == [
+        (item_id, sequence) for sequence, item_id in enumerate(canonical_item_ids)
+    ]
+    assert len({row.item_id for row in persisted}) == 3
+    assert len({row.sequence for row in persisted}) == 3
+    for transaction_id in transaction_ids:
+        assert asyncio.run(_transaction_row(transaction_id)).version == 2
+        assert asyncio.run(_audit_count(transaction_id)) == 1
+        assert asyncio.run(_outbox_count(transaction_id)) == 0
+    assert (asyncio.run(_operation_for(identity, key))).status == "completed"
+
+    versions = [asyncio.run(_transaction_row(value)).version for value in transaction_ids]
+    audits = [asyncio.run(_audit_count(value)) for value in transaction_ids]
+    outbox = [asyncio.run(_outbox_count(value)) for value in transaction_ids]
+    replay = _apply(client, headers, preview["id"], canonical_item_ids, key)
+    assert replay.status_code == 200, replay.text
+    assert [row["item_id"] for row in replay.json()["results"]] == canonical_item_ids
+    assert [asyncio.run(_transaction_row(value)).version for value in transaction_ids] == versions
+    assert [asyncio.run(_audit_count(value)) for value in transaction_ids] == audits
+    assert [asyncio.run(_outbox_count(value)) for value in transaction_ids] == outbox
 
 
 def test_interrupted_operation_survives_expiry_pruning_and_resumes_unattempted_items(
@@ -669,6 +793,8 @@ def test_interrupted_operation_survives_expiry_pruning_and_resumes_unattempted_i
     preview = _preview(client, headers, transaction_ids)
     items = _items(client, headers, preview["id"])
     item_ids = [item["id"] for item in items]
+    item_by_id = {item["id"]: item for item in items}
+    canonical_item_ids = sorted(item_ids)
     key = "key-expiry-interrupted"
 
     class SimulatedProcessDeath(BaseException):
@@ -703,8 +829,12 @@ def test_interrupted_operation_survives_expiry_pruning_and_resumes_unattempted_i
     operation = asyncio.run(_operation_for(identity, key))
     assert operation.status == "in_progress"
     assert len(asyncio.run(_results_for(str(operation.id)))) == 1
-    assert [asyncio.run(_transaction_row(value)).version for value in transaction_ids] == [2, 1]
-    assert [asyncio.run(_audit_count(value)) for value in transaction_ids] == [1, 0]
+    first_transaction_id = item_by_id[canonical_item_ids[0]]["transaction_id"]
+    remaining_transaction_id = item_by_id[canonical_item_ids[1]]["transaction_id"]
+    assert asyncio.run(_transaction_row(first_transaction_id)).version == 2
+    assert asyncio.run(_transaction_row(remaining_transaction_id)).version == 1
+    assert asyncio.run(_audit_count(first_transaction_id)) == 1
+    assert asyncio.run(_audit_count(remaining_transaction_id)) == 0
     # Sync outbox emission is disabled in this test configuration; recovery must keep that count
     # stable just as strictly as it keeps enabled-environment outbox rows from duplicating.
     assert [asyncio.run(_outbox_count(value)) for value in transaction_ids] == [0, 0]
@@ -1255,6 +1385,86 @@ def test_concurrent_requests_sharing_a_key_create_one_operation(client: TestClie
     assert asyncio.run(_transaction_row(transaction_id)).version == 2
     assert asyncio.run(_audit_count(transaction_id)) == 1
     assert len(asyncio.run(_results_for(str(outcomes[0].operation_id)))) == 1
+
+
+def test_concurrent_same_key_requests_with_different_orders_converge_stably(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, _headers = _register(client, "Apply concurrent reordered key")
+    account = _account(client, _headers, "Concurrent reordered card")
+    category = _category(client, _headers, "Concurrent reordered target")
+    _rule(
+        client,
+        _headers,
+        name="Concurrent reordered rule",
+        category_id=category["id"],
+        priority=10,
+        counterparty_contains="apply shop",
+    )
+    transaction_ids = [
+        asyncio.run(
+            _insert_transaction(
+                identity,
+                account["id"],
+                counterparty=f"Apply Shop concurrent reordered {index}",
+            )
+        )
+        for index in range(3)
+    ]
+    preview = _preview(client, _headers, transaction_ids)
+    canonical_item_ids = sorted(
+        uuid.UUID(item["id"]) for item in _items(client, _headers, preview["id"])
+    )
+    reversed_item_ids = list(reversed(canonical_item_ids))
+
+    original_process_item = apply_service._process_item
+    entered = 0
+    both_entered = asyncio.Event()
+
+    async def synchronize_first_items(*args: object, **kwargs: object):
+        nonlocal entered
+        entered += 1
+        if entered <= 2:
+            if entered == 2:
+                both_entered.set()
+            await asyncio.wait_for(both_entered.wait(), timeout=5)
+        return await original_process_item(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_service, "_process_item", synchronize_first_items)
+
+    async def run_both() -> list[apply_service.BulkApplyOutcome]:
+        async def one(item_ids: list[uuid.UUID]) -> apply_service.BulkApplyOutcome:
+            async with AsyncSessionFactory() as session:
+                return await apply_service.apply_preview_items(
+                    session,
+                    await _context_for(identity, session),
+                    uuid.UUID(preview["id"]),
+                    CategorizationApplyRequest(item_ids=item_ids),
+                    "key-concurrent-reordered",
+                )
+
+        return list(
+            await asyncio.gather(
+                one(canonical_item_ids),
+                one(reversed_item_ids),
+            )
+        )
+
+    outcomes = asyncio.run(run_both())
+    assert outcomes[0].operation_id == outcomes[1].operation_id
+    assert [row.item_id for row in outcomes[0].results] == canonical_item_ids
+    assert [row.item_id for row in outcomes[1].results] == reversed_item_ids
+    assert {row.status for outcome in outcomes for row in outcome.results} == {"applied"}
+
+    persisted = asyncio.run(_results_for(str(outcomes[0].operation_id)))
+    assert [(row.item_id, row.sequence) for row in persisted] == [
+        (item_id, sequence) for sequence, item_id in enumerate(canonical_item_ids)
+    ]
+    for transaction_id in transaction_ids:
+        assert asyncio.run(_transaction_row(transaction_id)).version == 2
+        assert asyncio.run(_audit_count(transaction_id)) == 1
+        assert asyncio.run(_outbox_count(transaction_id)) == 0
 
 
 def test_rule_mutation_waits_for_a_bulk_apply_holding_the_shared_rule_set_lock(
