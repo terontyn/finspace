@@ -651,8 +651,12 @@ def test_once_mode_runs_one_cycle_and_reports_exit_codes(
 
 
 def test_daemon_survives_a_fatal_cycle_and_stops_promptly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One broken cycle must never end the daemon, and STOP must cut the sleep short."""
-    monkeypatch.setattr(settings, "categorization_prune_poll_seconds", 3600)
+    """One broken cycle must not end the daemon, and STOP must cut the sleep short.
+
+    A failed cycle deliberately backs off through the normal poll sleep rather than hot-looping, so
+    the interval is shortened here to let the recovery cycle arrive within the test.
+    """
+    monkeypatch.setattr(settings, "categorization_prune_poll_seconds", 0.05)
 
     calls: list[int] = []
 
@@ -660,22 +664,48 @@ def test_daemon_survives_a_fatal_cycle_and_stops_promptly(monkeypatch: pytest.Mo
         calls.append(len(calls))
         if len(calls) == 1:
             raise RuntimeError("simulated enumeration failure")
-        # The daemon recovered; ask it to stop while it is sleeping on a one-hour timer.
+        # The daemon recovered. Ask it to stop while it waits on the poll timer.
         worker.STOP.set()
         return worker.CycleResult()
 
+    stub = _StubEngine()
     monkeypatch.setattr(worker, "run_cycle", flaky)
-    monkeypatch.setattr(worker, "engine", _StubEngine())
+    monkeypatch.setattr(worker, "engine", stub)
+
+    async def drive() -> None:
+        await asyncio.wait_for(worker.run(), timeout=10)
+
+    asyncio.run(drive())
+    # The fatal first cycle was absorbed and a second cycle still ran.
+    assert calls == [0, 1]
+    assert stub.disposed is True
+
+
+def test_stop_interrupts_a_long_poll_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """STOP raised while the daemon sleeps ends it immediately, not after the full interval."""
+    monkeypatch.setattr(settings, "categorization_prune_poll_seconds", 3600)
+
+    async def empty(_cursor):
+        return worker.CycleResult()
+
+    stub = _StubEngine()
+    monkeypatch.setattr(worker, "run_cycle", empty)
+    monkeypatch.setattr(worker, "engine", stub)
 
     async def drive() -> float:
-        started = asyncio.get_running_loop().time()
-        await asyncio.wait_for(worker.run(), timeout=10)
-        return asyncio.get_running_loop().time() - started
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        task = asyncio.create_task(worker.run())
+        # Let the first cycle finish and the daemon settle into its one-hour sleep.
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        worker.STOP.set()
+        await asyncio.wait_for(task, timeout=10)
+        return loop.time() - started
 
     elapsed = asyncio.run(drive())
-    assert len(calls) == 2
-    # Nowhere near the 3600 s poll interval: the sleep is interruptible.
     assert elapsed < 5
+    assert stub.disposed is True
 
 
 def test_stop_during_a_cycle_finishes_the_batch_and_starts_no_new_workspace(
