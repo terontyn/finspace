@@ -5,10 +5,18 @@ import { act, create, type ReactTestInstance, type ReactTestRenderer } from "rea
 
 import { ApiClientError, apiClient, type WorkspaceRole } from "@/lib/api-client";
 import type { CategorizationReviewImportScope } from "@/lib/categorization-review-scope";
-import { canonicalItemIds, nextApplyAttempt, sameItemSet } from "@/lib/categorization-review";
+import {
+  canonicalItemIds,
+  nextApplyAttempt,
+  reReviewTransactionIds,
+  sameItemSet,
+} from "@/lib/categorization-review";
 
 import type {
   CategorizationApplyResponse,
+  CategorizationApplyHistoryDetail,
+  CategorizationApplyHistoryOperation,
+  CategorizationApplyHistoryResult,
   CategorizationApplyStatus,
   CategorizationPreviewHeader,
   CategorizationPreviewItem,
@@ -92,6 +100,63 @@ function applyResponse(statuses: CategorizationApplyStatus[], itemIds: string[])
   };
 }
 
+const zeroHistoryCounts = {
+  already_categorized: 0,
+  applied: 0,
+  category_changed: 0,
+  closed_period: 0,
+  failed: 0,
+  no_match: 0,
+  not_found: 0,
+  reconciled: 0,
+  rule_changed: 0,
+  split: 0,
+  transaction_changed: 0,
+  transfer: 0,
+};
+
+function historyOperation(
+  overrides: Partial<CategorizationApplyHistoryOperation> = {},
+): CategorizationApplyHistoryOperation {
+  return {
+    actor: { actor_user_id: "user-history", display_name: "Оператор" },
+    completed_at: "2026-08-20T10:01:00Z",
+    counts: { ...zeroHistoryCounts, applied: 1, failed: 1 },
+    created_at: "2026-08-20T10:00:00Z",
+    id: "operation-history-1",
+    requested_count: 2,
+    result_count: 2,
+    status: "completed",
+    ...overrides,
+  };
+}
+
+function historyResult(
+  sequence: number,
+  status: CategorizationApplyStatus,
+  transactionId: string | null,
+): CategorizationApplyHistoryResult {
+  return {
+    created_at: "2026-08-20T10:00:30Z",
+    current_version: status === "transaction_changed" ? 4 : null,
+    error_code: status === "failed" ? "UNEXPECTED" : null,
+    expected_version: status === "transaction_changed" ? 3 : null,
+    sequence,
+    status,
+    transaction_id: transactionId,
+  };
+}
+
+function historyDetail(
+  results: CategorizationApplyHistoryResult[],
+): CategorizationApplyHistoryDetail {
+  return {
+    ...historyOperation({ requested_count: results.length, result_count: results.length }),
+    page: { limit: 100, offset: 0, total: results.length },
+    results,
+  };
+}
+
 async function settle() {
   await Promise.resolve();
   await Promise.resolve();
@@ -124,6 +189,8 @@ interface ApplyCall { body: unknown; headers: unknown; path: string }
 interface CreateCall { body: unknown; path: string }
 
 interface HarnessOptions {
+  history?: CategorizationApplyHistoryOperation[];
+  historyDetail?: CategorizationApplyHistoryDetail;
   importScope?: CategorizationReviewImportScope;
   items?: CategorizationPreviewItem[];
   itemsPages?: CategorizationPreviewItemPage[];
@@ -160,6 +227,11 @@ async function createHarness(options: HarnessOptions = {}) {
     getCalls.push(path);
     if (path.startsWith("/api/v1/accounts")) return Promise.resolve(page([account]) as T);
     if (path.startsWith("/api/v1/payees")) return Promise.resolve(page([payee]) as T);
+    if (path.startsWith("/api/v1/categorization-apply-operations")) {
+      const detailPath = path.match(/^\/api\/v1\/categorization-apply-operations\/[^?]+/);
+      if (detailPath && options.historyDetail) return Promise.resolve(options.historyDetail as T);
+      return Promise.resolve(page(options.history ?? [], options.history?.length ?? 0, 0, 20) as T);
+    }
     if (path.includes("/items")) {
       itemRequests.push(path);
       if (options.itemsPages) {
@@ -518,6 +590,9 @@ test("a late response from an older preview cannot overwrite newer state", async
   apiClient.get = (<T,>(path: string) => {
     if (path.startsWith("/api/v1/accounts")) return Promise.resolve(page([account]) as T);
     if (path.startsWith("/api/v1/payees")) return Promise.resolve(page([payee]) as T);
+    if (path.startsWith("/api/v1/categorization-apply-operations")) {
+      return Promise.resolve(page([], 0, 0, 20) as T);
+    }
     if (path.includes("preview-A")) {
       // Preview A's page stays in flight until the test releases it.
       return new Promise<T>((resolve) => { resolveOldItems = resolve as (value: CategorizationPreviewItemPage) => void; });
@@ -596,5 +671,110 @@ test("a successful apply does not regenerate the preview", async () => {
     assert.equal(harness.applyCalls.length, createCallsBefore + 1);
     assert.match(renderedText(harness.renderer.toJSON()), /Результаты/);
     assert.ok(findButton(harness.root, "Составить новый список"));
+  } finally { await harness.cleanup(); }
+});
+
+test("history is separate, opens factual detail, and never fetches current transaction data", async () => {
+  const detail = historyDetail([
+    historyResult(0, "applied", "transaction-applied"),
+    historyResult(1, "transaction_changed", "transaction-changed"),
+  ]);
+  const harness = await createHarness({ history: [historyOperation()], historyDetail: detail });
+  try {
+    const initialText = renderedText(harness.renderer.toJSON());
+    assert.match(initialText, /История применений/);
+    assert.match(initialText, /Историческая попытка применения/);
+    assert.match(initialText, /Применено 1/);
+    assert.equal(harness.createCalls.length, 0, "history load must not create a preview");
+
+    await act(async () => { button(harness.root, "Открыть результаты").props.onClick(); });
+    await act(async () => { await settle(); });
+
+    const detailText = renderedText(harness.renderer.toJSON());
+    assert.match(detailText, /transaction_changed/);
+    assert.match(detailText, /transaction-changed/);
+    assert.equal(
+      harness.getCalls.some((path) => path.startsWith("/api/v1/transactions/")),
+      false,
+      "historical rows must not be decorated from current transactions",
+    );
+  } finally { await harness.cleanup(); }
+});
+
+test("re-review uses exactly the five eligible statuses in sequence order", () => {
+  const statuses: CategorizationApplyStatus[] = [
+    "applied",
+    "transaction_changed",
+    "rule_changed",
+    "category_changed",
+    "already_categorized",
+    "split",
+    "transfer",
+    "reconciled",
+    "closed_period",
+    "no_match",
+    "not_found",
+    "failed",
+  ];
+  const results = statuses.map((status, index) =>
+    historyResult(index, status, index === 2 ? null : `transaction-${status}`),
+  );
+  results.push(historyResult(20, "failed", "transaction-no_match"));
+  assert.deepEqual(reReviewTransactionIds(results.reverse()), [
+    "transaction-transaction_changed",
+    "transaction-category_changed",
+    "transaction-no_match",
+    "transaction-failed",
+  ]);
+});
+
+test("viewer explicitly confirms one-operation re-review and receives an unselected current preview", async () => {
+  const results = [
+    historyResult(0, "failed", "transaction-a"),
+    historyResult(1, "applied", "transaction-b"),
+    historyResult(2, "no_match", null),
+    historyResult(3, "rule_changed", "transaction-c"),
+  ];
+  const harness = await createHarness({
+    history: [historyOperation(), historyOperation({ id: "operation-history-2" })],
+    historyDetail: historyDetail(results),
+    items: [item("fresh-item", "matched", { transaction_id: "transaction-a" })],
+    onCreate: () => header({ id: "fresh-preview", selection_mode: "ids" }),
+    role: "viewer",
+  });
+  try {
+    await act(async () => { button(harness.root, "Открыть результаты").props.onClick(); });
+    await act(async () => { await settle(); });
+    await act(async () => { button(harness.root, "Проверить изменившиеся снова").props.onClick(); });
+    assert.equal(harness.createCalls.length, 0, "confirmation is required before preview creation");
+    assert.match(renderedText(harness.renderer.toJSON()), /Ничего не применится автоматически/);
+
+    await act(async () => { button(harness.root, "Создать новый список").props.onClick(); });
+    await act(async () => { await settle(); });
+
+    assert.equal(harness.createCalls.length, 1);
+    assert.deepEqual(harness.createCalls[0].body, {
+      selection: { mode: "ids", transaction_ids: ["transaction-a", "transaction-c"] },
+    });
+    assert.equal(harness.applyCalls.length, 0, "re-review must never apply automatically");
+    assert.equal(findButton(harness.root, "Подтвердить и применить"), undefined);
+    assert.equal(findButton(harness.root, "Применить выбранные"), undefined, "viewer stays read-only");
+    assert.equal(checkboxes(harness.root)[0]?.props.checked, false, "new preview starts unselected");
+  } finally { await harness.cleanup(); }
+});
+
+test("import-scoped review links to unscoped history without claiming provenance", async () => {
+  const harness = await createHarness({
+    history: [historyOperation()],
+    importScope: { kind: "valid", importBatchId: scopedBatchId },
+  });
+  try {
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /История применений доступна отдельно в общей проверке/);
+    assert.doesNotMatch(text, /Историческая попытка применения/);
+    assert.equal(
+      harness.getCalls.some((path) => path.startsWith("/api/v1/categorization-apply-operations")),
+      false,
+    );
   } finally { await harness.cleanup(); }
 });

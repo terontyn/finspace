@@ -7,6 +7,7 @@ from app.api.routes import (
     automation,
     budgets,
     categories,
+    categorization_apply_operations,
     categorization_previews,
     categorization_rules,
     dev,
@@ -52,6 +53,11 @@ api_router.include_router(
     categorization_rules.router,
     prefix="/categorization-rules",
     tags=["categorization-rules"],
+)
+api_router.include_router(
+    categorization_apply_operations.router,
+    prefix="/categorization-apply-operations",
+    tags=["categorization-apply-operations"],
 )
 api_router.include_router(
     categorization_previews.router,

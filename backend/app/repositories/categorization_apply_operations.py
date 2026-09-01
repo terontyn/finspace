@@ -1,7 +1,8 @@
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,128 @@ from app.db.models.categorization_apply_operations import (
     CategorizationApplyResult,
 )
 from app.db.models.categorization_previews import CategorizationPreviewItem
+from app.db.models.users import User
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryOperationRow:
+    operation: CategorizationApplyOperation
+    actor_display_name: str | None
+
+
+async def list_history_operations(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[list[HistoryOperationRow], int]:
+    """Return one deterministic workspace page with a bounded actor lookup."""
+    total = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(CategorizationApplyOperation)
+            .where(CategorizationApplyOperation.workspace_id == workspace_id)
+        )
+        or 0
+    )
+    rows = (
+        await session.execute(
+            select(CategorizationApplyOperation, User.display_name)
+            .outerjoin(
+                User,
+                and_(
+                    User.id == CategorizationApplyOperation.actor_user_id,
+                    User.deleted_at.is_(None),
+                ),
+            )
+            .where(CategorizationApplyOperation.workspace_id == workspace_id)
+            .order_by(
+                CategorizationApplyOperation.created_at.desc(),
+                CategorizationApplyOperation.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return [HistoryOperationRow(row[0], row[1]) for row in rows], total
+
+
+async def history_result_counts(
+    session: AsyncSession,
+    operation_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, dict[str, int]]:
+    """Aggregate an entire bounded operation page in one query, never one query per row."""
+    if not operation_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                CategorizationApplyResult.operation_id,
+                CategorizationApplyResult.status,
+                func.count(),
+            )
+            .where(CategorizationApplyResult.operation_id.in_(operation_ids))
+            .group_by(CategorizationApplyResult.operation_id, CategorizationApplyResult.status)
+        )
+    ).all()
+    counts: dict[uuid.UUID, dict[str, int]] = {}
+    for operation_id, status, count in rows:
+        counts.setdefault(operation_id, {})[status] = int(count)
+    return counts
+
+
+async def get_history_operation(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    operation_id: uuid.UUID,
+) -> HistoryOperationRow | None:
+    row = (
+        await session.execute(
+            select(CategorizationApplyOperation, User.display_name)
+            .outerjoin(
+                User,
+                and_(
+                    User.id == CategorizationApplyOperation.actor_user_id,
+                    User.deleted_at.is_(None),
+                ),
+            )
+            .where(
+                CategorizationApplyOperation.workspace_id == workspace_id,
+                CategorizationApplyOperation.id == operation_id,
+            )
+        )
+    ).one_or_none()
+    return HistoryOperationRow(row[0], row[1]) if row is not None else None
+
+
+async def list_history_results(
+    session: AsyncSession,
+    operation_id: uuid.UUID,
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[list[CategorizationApplyResult], int]:
+    total = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(CategorizationApplyResult)
+            .where(CategorizationApplyResult.operation_id == operation_id)
+        )
+        or 0
+    )
+    rows = list(
+        (
+            await session.scalars(
+                select(CategorizationApplyResult)
+                .where(CategorizationApplyResult.operation_id == operation_id)
+                .order_by(CategorizationApplyResult.sequence)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+    )
+    return rows, total
 
 
 async def claim_operation(

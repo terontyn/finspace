@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -62,6 +63,12 @@ class CategorizationApplyOperation(Base):
             "ix_categorization_apply_operations_workspace_preview",
             "workspace_id",
             "preview_id",
+        ),
+        Index(
+            "ix_categorization_apply_operations_workspace_created",
+            "workspace_id",
+            text("created_at DESC"),
+            text("id DESC"),
         ),
     )
 

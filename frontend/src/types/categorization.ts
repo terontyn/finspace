@@ -184,3 +184,51 @@ export interface CategorizationApplyResponse {
   summary: CategorizationApplySummary;
   results: CategorizationApplyItemResult[];
 }
+
+export type CategorizationApplyOperationStatus = "in_progress" | "completed";
+
+export interface CategorizationApplyHistoryCounts {
+  applied: number;
+  transaction_changed: number;
+  rule_changed: number;
+  category_changed: number;
+  already_categorized: number;
+  split: number;
+  transfer: number;
+  reconciled: number;
+  closed_period: number;
+  no_match: number;
+  not_found: number;
+  failed: number;
+}
+
+export interface CategorizationApplyHistoryOperation {
+  id: string;
+  actor: { actor_user_id: string; display_name: string | null };
+  status: CategorizationApplyOperationStatus;
+  requested_count: number;
+  result_count: number;
+  counts: CategorizationApplyHistoryCounts;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface CategorizationApplyHistoryOperationPage {
+  items: CategorizationApplyHistoryOperation[];
+  page: PageMeta;
+}
+
+export interface CategorizationApplyHistoryResult {
+  sequence: number;
+  transaction_id: string | null;
+  status: CategorizationApplyStatus;
+  error_code: string | null;
+  expected_version: number | null;
+  current_version: number | null;
+  created_at: string;
+}
+
+export interface CategorizationApplyHistoryDetail extends CategorizationApplyHistoryOperation {
+  results: CategorizationApplyHistoryResult[];
+  page: PageMeta;
+}
