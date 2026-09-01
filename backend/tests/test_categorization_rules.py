@@ -1348,19 +1348,18 @@ def test_rule_mutation_waits_for_an_apply_holding_the_shared_rule_set_lock(
     )
     shared_lock_held = asyncio.Event()
     allow_apply_to_finish = asyncio.Event()
-    original_lock = categorization_service._lock_proposed_match
+    # The proof and the mutation now live in the shared executor, so the barrier pauses inside it,
+    # at the same instant as before: after the shared rule-set lock has been taken and while the
+    # apply transaction is still open, so the competing rule mutation must wait for the commit.
+    original_prepare = categorization_service.executor.prepare_rule_set
 
-    async def paused_proof(
-        session: AsyncSession,
-        workspace_id: uuid.UUID,
-        transaction: FinancialTransaction,
-        match: categorization_service.CategorizationMatch,
-    ) -> None:
-        await original_lock(session, workspace_id, transaction, match)
+    async def paused_prepare(session, workspace_id, *, refresh: bool = False):
+        prepared = await original_prepare(session, workspace_id, refresh=refresh)
         shared_lock_held.set()
         await allow_apply_to_finish.wait()
+        return prepared
 
-    monkeypatch.setattr(categorization_service, "_lock_proposed_match", paused_proof)
+    monkeypatch.setattr(categorization_service.executor, "prepare_rule_set", paused_prepare)
 
     async def run_barrier() -> tuple[str, bool]:
         async with AsyncSessionFactory() as apply_session:

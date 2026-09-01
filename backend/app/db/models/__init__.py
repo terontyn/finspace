@@ -21,6 +21,10 @@ from app.db.models.automations import (
 )
 from app.db.models.budgets import BudgetAllocation, BudgetPeriod, BudgetPlanRevision
 from app.db.models.categories import Category
+from app.db.models.categorization_apply_operations import (
+    CategorizationApplyOperation,
+    CategorizationApplyResult,
+)
 from app.db.models.categorization_previews import (
     CategorizationPreview,
     CategorizationPreviewItem,
@@ -53,6 +57,8 @@ __all__ = [
     "BudgetAllocation",
     "BudgetPeriod",
     "BudgetPlanRevision",
+    "CategorizationApplyOperation",
+    "CategorizationApplyResult",
     "CategorizationPreview",
     "CategorizationPreviewItem",
     "CategorizationRule",

@@ -266,13 +266,20 @@ async def get_preview(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     preview_id: uuid.UUID,
+    *,
+    for_share: bool = False,
 ) -> CategorizationPreview:
     """Workspace-scoped read with logical TTL enforcement.
 
     A preview from another workspace is indistinguishable from a missing one (404). An expired
     preview belonging to this workspace reports 410 so the caller can tell the difference.
     """
-    preview = await repository.get_preview(session, workspace_id, preview_id)
+    preview = await repository.get_preview(
+        session,
+        workspace_id,
+        preview_id,
+        for_share=for_share,
+    )
     if preview is None:
         raise _not_found()
     if preview.expires_at <= datetime.now(UTC):
