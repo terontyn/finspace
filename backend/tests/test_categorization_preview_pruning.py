@@ -198,6 +198,16 @@ async def _context_for(identity: dict, session) -> RequestContext:
     )
 
 
+class _StubEngine:
+    """Stands in for the shared engine so a worker exit cannot close the suite's pool."""
+
+    def __init__(self) -> None:
+        self.disposed = False
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
 def _prune(identity: dict, *, batch_size: int = 100) -> int:
     async def run() -> int:
         async with AsyncSessionFactory() as session:
@@ -612,12 +622,10 @@ def test_once_mode_runs_one_cycle_and_reports_exit_codes(
         cycles.append(cursor)
         return await original(cursor)
 
-    # engine.dispose() would close the shared pool the rest of the suite uses.
-    async def no_dispose() -> None:
-        return None
-
     monkeypatch.setattr(worker, "run_cycle", counting)
-    monkeypatch.setattr(worker.engine, "dispose", no_dispose)
+    # Replace the engine reference itself: disposing the real one would close the pool the rest of
+    # the suite shares, and AsyncEngine.dispose is read-only so it cannot be patched in place.
+    monkeypatch.setattr(worker, "engine", _StubEngine())
 
     assert asyncio.run(worker.run_once()) == 0
     assert cycles == [None]
@@ -656,11 +664,8 @@ def test_daemon_survives_a_fatal_cycle_and_stops_promptly(monkeypatch: pytest.Mo
         worker.STOP.set()
         return worker.CycleResult()
 
-    async def no_dispose() -> None:
-        return None
-
     monkeypatch.setattr(worker, "run_cycle", flaky)
-    monkeypatch.setattr(worker.engine, "dispose", no_dispose)
+    monkeypatch.setattr(worker, "engine", _StubEngine())
 
     async def drive() -> float:
         started = asyncio.get_running_loop().time()

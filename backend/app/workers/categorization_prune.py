@@ -68,10 +68,12 @@ async def run_cycle(cursor: uuid.UUID | None) -> CycleResult:
             limit=limit,
         )
 
+    interrupted = False
     for workspace_id in workspace_ids:
         if STOP.is_set():
             # Shutdown requested: the batch just committed stands, and no new workspace is started.
             # The cursor already points past the last workspace that was actually examined.
+            interrupted = True
             break
         # The cursor advances past a failed workspace too, so one poison workspace cannot block
         # every workspace that sorts after it. It is retried on the next rotation.
@@ -93,9 +95,10 @@ async def run_cycle(cursor: uuid.UUID | None) -> CycleResult:
                 f"workspace_id={workspace_id} error_type={type(error).__name__}"
             )
 
-    if len(workspace_ids) < limit:
-        # The page was short, so the table ended here. Start the next cycle from the beginning.
-        # Never wrap inside one cycle: a workspace is examined at most once per cycle.
+    if not interrupted and len(workspace_ids) < limit:
+        # The page was short *and* the whole page was examined, so the table ended here: start the
+        # next cycle from the beginning. Never wrap inside one cycle, and never treat an
+        # interrupted cycle as the end of the table — the unexamined tail must not be skipped.
         result.next_cursor = None
     return result
 
