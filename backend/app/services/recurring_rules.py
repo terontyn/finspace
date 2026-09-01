@@ -259,6 +259,24 @@ async def due_rules(
     )
 
 
+def _execution_now(now: datetime | None) -> datetime:
+    """Current UTC instant for one execution sampling point.
+
+    Production passes ``now=None`` and therefore reads the clock afresh at every call site, exactly
+    as the inline ``datetime.now(UTC)`` calls did before this parameter existed. Tests pass an
+    explicit aware instant and get it back from every call site, deterministically.
+
+    A naive value is rejected rather than normalised: ``astimezone`` would silently interpret it in
+    the host's local timezone, which is precisely the hidden environment dependency this seam exists
+    to remove.
+    """
+    if now is None:
+        return datetime.now(UTC)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    return now.astimezone(UTC)
+
+
 async def execute_rule(
     session: AsyncSession,
     rule: RecurringRule,
@@ -269,7 +287,25 @@ async def execute_rule(
     initiated_by: uuid.UUID | None,
     request_id: str,
     trigger_type: str,
+    now: datetime | None = None,
 ) -> tuple[RecurringRuleExecution, bool]:
+    """Execute one due occurrence of a recurring rule.
+
+    ``now`` is the reference instant for "the present": the due-window guard, the execution
+    timestamps and the advanced cursor. Every production caller omits it, and each of those points
+    then samples the clock independently through :func:`_execution_now`, exactly where the inline
+    ``datetime.now(UTC)`` calls used to sit. The instant is deliberately *not* captured once on
+    entry: doing so would move the due-window comparison to before ``begin_run`` and collapse
+    timestamps that represent distinct stages of the execution.
+
+    A test passing an explicit aware instant gets that same instant from every sampling point, so
+    the whole operation becomes deterministic without changing when production reads its clock.
+    """
+    # Normalise (and validate) an injected instant once, on every path, so a naive value cannot
+    # reach a timestamp or the cursor arithmetic even when the run turns out to be a duplicate.
+    # With ``now=None`` this is a no-op and each sampling point below still reads the clock itself.
+    if now is not None:
+        now = _execution_now(now)
     scheduled = scheduled_for.astimezone(UTC).replace(microsecond=0)
     run, duplicate = await automation_runs.begin_run(
         session,
@@ -310,7 +346,7 @@ async def execute_rule(
         if (
             expected is None
             or scheduled != expected
-            or expected > datetime.now(UTC)
+            or expected > _execution_now(now)
             or rule.deleted_at is not None
             or not rule.is_active
         ):
@@ -324,7 +360,7 @@ async def execute_rule(
         scheduled_for=scheduled,
         automation_run_id=run.id,
         status="created",
-        created_at=datetime.now(UTC),
+        created_at=_execution_now(now),
     )
     session.add(execution)
     try:
@@ -353,7 +389,7 @@ async def execute_rule(
             )
         except ApiError as exc:
             execution.status = "failed"
-            execution.completed_at = datetime.now(UTC)
+            execution.completed_at = _execution_now(now)
             automation_runs.fail_run(run, exc.code, exc.message)
             await record_audit(
                 session,
@@ -379,16 +415,18 @@ async def execute_rule(
             run,
             {"status": execution.status, "transaction_id": str(transaction.id)},
         )
-    now = datetime.now(UTC)
-    execution.completed_at = now
+    # One sample shared across the final block, mirroring the single local ``now`` the baseline
+    # used here for completed_at, the cursor advance and updated_at.
+    final_now = _execution_now(now)
+    execution.completed_at = final_now
     rule.last_run_at = scheduled
     rule.next_run_at = recurrence.next_occurrence(
         rule.schedule_rrule,
         rule.timezone,
-        after=max(now, scheduled),
+        after=max(final_now, scheduled),
         anchor=rule.created_at,
     )
-    rule.updated_at = now
+    rule.updated_at = final_now
     await record_audit(
         session,
         workspace_id=rule.workspace_id,

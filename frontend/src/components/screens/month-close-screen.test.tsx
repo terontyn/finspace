@@ -16,6 +16,18 @@ import type {
 
 import { MonthCloseScreen } from "./month-close-screen";
 
+/**
+ * The reference instant every month-close test is written against.
+ *
+ * The fixtures below describe July and August 2026 and rely on the screen defaulting to the month
+ * *before* the reference — July. Pinning it removes the dependency on the machine's real month,
+ * which previously made these assertions mean something different on 1 September.
+ *
+ * 09:00 UTC on 20 August is still 20 August in every timezone offset, so the local-calendar
+ * arithmetic the screen performs resolves to August regardless of where the suite runs.
+ */
+const REFERENCE_NOW = new Date("2026-08-20T09:00:00Z");
+
 function capabilities(overrides: Partial<MonthClosure["capabilities"]> = {}): MonthClosure["capabilities"] {
   return { can_confirm: false, can_prepare: false, can_reopen: false, can_view_history: true, ...overrides };
 }
@@ -205,7 +217,7 @@ test("month close finishes loading and renders honest empty and blocked states",
   const errors: unknown[] = [];
   apiClient.get = (() => new Promise<MonthClosurePage>((resolve) => { resolvePage = resolve; })) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => errors.push(error)}/>); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => errors.push(error)}/>); });
     assert.match(JSON.stringify(renderer?.toJSON()), /Загружаем закрытие месяца/);
     await act(async () => { resolvePage?.(page(null)); await settle(); });
     const empty = JSON.stringify(renderer?.toJSON());
@@ -214,7 +226,7 @@ test("month close finishes loading and renders honest empty and blocked states",
     assert.equal(errors.length, 0);
 
     apiClient.get = (() => Promise.resolve(page(closure({ blocking_issues: [blocker], capabilities: capabilities({ can_prepare: true }), status: "blocked" })))) as typeof apiClient.get;
-    await act(async () => { renderer?.unmount(); renderer = create(<MonthCloseScreen onError={(error) => errors.push(error)}/>); await settle(); });
+    await act(async () => { renderer?.unmount(); renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => errors.push(error)}/>); await settle(); });
     const blocked = JSON.stringify(renderer?.toJSON());
     assert.match(blocked, /Заблокирован/);
     assert.match(blocked, /Черновики операций/);
@@ -246,7 +258,7 @@ test("editor prepares an empty period and reopened state does not expose owner a
     return Promise.resolve(prepared as T);
   }) as typeof apiClient.post;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     if (!renderer) throw new Error("Renderer was not created");
     await act(async () => { renderer?.root.findByProps({ children: "Подготовить" }).props.onClick(); await settle(); });
     assert.deepEqual(posts, ["/api/v1/month-close/2026/7/prepare"]);
@@ -261,7 +273,7 @@ test("editor prepares an empty period and reopened state does not expose owner a
       status: "reopened",
     });
     currentPage = page(reopened);
-    await act(async () => { renderer?.unmount(); renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer?.unmount(); renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     output = renderedText(renderer?.toJSON());
     assert.match(output, /Период открыт для поправок/);
     assert.doesNotMatch(output, /Подтвердить закрытие|Открыть повторно/);
@@ -286,7 +298,7 @@ test("load error is reported and recovers only after an explicit retry", async (
       : Promise.resolve(page(null) as T);
   }) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => errors.push(error)}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => errors.push(error)}/>); await settle(); });
     assert.match(renderedText(renderer?.toJSON()), /Не удалось загрузить состояние закрытия месяца/);
     assert.equal(errors.length, 1);
     await act(async () => { renderer?.root.findByProps({ children: "Повторить" }).props.onClick(); await settle(); });
@@ -315,7 +327,7 @@ test("confirm modal reuses one idempotency key after transport failure and does 
     return Promise.resolve(confirmedClosure as T);
   }) as typeof apiClient.post;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => errors.push(error)}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => errors.push(error)}/>); await settle(); });
     if (!renderer) throw new Error("Renderer was not created");
     await act(async () => { renderer?.root.findByProps({ children: "Подтвердить закрытие" }).props.onClick(); });
     assert.match(renderedText(renderer.toJSON()), /Операции до 2026-07-31 будут защищены от изменения/);
@@ -352,7 +364,7 @@ test("cancelled confirm dialog starts a new intent with a new key", async () => 
     return Promise.reject(new ApiClientError("network", "API_NETWORK_ERROR", 0)) as Promise<T>;
   }) as typeof apiClient.post;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     if (!renderer) throw new Error("Renderer was not created");
     await act(async () => { renderer?.root.findByProps({ children: "Подтвердить закрытие" }).props.onClick(); });
     await act(async () => { findLastByProps(renderer!, { children: "Подтвердить закрытие" }).props.onClick(); await settle(); });
@@ -387,7 +399,7 @@ test("reopen modal requires a reason, keeps its key on retry, and viewer actions
     return Promise.resolve(reopened as T);
   }) as typeof apiClient.post;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     if (!renderer) throw new Error("Renderer was not created");
     await act(async () => { renderer?.root.findByProps({ children: "Открыть повторно" }).props.onClick(); });
     const reopenButton = renderer.root.findByProps({ children: "Открыть месяц" });
@@ -402,7 +414,7 @@ test("reopen modal requires a reason, keeps its key on retry, and viewer actions
 
     const viewer = closure({ capabilities: capabilities(), current_revision: 1, current_revision_id: "revision-1", status: "confirmed" });
     currentPage = page(viewer);
-    await act(async () => { renderer?.unmount(); renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer?.unmount(); renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     const output = renderedText(renderer?.toJSON());
     assert.doesNotMatch(output, /Подтвердить закрытие/);
     assert.doesNotMatch(output, /Открыть повторно/);
@@ -428,7 +440,7 @@ test("reopen payload change after a business rejection gets a new key", async ()
     return Promise.reject(new ApiClientError("reason rejected", "VALIDATION_ERROR", 422)) as Promise<T>;
   }) as typeof apiClient.post;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     await act(async () => { renderer?.root.findByProps({ children: "Открыть повторно" }).props.onClick(); });
     await act(async () => { renderer?.root.findByType("textarea").props.onChange({ target: { value: "Причина A" } }); });
     await act(async () => { renderer?.root.findByProps({ children: "Открыть месяц" }).props.onClick(); await settle(); });
@@ -463,7 +475,7 @@ test("stale and version conflicts refetch without automatic mutation retry", asy
     return Promise.reject(new ApiClientError("stale", "MONTH_CLOSE_PREVIEW_STALE", 409));
   }) as typeof apiClient.post;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={() => undefined}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={() => undefined}/>); await settle(); });
     await act(async () => { renderer?.root.findByProps({ children: "Подтвердить закрытие" }).props.onClick(); });
     await act(async () => { if (renderer) findLastByProps(renderer, { children: "Подтвердить закрытие" }).props.onClick(); await settle(); });
     assert.equal(postCalls, 1);
@@ -502,7 +514,7 @@ test("history renders legacy warning and separates current from as-closed multi-
     throw new Error(`Unexpected request: ${path}`);
   }) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => { throw error; }}/>); await settle(); });
     assert.match(JSON.stringify(renderer?.toJSON()), /Legacy unverified/);
     await act(async () => { renderer?.root.findByProps({ children: "Открыть снимок →" }).props.onClick(); await settle(); });
     const output = renderedText(renderer?.toJSON());
@@ -557,7 +569,7 @@ test("legacy snapshot with missing sections shows unavailable instead of fake ze
     throw new Error(`Unexpected request: ${path}`);
   }) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => { throw error; }}/>); await settle(); });
     await act(async () => { renderer?.root.findByProps({ children: "Открыть снимок →" }).props.onClick(); await settle(); });
     const output = renderedText(renderer?.toJSON());
     assert.match(output, /Историческое закрытие создано/);
@@ -595,7 +607,7 @@ test("malformed historical finance rows render unavailable without synthetic zer
     throw new Error(`Unexpected request: ${path}`);
   }) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => { throw error; }}/>); await settle(); });
     await act(async () => { renderer?.root.findByProps({ children: "Открыть снимок →" }).props.onClick(); await settle(); });
     const historicalKicker = renderer?.root.findAllByProps({ className: "kicker" }).find((item) =>
       renderedText(item) === "Закрыто в revision 1"
@@ -646,7 +658,7 @@ test("valid empty historical sections remain distinct from unavailable", async (
     throw new Error(`Unexpected request: ${path}`);
   }) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => { throw error; }}/>); await settle(); });
     await act(async () => { renderer?.root.findByProps({ children: "Открыть снимок →" }).props.onClick(); await settle(); });
     const historicalKicker = renderer?.root.findAllByProps({ className: "kicker" }).find((item) =>
       renderedText(item) === "Закрыто в revision 1"
@@ -728,7 +740,7 @@ test("out-of-order history and revision responses cannot cross month boundaries"
     throw new Error(`Unexpected request: ${path}`);
   }) as typeof apiClient.get;
   try {
-    await act(async () => { renderer = create(<MonthCloseScreen onError={(error) => { throw error; }}/>); await settle(); });
+    await act(async () => { renderer = create(<MonthCloseScreen now={REFERENCE_NOW} onError={(error) => { throw error; }}/>); await settle(); });
     await act(async () => { renderer?.root.findByProps({ type: "month" }).props.onChange({ target: { value: "2026-08" } }); await settle(); });
     let historyText = renderedText(renderer?.root.findByProps({ className: "month-close-history-list" }));
     assert.match(historyText, /August actor/);
@@ -751,5 +763,49 @@ test("out-of-order history and revision responses cannot cross month boundaries"
     if (renderer) await act(async () => renderer?.unmount());
     apiClient.get = originalGet;
     restore();
+  }
+});
+
+
+test("the default period follows the injected reference instant, not the machine clock", async () => {
+  // Two reference instants a month apart must select two different default periods. Before the
+  // seam existed this default came from a module-level IIFE evaluated once from the wall clock, so
+  // the same assertion silently meant a different month depending on the day the suite ran.
+  const cases = [
+    { expected: "2026-07", now: new Date("2026-08-31T12:00:00Z") },
+    { expected: "2026-08", now: new Date("2026-09-01T12:00:00Z") },
+  ];
+  for (const { expected, now } of cases) {
+    const historyPaths: string[] = [];
+    const originalGet = apiClient.get;
+    const restoreBrowser = installBrowserGlobals();
+    let renderer: ReactTestRenderer | undefined;
+    apiClient.get = (<T,>(path: string) => {
+      // No periods, so the screen keeps the reference-derived default instead of adopting a
+      // period the backend happened to return first.
+      if (path === "/api/v1/month-close?limit=120") {
+        return Promise.resolve(page(null, { periods: [] }) as T);
+      }
+      if (path.includes("/history?")) {
+        historyPaths.push(path);
+        return Promise.resolve(historyPage([]) as T);
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }) as typeof apiClient.get;
+    try {
+      await act(async () => {
+        renderer = create(<MonthCloseScreen now={now} onError={(error) => { throw error; }}/>);
+        await settle();
+      });
+      // With no periods returned, the selection stays on the reference-derived default.
+      assert.equal(renderer?.root.findByProps({ type: "month" }).props.value, expected);
+      // The picker also refuses to look past the reference month rather than past "today".
+      assert.equal(renderer?.root.findByProps({ type: "month" }).props.max, now.toISOString().slice(0, 7));
+      assert.deepEqual(historyPaths, []);
+    } finally {
+      await act(async () => renderer?.unmount());
+      apiClient.get = originalGet;
+      restoreBrowser();
+    }
   }
 });

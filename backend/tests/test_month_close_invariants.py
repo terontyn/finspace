@@ -272,6 +272,19 @@ async def _database_counts(workspace_id: str) -> dict[str, int]:
         }
 
 
+def _month_after_current(now: datetime | None = None) -> tuple[int, int]:
+    """The month following the reference instant, which by definition has not ended.
+
+    Returned as (year, month) so the caller can state the period it exercises. Defaults to the real
+    current instant because the guard under test reads the server clock; the point is that the
+    *meaning* of the probe no longer depends on which month the suite happens to run in.
+    """
+    reference = (now or datetime.now(UTC)).astimezone(UTC)
+    if reference.month == 12:
+        return reference.year + 1, 1
+    return reference.year, reference.month + 1
+
+
 def test_state_machine_roles_completed_period_and_confirm_idempotency(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -281,7 +294,12 @@ def test_state_machine_roles_completed_period_and_confirm_idempotency(
     viewer_headers = _role_headers(identity, "viewer")
     editor_headers = _role_headers(identity, "editor")
 
-    future = _prepare(client, owner_headers, 2026, 8)
+    # "A period that has not ended cannot be closed" is a relative invariant, so the probe is
+    # relative too. This used to name 2026-08, which only read as "not ended yet" while the machine
+    # clock was still inside August 2026; from 1 September the same call legitimately succeeded and
+    # the assertion became false without anything in the product changing.
+    not_ended_year, not_ended_month = _month_after_current()
+    future = _prepare(client, owner_headers, not_ended_year, not_ended_month)
     assert future.status_code == 409
     assert future.json()["error"]["code"] == "MONTH_CLOSE_PERIOD_NOT_ENDED"
 
