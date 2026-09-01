@@ -16,6 +16,9 @@ class AuditResponse(ApiModel):
     after_data: dict[str, Any] | None
     request_id: uuid.UUID | None
     source: str
+    cause_type: str | None = None
+    cause_id: uuid.UUID | None = None
+    cause_metadata: dict[str, Any] | None = None
     created_at: datetime
 
 
