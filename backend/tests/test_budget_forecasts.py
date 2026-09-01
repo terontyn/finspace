@@ -1500,6 +1500,9 @@ def test_execution_cursor_follows_the_injected_reference_instant(client: TestCli
     )
 
     async def advance(reference: datetime) -> datetime:
+        # Anchor the schedule inside August so the daily recurrence has occurrences on both sides
+        # of the two references; otherwise the anchor would sit at the rule's real creation time.
+        await _set_rule_state(rule_payload["id"], cursor=scheduled_for, anchor=scheduled_for)
         async with AsyncSessionFactory() as session:
             rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
             assert rule is not None
