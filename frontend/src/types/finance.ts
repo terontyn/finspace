@@ -13,6 +13,14 @@ export type AccountType =
 export type CategoryType = "income" | "expense" | "both";
 export type TransactionType = "income" | "expense" | "transfer" | "refund" | "adjustment";
 export type TransactionStatus = "draft" | "confirmed" | "reconciled" | "cancelled";
+export type TransactionSource =
+  | "manual"
+  | "api"
+  | "import"
+  | "system"
+  | "google_sheets"
+  | "automation"
+  | "telegram";
 
 export interface PageMeta {
   limit: number;
@@ -145,7 +153,7 @@ export interface Transaction {
   description: string | null;
   comment: string | null;
   status: TransactionStatus;
-  source: "manual" | "api" | "import" | "system" | "google_sheets" | "automation" | "telegram";
+  source: TransactionSource;
   related_transaction_id: string | null;
   external_id: string | null;
   splits: Array<{ id: string; category_id: string; category_name: string; amount: Money }>;

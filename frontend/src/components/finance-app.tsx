@@ -9,6 +9,7 @@ import { AccountsScreen } from "@/components/screens/accounts-screen";
 import { AutomationsScreen } from "@/components/screens/automations-screen";
 import { BudgetScreen } from "@/components/screens/budget-screen";
 import { CategoriesScreen } from "@/components/screens/categories-screen";
+import { CategorizationReviewScreen } from "@/components/screens/categorization-review-screen";
 import { CategorizationRulesScreen } from "@/components/screens/categorization-rules-screen";
 import { ComingSoonScreen } from "@/components/screens/coming-soon-screen";
 import { GoogleSheetsScreen } from "@/components/screens/google-sheets-screen";
@@ -78,6 +79,7 @@ export function FinanceApp({ accountId, initialTransactionAccountId, openTransac
       {screen === "reports" && <ReportsScreen onError={showError} timezone={auth.session.workspace.timezone} />}
       {screen === "payees" && <PayeesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "rules" && <CategorizationRulesScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
+      {screen === "rules-review" && <CategorizationReviewScreen onError={showError} role={auth.role} roleLoading={auth.roleLoading} />}
       {screen === "goals" && <GoalsScreen onError={showError} preferredCurrency={auth.session.workspace.base_currency} />}
       {screen === "settings" && <ComingSoonScreen description="Настройки пространства будут перенесены после завершения интеграции рабочих финансовых экранов." title="Настройки" />}
     </AppShell>

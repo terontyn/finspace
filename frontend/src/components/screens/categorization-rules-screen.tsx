@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { EntityDrawer } from "@/components/ui/entity-drawer";
@@ -225,7 +226,7 @@ export function CategorizationRulesScreen({ onError, role, roleLoading }: Catego
   }
 
   return <section className="categorization-rules-screen">
-    <header className="screen-header"><div><span className="kicker">Явная категоризация</span><h1>Правила</h1><p>Все заполненные условия должны совпасть. Правила с меньшим номером приоритета проверяются раньше.</p></div><div className="screen-header-actions"><button className="secondary-button" disabled={isLoading} onClick={() => void load()} type="button">Обновить</button>{canWrite ? <button className="primary-button" onClick={openCreate} type="button">＋ Создать правило</button> : null}</div></header>
+    <header className="screen-header"><div><span className="kicker">Явная категоризация</span><h1>Правила</h1><p>Все заполненные условия должны совпасть. Правила с меньшим номером приоритета проверяются раньше.</p></div><div className="screen-header-actions"><Link className="secondary-button" href="/rules/review">Проверить операции</Link><button className="secondary-button" disabled={isLoading} onClick={() => void load()} type="button">Обновить</button>{canWrite ? <button className="primary-button" onClick={openCreate} type="button">＋ Создать правило</button> : null}</div></header>
     {!roleLoading && role === "viewer" ? <div className="notice notice--info" role="status"><span>Режим просмотра: правила доступны для чтения, а preview — в операциях. Изменение и применение недоступны.</span></div> : null}
     {!roleLoading && role === null ? <div className="notice notice--warning" role="status"><span>Не удалось подтвердить права записи. Управление правилами отключено.</span></div> : null}
     {screenError ? <InlineError error={screenError}/> : null}

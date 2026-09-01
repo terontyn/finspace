@@ -3,7 +3,7 @@
 import type { AuthSession } from "@/lib/api-client";
 import Link from "next/link";
 
-import { navigationGroups, type AppScreen } from "./navigation";
+import { navigationGroups, navigationScreen, type AppScreen } from "./navigation";
 
 interface SidebarProps {
   activeScreen: AppScreen;
@@ -28,7 +28,7 @@ export function Sidebar({ activeScreen, isOpen, onClose, onLogout, session }: Si
           <div className="shell-navigation-group" key={group.label}>
             <span className="shell-navigation-label">{group.label}</span>
             {group.items.map((item) => (
-              <Link className={activeScreen === item.id ? "nav-item nav-item--active" : "nav-item"} href={item.href} key={item.id} onClick={onClose}>
+              <Link className={navigationScreen(activeScreen) === item.id ? "nav-item nav-item--active" : "nav-item"} href={item.href} key={item.id} onClick={onClose}>
                 <span className="nav-icon">{item.icon}</span><span>{item.label}</span>
               </Link>
             ))}

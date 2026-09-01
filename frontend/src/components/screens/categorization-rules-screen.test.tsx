@@ -47,12 +47,13 @@ function button(root: ReactTestInstance, label: string): ReactTestInstance {
 
 function installBrowserGlobals(): () => void {
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
-  for (const key of ["window", "document", "HTMLElement", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+  for (const key of ["window", "self", "document", "HTMLElement", "IS_REACT_ACT_ENVIRONMENT"]) descriptors.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
   class TestHTMLElement { focus() {} }
-  const browser = { addEventListener: () => undefined, cancelAnimationFrame: () => undefined, removeEventListener: () => undefined, requestAnimationFrame: (callback: () => void) => { callback(); return 1; } };
+  const browser = { addEventListener: () => undefined, cancelAnimationFrame: () => undefined, clearTimeout: globalThis.clearTimeout.bind(globalThis), removeEventListener: () => undefined, requestAnimationFrame: (callback: () => void) => { callback(); return 1; }, setTimeout: globalThis.setTimeout.bind(globalThis) };
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: TestHTMLElement });
   Object.defineProperty(globalThis, "document", { configurable: true, value: { activeElement: null } });
   Object.defineProperty(globalThis, "window", { configurable: true, value: browser });
+  Object.defineProperty(globalThis, "self", { configurable: true, value: browser });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, value: true });
   return () => { for (const [key, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } };
 }
@@ -232,5 +233,16 @@ test("editing a rule whose account, payee or category is unavailable keeps the m
     const patchCall = harness.calls.find((item) => item.method === "PATCH");
     assert.ok(patchCall);
     assert.deepEqual(patchCall.body, { account_id: null, category_id: "category-1", counterparty_contains: "COFFEE", description_contains: null, is_active: true, name: "Кофе", payee_id: null, priority: 10, transaction_type: "expense", version: 1 });
+  } finally { await harness.cleanup(); }
+});
+
+test("/rules offers navigation to the review workflow", async () => {
+  const harness = await createHarness({ list: () => rulesPage([rule()]) });
+  try {
+    const link = harness.renderer.root
+      .findAllByType("a")
+      .find((node) => renderedText(node.props.children).includes("Проверить операции"));
+    assert.ok(link, "ссылка на проверку операций должна быть на экране правил");
+    assert.equal(link?.props.href, "/rules/review");
   } finally { await harness.cleanup(); }
 });
