@@ -13,7 +13,10 @@ Recovery: the operation row is claimed before any item is processed and complete
 requested item has a terminal result. A process that dies mid-request therefore leaves an operation
 whose finished items are terminal and whose remaining items were simply never attempted; retrying
 with the same idempotency key replays the former and processes only the latter. No background worker
-is involved.
+is involved. A new claim holds ``FOR SHARE`` on its live preview until the operation commits;
+physical expiry cleanup takes ``FOR UPDATE`` on that same row and retains previews referenced by a
+committed in-progress operation. Completed operations need only their independently persisted
+results and remain replayable after physical preview pruning.
 """
 
 import hashlib
@@ -322,8 +325,15 @@ async def apply_preview_items(
         preview = await preview_repository.get_preview(session, workspace_id, preview_id)
         operation = existing
     else:
-        # A brand new operation requires a live, unexpired, workspace-owned preview.
-        preview = await preview_service.get_preview(session, workspace_id, preview_id)
+        # A brand new operation requires a live, unexpired, workspace-owned preview. The shared row
+        # lock is held through item validation and operation claim/commit. Cleanup takes FOR UPDATE
+        # on the same row, establishing a strict winner without locking financial transactions.
+        preview = await preview_service.get_preview(
+            session,
+            workspace_id,
+            preview_id,
+            for_share=True,
+        )
         items = await repository.load_items(session, preview_id, item_ids)
         missing = [item for item in item_ids if item not in items]
         if missing:

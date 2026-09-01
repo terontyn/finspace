@@ -39,11 +39,11 @@ _OPERATION_STATUS_SQL = ", ".join(f"'{status}'" for status in APPLY_OPERATION_ST
 class CategorizationApplyOperation(Base):
     """One idempotent bulk-apply request.
 
-    ``preview_id`` is a plain column rather than a foreign key: preview TTL pruning must never
-    destroy the idempotency evidence that lets an interrupted request be replayed safely. The row is
-    created before any item is processed and completed once every requested item has a terminal
-    result, so a process that dies mid-request leaves a resumable operation rather than an
-    unrecoverable in-progress state.
+    ``preview_id`` is a plain column rather than a foreign key so completed-operation idempotency
+    evidence survives preview TTL pruning. While the operation is ``in_progress``, operation-aware
+    cleanup retains its preview and proposal items because unattempted work still needs them. The
+    row is created before any item is processed and completed once every requested item has a
+    terminal result, so a process that dies mid-request leaves a resumable operation.
     """
 
     __tablename__ = "categorization_apply_operations"

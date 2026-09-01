@@ -35,8 +35,9 @@ def upgrade() -> None:
         "categorization_apply_operations",
         sa.Column("id", UUID, nullable=False),
         sa.Column("workspace_id", UUID, nullable=False),
-        # Deliberately no foreign key: pruning an expired preview must not destroy the idempotency
-        # record that makes an interrupted request safely replayable.
+        # Deliberately no foreign key: terminal results of a completed operation must remain
+        # replayable after preview pruning. Operation-aware cleanup separately retains previews
+        # while an in-progress operation still has potentially unattempted proposal items.
         sa.Column("preview_id", UUID, nullable=False),
         sa.Column("actor_user_id", UUID, nullable=False),
         sa.Column("idempotency_key", sa.String(200), nullable=False),

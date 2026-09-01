@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import Select, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.categorization_apply_operations import CategorizationApplyOperation
 from app.db.models.categorization_previews import CategorizationPreview, CategorizationPreviewItem
 from app.db.models.transactions import FinancialTransaction, TransactionSplit
 
@@ -175,13 +176,19 @@ async def get_preview(
     session: AsyncSession,
     workspace_id: uuid.UUID,
     preview_id: uuid.UUID,
+    *,
+    for_share: bool = False,
 ) -> CategorizationPreview | None:
-    return await session.scalar(
-        select(CategorizationPreview).where(
-            CategorizationPreview.id == preview_id,
-            CategorizationPreview.workspace_id == workspace_id,
-        )
+    statement = select(CategorizationPreview).where(
+        CategorizationPreview.id == preview_id,
+        CategorizationPreview.workspace_id == workspace_id,
     )
+    if for_share:
+        # A new apply claim holds this lock through operation insertion. Expiry cleanup takes the
+        # conflicting FOR UPDATE lock, so either the claim becomes visible first or cleanup removes
+        # the row before the apply can validate it.
+        statement = statement.with_for_update(read=True)
+    return await session.scalar(statement)
 
 
 async def list_items(
@@ -221,11 +228,25 @@ async def delete_expired(
     *,
     limit: int = 100,
 ) -> int:
-    """Bounded physical pruning of previews whose TTL has passed.
+    """Bounded, operation-aware physical pruning of previews whose TTL has passed.
 
-    Stage A2 enforces the TTL logically on read; this is the reusable cleanup primitive. No
-    scheduler invokes it yet — scheduled pruning is deferred to later hardening.
+    Candidate preview rows are owned with ``FOR UPDATE SKIP LOCKED`` before deletion. A new apply
+    claim holds ``FOR SHARE`` on the same row until its ``in_progress`` operation is committed, so
+    cleanup either skips that locked preview or wins first and deletes it before the apply can
+    validate it. Already-committed in-progress operations protect their previews through the
+    anti-exists predicate. Completed operations do not pin previews because their terminal results
+    are independently replayable.
+
+    Stage A2 enforces TTL logically on read. No scheduler invokes this primitive yet — scheduled
+    pruning is deferred to later hardening.
     """
+    in_progress_operation = exists(
+        select(CategorizationApplyOperation.id).where(
+            CategorizationApplyOperation.workspace_id == CategorizationPreview.workspace_id,
+            CategorizationApplyOperation.preview_id == CategorizationPreview.id,
+            CategorizationApplyOperation.status == "in_progress",
+        )
+    )
     expired = list(
         (
             await session.scalars(
@@ -233,8 +254,11 @@ async def delete_expired(
                 .where(
                     CategorizationPreview.workspace_id == workspace_id,
                     CategorizationPreview.expires_at <= now,
+                    ~in_progress_operation,
                 )
+                .order_by(CategorizationPreview.expires_at, CategorizationPreview.id)
                 .limit(limit)
+                .with_for_update(of=CategorizationPreview, skip_locked=True)
             )
         ).all()
     )

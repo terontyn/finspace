@@ -8,18 +8,20 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 
 from app.core.config import settings
+from app.core.errors import ApiError
 from app.db.models.audit import AuditLog
 from app.db.models.categories import Category
 from app.db.models.categorization_apply_operations import (
     CategorizationApplyOperation,
     CategorizationApplyResult,
 )
-from app.db.models.categorization_previews import CategorizationPreview
+from app.db.models.categorization_previews import CategorizationPreview, CategorizationPreviewItem
 from app.db.models.google_sync import SyncOutbox
 from app.db.models.transactions import FinancialTransaction, TransactionSplit
 from app.db.models.users import User, Workspace, WorkspaceMember
 from app.db.session import AsyncSessionFactory
 from app.dependencies.context import RequestContext
+from app.repositories import categorization_previews as preview_repository
 from app.schemas.categorization_apply import CategorizationApplyRequest
 from app.services import categorization_apply as apply_service
 from app.services import categorization_rules as rule_service
@@ -210,6 +212,56 @@ async def _results_for(operation_id: str) -> list[CategorizationApplyResult]:
                 )
             ).all()
         )
+
+
+async def _operation_for(identity: dict, idempotency_key: str) -> CategorizationApplyOperation:
+    async with AsyncSessionFactory() as session:
+        operation = await session.scalar(
+            select(CategorizationApplyOperation).where(
+                CategorizationApplyOperation.workspace_id == uuid.UUID(identity["workspace"]["id"]),
+                CategorizationApplyOperation.idempotency_key == idempotency_key,
+            )
+        )
+        assert operation is not None
+        return operation
+
+
+async def _expire_preview(preview_id: str) -> None:
+    async with AsyncSessionFactory() as session:
+        await session.execute(
+            update(CategorizationPreview)
+            .where(CategorizationPreview.id == uuid.UUID(preview_id))
+            .values(
+                created_at=datetime.now(UTC) - timedelta(hours=48),
+                expires_at=datetime.now(UTC) - timedelta(hours=24),
+            )
+        )
+        await session.commit()
+
+
+async def _prune_preview(identity: dict, *, now: datetime | None = None) -> int:
+    async with AsyncSessionFactory() as session:
+        removed = await preview_repository.delete_expired(
+            session,
+            uuid.UUID(identity["workspace"]["id"]),
+            now or datetime.now(UTC),
+        )
+        await session.commit()
+        return removed
+
+
+async def _preview_storage(preview_id: str) -> tuple[bool, int]:
+    async with AsyncSessionFactory() as session:
+        preview = await session.get(CategorizationPreview, uuid.UUID(preview_id))
+        item_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(CategorizationPreviewItem)
+                .where(CategorizationPreviewItem.preview_id == uuid.UUID(preview_id))
+            )
+            or 0
+        )
+        return preview is not None, item_count
 
 
 async def _close_through(identity: dict, closed_through: date) -> None:
@@ -587,6 +639,270 @@ def test_interrupted_operation_resumes_only_unattempted_items(client: TestClient
             return row.status, row.completed_at is not None
 
     assert asyncio.run(operation_status()) == ("completed", True)
+
+
+def test_interrupted_operation_survives_expiry_pruning_and_resumes_unattempted_items(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, headers = _register(client, "Apply expiry recovery")
+    account = _account(client, headers, "Expiry recovery card")
+    category = _category(client, headers, "Expiry recovery target")
+    _rule(
+        client,
+        headers,
+        name="Expiry recovery rule",
+        category_id=category["id"],
+        priority=10,
+        counterparty_contains="apply shop",
+    )
+    transaction_ids = [
+        asyncio.run(
+            _insert_transaction(
+                identity,
+                account["id"],
+                counterparty=f"Apply Shop recovery {index}",
+            )
+        )
+        for index in range(2)
+    ]
+    preview = _preview(client, headers, transaction_ids)
+    items = _items(client, headers, preview["id"])
+    item_ids = [item["id"] for item in items]
+    key = "key-expiry-interrupted"
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    original_process_item = apply_service._process_item
+    attempted = 0
+
+    async def stop_before_second_item(*args: object, **kwargs: object):
+        nonlocal attempted
+        attempted += 1
+        if attempted == 2:
+            raise SimulatedProcessDeath
+        return await original_process_item(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_service, "_process_item", stop_before_second_item)
+
+    async def start_and_interrupt() -> None:
+        async with AsyncSessionFactory() as session:
+            await apply_service.apply_preview_items(
+                session,
+                await _context_for(identity, session),
+                uuid.UUID(preview["id"]),
+                CategorizationApplyRequest(item_ids=[uuid.UUID(value) for value in item_ids]),
+                key,
+            )
+
+    with pytest.raises(SimulatedProcessDeath):
+        asyncio.run(start_and_interrupt())
+    monkeypatch.setattr(apply_service, "_process_item", original_process_item)
+
+    operation = asyncio.run(_operation_for(identity, key))
+    assert operation.status == "in_progress"
+    assert len(asyncio.run(_results_for(str(operation.id)))) == 1
+    assert [asyncio.run(_transaction_row(value)).version for value in transaction_ids] == [2, 1]
+    assert [asyncio.run(_audit_count(value)) for value in transaction_ids] == [1, 0]
+    # Sync outbox emission is disabled in this test configuration; recovery must keep that count
+    # stable just as strictly as it keeps enabled-environment outbox rows from duplicating.
+    assert [asyncio.run(_outbox_count(value)) for value in transaction_ids] == [0, 0]
+
+    asyncio.run(_expire_preview(preview["id"]))
+    assert asyncio.run(_prune_preview(identity)) == 0
+    assert asyncio.run(_preview_storage(preview["id"])) == (True, 2)
+
+    resumed = _apply(client, headers, preview["id"], item_ids, key)
+    assert resumed.status_code == 200, resumed.text
+    assert [result["status"] for result in resumed.json()["results"]] == [
+        "applied",
+        "applied",
+    ]
+    assert [asyncio.run(_transaction_row(value)).version for value in transaction_ids] == [2, 2]
+    assert [asyncio.run(_audit_count(value)) for value in transaction_ids] == [1, 1]
+    assert [asyncio.run(_outbox_count(value)) for value in transaction_ids] == [0, 0]
+    assert (asyncio.run(_operation_for(identity, key))).status == "completed"
+
+    # A completed operation no longer pins its expired preview; only terminal replay evidence stays.
+    assert asyncio.run(_prune_preview(identity)) == 1
+    assert asyncio.run(_preview_storage(preview["id"])) == (False, 0)
+    assert len(asyncio.run(_results_for(str(operation.id)))) == 2
+
+    versions = [asyncio.run(_transaction_row(value)).version for value in transaction_ids]
+    audits = [asyncio.run(_audit_count(value)) for value in transaction_ids]
+    outbox = [asyncio.run(_outbox_count(value)) for value in transaction_ids]
+    replay = _apply(client, headers, preview["id"], item_ids, key)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == resumed.json()
+    assert [asyncio.run(_transaction_row(value)).version for value in transaction_ids] == versions
+    assert [asyncio.run(_audit_count(value)) for value in transaction_ids] == audits
+    assert [asyncio.run(_outbox_count(value)) for value in transaction_ids] == outbox
+
+
+def test_completed_operation_replays_after_physical_preview_pruning(
+    client: TestClient,
+) -> None:
+    identity, headers, _account_row, _category_row, _rule_row, transaction_id, preview, items = (
+        _matched_scenario(client, "Apply completed pruning")
+    )
+    item_ids = [items[0]["id"]]
+    key = "key-completed-pruning"
+    first = _apply(client, headers, preview["id"], item_ids, key)
+    assert first.status_code == 200, first.text
+    operation_id = first.json()["operation_id"]
+
+    asyncio.run(_expire_preview(preview["id"]))
+    assert asyncio.run(_prune_preview(identity)) == 1
+    assert asyncio.run(_preview_storage(preview["id"])) == (False, 0)
+    assert len(asyncio.run(_results_for(operation_id))) == 1
+
+    version = asyncio.run(_transaction_row(transaction_id)).version
+    audit_count = asyncio.run(_audit_count(transaction_id))
+    outbox_count = asyncio.run(_outbox_count(transaction_id))
+    replay = _apply(client, headers, preview["id"], item_ids, key)
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
+    assert asyncio.run(_transaction_row(transaction_id)).version == version
+    assert asyncio.run(_audit_count(transaction_id)) == audit_count
+    assert asyncio.run(_outbox_count(transaction_id)) == outbox_count
+
+    # A different key cannot recreate an operation after the proposal has been pruned.
+    fresh = _apply(client, headers, preview["id"], item_ids, "key-after-pruning")
+    assert fresh.status_code == 404
+    assert fresh.json()["error"]["code"] == "CATEGORIZATION_PREVIEW_NOT_FOUND"
+
+
+def test_apply_claim_lock_wins_against_expiry_cleanup(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, _headers, _account_row, _category_row, _rule_row, _transaction_id, preview, items = (
+        _matched_scenario(client, "Apply cleanup claim lock")
+    )
+    claim_entered = asyncio.Event()
+    release_claim = asyncio.Event()
+    original_claim = apply_service.repository.claim_operation
+
+    async def paused_claim(*args: object, **kwargs: object):
+        claim_entered.set()
+        await release_claim.wait()
+        return await original_claim(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_service.repository, "claim_operation", paused_claim)
+
+    async def race() -> tuple[int, str]:
+        async with AsyncSessionFactory() as apply_session:
+            apply_task = asyncio.create_task(
+                apply_service.apply_preview_items(
+                    apply_session,
+                    await _context_for(identity, apply_session),
+                    uuid.UUID(preview["id"]),
+                    CategorizationApplyRequest(item_ids=[uuid.UUID(items[0]["id"])]),
+                    "key-claim-lock-wins",
+                )
+            )
+            await asyncio.wait_for(claim_entered.wait(), timeout=5)
+            try:
+                # Artificial future cutoff makes the still-live preview eligible for this cleanup
+                # call while the apply transaction is holding FOR SHARE on its row.
+                removed = await asyncio.wait_for(
+                    _prune_preview(identity, now=datetime.now(UTC) + timedelta(hours=48)),
+                    timeout=5,
+                )
+            finally:
+                release_claim.set()
+            outcome = await asyncio.wait_for(apply_task, timeout=5)
+            return removed, outcome.results[0].status
+
+    assert asyncio.run(race()) == (0, "applied")
+    assert asyncio.run(_preview_storage(preview["id"])) == (True, 1)
+
+
+def test_cleanup_lock_wins_before_new_apply_claim(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity, _headers, _account_row, _category_row, _rule_row, _transaction_id, preview, items = (
+        _matched_scenario(client, "Cleanup lock wins")
+    )
+    asyncio.run(_expire_preview(preview["id"]))
+    cleanup_locked = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    apply_started = asyncio.Event()
+
+    class PausedCleanupSession:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        async def scalars(self, statement, *args: object, **kwargs: object):
+            result = await self.session.scalars(statement, *args, **kwargs)
+            cleanup_locked.set()
+            await release_cleanup.wait()
+            return result
+
+        async def execute(self, statement, *args: object, **kwargs: object):
+            return await self.session.execute(statement, *args, **kwargs)
+
+    original_get_preview = preview_repository.get_preview
+
+    async def signaled_get_preview(*args: object, **kwargs: object):
+        apply_started.set()
+        return await original_get_preview(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(preview_repository, "get_preview", signaled_get_preview)
+
+    async def race() -> tuple[int, str]:
+        async with AsyncSessionFactory() as cleanup_session:
+            cleanup_task = asyncio.create_task(
+                preview_repository.delete_expired(
+                    PausedCleanupSession(cleanup_session),  # type: ignore[arg-type]
+                    uuid.UUID(identity["workspace"]["id"]),
+                    datetime.now(UTC),
+                )
+            )
+            await asyncio.wait_for(cleanup_locked.wait(), timeout=5)
+
+            async def try_apply() -> str:
+                async with AsyncSessionFactory() as apply_session:
+                    try:
+                        await apply_service.apply_preview_items(
+                            apply_session,
+                            await _context_for(identity, apply_session),
+                            uuid.UUID(preview["id"]),
+                            CategorizationApplyRequest(item_ids=[uuid.UUID(items[0]["id"])]),
+                            "key-cleanup-lock-wins",
+                        )
+                    except ApiError as exc:
+                        return exc.code
+                raise AssertionError("Apply unexpectedly created an operation")
+
+            apply_task = asyncio.create_task(try_apply())
+            await asyncio.wait_for(apply_started.wait(), timeout=5)
+            release_cleanup.set()
+            removed = await asyncio.wait_for(cleanup_task, timeout=5)
+            await cleanup_session.commit()
+            error_code = await asyncio.wait_for(apply_task, timeout=5)
+            return removed, error_code
+
+    assert asyncio.run(race()) == (1, "CATEGORIZATION_PREVIEW_NOT_FOUND")
+    assert asyncio.run(_preview_storage(preview["id"])) == (False, 0)
+
+    async def operation_count() -> int:
+        async with AsyncSessionFactory() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(CategorizationApplyOperation)
+                    .where(
+                        CategorizationApplyOperation.workspace_id
+                        == uuid.UUID(identity["workspace"]["id"])
+                    )
+                )
+                or 0
+            )
+
+    assert asyncio.run(operation_count()) == 0
 
 
 def test_stale_transaction_split_and_category_races_never_overwrite(client: TestClient) -> None:
