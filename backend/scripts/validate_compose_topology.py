@@ -199,6 +199,12 @@ def validate_production(config: dict[str, Any]) -> None:
     if _mounts(worker):
         raise TopologyError("Production sync-worker must not have source or runtime mounts")
 
+    prune_worker = _service(config, "categorization-prune")
+    if _mounts(prune_worker):
+        raise TopologyError(
+            "Production categorization-prune must not have source or runtime mounts"
+        )
+
     if _mounts(frontend):
         raise TopologyError("Production frontend must not have source or cache mounts")
     if _command(frontend) != ["npm", "run", "start"]:

@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     google_sheets_template_version: int = Field(default=1, ge=1)
     public_webhook_base_url: str | None = None
 
+    # Physical garbage collection of expired categorization previews. The v0.12 logical TTL stays
+    # authoritative; these only bound how aggressively the maintenance worker reclaims rows.
+    categorization_prune_enabled: bool = True
+    categorization_prune_poll_seconds: int = Field(default=900, ge=60, le=86400)
+    categorization_prune_batch_size: int = Field(default=100, ge=1, le=500)
+    categorization_prune_max_workspaces_per_cycle: int = Field(default=50, ge=1, le=500)
+
     n8n_heartbeat_stale_minutes: int = Field(default=15, ge=1, le=1440)
     backup_stale_hours: int = Field(default=36, ge=1, le=8760)
     backup_metadata_path: Path = Path("/app/backups/database")

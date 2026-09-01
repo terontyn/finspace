@@ -18,6 +18,9 @@ services:
   sync-worker:
     volumes: !reset []
 
+  categorization-prune:
+    volumes: !reset []
+
   frontend:
     build:
       target: production

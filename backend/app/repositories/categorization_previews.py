@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.categorization_apply_operations import CategorizationApplyOperation
 from app.db.models.categorization_previews import CategorizationPreview, CategorizationPreviewItem
 from app.db.models.transactions import FinancialTransaction, TransactionSplit
+from app.db.models.users import Workspace
 
 # Detail loading is chunked so a large selection never becomes one enormous IN list.
 DETAIL_CHUNK = 500
@@ -271,3 +272,22 @@ async def delete_expired(
         delete(CategorizationPreview).where(CategorizationPreview.id.in_(expired))
     )
     return len(expired)
+
+
+async def list_workspace_ids_after(
+    session: AsyncSession,
+    *,
+    after_id: uuid.UUID | None,
+    limit: int,
+) -> list[uuid.UUID]:
+    """One bounded keyset page of workspace identifiers, ordered by primary key.
+
+    Maintenance sweeps use this instead of loading the workspace table: the pruning predicate is
+    workspace-scoped, so the worker walks workspaces a page at a time and never holds more than one
+    page in memory. No locks are taken — the page is only a work list, and every prune decision is
+    re-made under the row locks ``delete_expired`` acquires.
+    """
+    statement = select(Workspace.id).order_by(Workspace.id).limit(limit)
+    if after_id is not None:
+        statement = statement.where(Workspace.id > after_id)
+    return list((await session.scalars(statement)).all())

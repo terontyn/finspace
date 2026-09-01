@@ -291,3 +291,31 @@ async def get_preview(
             details={"expires_at": preview.expires_at.isoformat()},
         )
     return preview
+
+
+async def prune_workspace_previews(
+    session: AsyncSession,
+    workspace_id: uuid.UUID,
+    *,
+    now: datetime,
+    batch_size: int,
+) -> int:
+    """Physically delete one bounded batch of expired previews for one workspace, and commit it.
+
+    Exactly one batch per call: a workspace with a large backlog drains over repeated polling
+    cycles instead of monopolising a single one. The transaction boundary lives here rather than in
+    the repository, which stays commit-free, and rather than in the worker, which stays free of SQL.
+
+    ``now`` is supplied by the caller and must be timezone-aware; nothing here reads the clock, so a
+    whole cycle can compare every workspace against one instant.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    deleted = await repository.delete_expired(
+        session,
+        workspace_id,
+        now,
+        limit=batch_size,
+    )
+    await session.commit()
+    return deleted
