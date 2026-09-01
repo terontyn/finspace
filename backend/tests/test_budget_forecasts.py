@@ -1488,20 +1488,22 @@ def test_execution_cursor_follows_the_injected_reference_instant(client: TestCli
     identity, headers = _register(client, "Forecast reference")
     account, expense, _ = _create_budget_references(client, headers, "2026-08")
     scheduled_for = datetime(2026, 8, 12, tzinfo=UTC)
-    rule_payload = _rule(
-        client,
-        headers,
-        name="Reference cursor",
-        account_id=account["id"],
-        category_id=expense["id"],
-        transaction_type="expense",
-        amount="5.0000",
-        rrule="FREQ=DAILY;BYHOUR=0;BYMINUTE=0",
-    )
 
-    async def advance(reference: datetime) -> datetime:
-        # Anchor the schedule inside August so the daily recurrence has occurrences on both sides
-        # of the two references; otherwise the anchor would sit at the rule's real creation time.
+    async def advance(label: str, reference: datetime) -> datetime:
+        # A fresh rule per reference: executing one occurrence is idempotent by design, so reusing
+        # a rule wouldshort-circuit the second call instead of advancing its cursor again.
+        rule_payload = _rule(
+            client,
+            headers,
+            name=f"Reference cursor {label}",
+            account_id=account["id"],
+            category_id=expense["id"],
+            transaction_type="expense",
+            amount="5.0000",
+            rrule="FREQ=DAILY;BYHOUR=0;BYMINUTE=0",
+        )
+        # Anchor the schedule inside August so the daily recurrence has occurrences on both sides of
+        # the two references; otherwise the anchor would sit at the rule's real creation time.
         await _set_rule_state(rule_payload["id"], cursor=scheduled_for, anchor=scheduled_for)
         async with AsyncSessionFactory() as session:
             rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
@@ -1519,16 +1521,18 @@ def test_execution_cursor_follows_the_injected_reference_instant(client: TestCli
             )
             assert rule.next_run_at is not None
             advanced = rule.next_run_at
-            await session.rollback()
+            await session.commit()
             return advanced
 
-    august = asyncio.run(advance(datetime(2026, 8, 12, 12, 0, tzinfo=UTC)))
-    september = asyncio.run(advance(datetime(2026, 9, 1, 12, 0, tzinfo=UTC)))
+    august_reference = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    september_reference = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    august = asyncio.run(advance("august", august_reference))
+    september = asyncio.run(advance("september", september_reference))
 
     # Each cursor lands strictly after its own reference, and inside that reference's month.
-    assert august > datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    assert august > august_reference
     assert august.astimezone(UTC).month == 8
-    assert september > datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    assert september > september_reference
     assert september.astimezone(UTC).month == 9
     assert august < september
     assert identity is not None
