@@ -14,6 +14,7 @@ accepted consequence of garbage collection rather than a behaviour change.
 
 import asyncio
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -51,10 +52,17 @@ def _configure_pruning_tests(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_stop() -> None:
-    worker.STOP.clear()
+def _reset_stop() -> Iterator[None]:
+    """Give every test a fresh STOP event.
+
+    ``asyncio.Event`` binds to the loop that first awaits it, and each test here runs its own
+    ``asyncio.run`` loop. The worker holds the event as a module global — correct for a process
+    that owns a single loop for its lifetime — so the test replaces the object rather than
+    clearing it.
+    """
+    worker.STOP = asyncio.Event()
     yield
-    worker.STOP.clear()
+    worker.STOP = asyncio.Event()
 
 
 def _register(client: TestClient, label: str) -> tuple[dict, dict[str, str]]:
@@ -689,7 +697,6 @@ def test_stop_interrupts_a_long_poll_sleep(monkeypatch: pytest.MonkeyPatch) -> N
     non-interruptible sleep would never return.
     """
     monkeypatch.setattr(settings, "categorization_prune_poll_seconds", 3600)
-    worker.STOP.clear()
 
     cycles: list[int] = []
 
