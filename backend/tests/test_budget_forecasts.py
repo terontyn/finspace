@@ -1,9 +1,10 @@
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1536,3 +1537,170 @@ def test_execution_cursor_follows_the_injected_reference_instant(client: TestCli
     assert september.astimezone(UTC).month == 9
     assert august < september
     assert identity is not None
+
+
+def _execution_rule(
+    client: TestClient,
+    headers: dict,
+    account: dict,
+    expense: dict,
+    name: str,
+) -> dict:
+    return _rule(
+        client,
+        headers,
+        name=name,
+        account_id=account["id"],
+        category_id=expense["id"],
+        transaction_type="expense",
+        amount="5.0000",
+        rrule="FREQ=DAILY;BYHOUR=0;BYMINUTE=0",
+    )
+
+
+def test_explicit_reference_instant_reaches_every_sampling_point(client: TestClient) -> None:
+    """An injected aware instant is what every timestamp and the cursor are derived from."""
+    _identity, headers = _register(client, "Execution clock explicit")
+    account, expense, _ = _create_budget_references(client, headers, "2026-08")
+    scheduled_for = datetime(2026, 8, 12, tzinfo=UTC)
+    reference = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    rule_payload = _execution_rule(client, headers, account, expense, "Explicit reference")
+
+    async def run() -> tuple[datetime | None, datetime | None, datetime, datetime]:
+        await _set_rule_state(rule_payload["id"], cursor=scheduled_for, anchor=scheduled_for)
+        async with AsyncSessionFactory() as session:
+            rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
+            assert rule is not None
+            execution, _duplicate = await recurring_rules.execute_rule(
+                session,
+                rule,
+                scheduled_for=scheduled_for,
+                idempotency_key=f"explicit-{uuid.uuid4()}",
+                service_account_id=None,
+                initiated_by=rule.created_by,
+                request_id=str(uuid.uuid4()),
+                trigger_type="test",
+                now=reference,
+            )
+            assert rule.next_run_at is not None
+            state = (
+                execution.created_at,
+                execution.completed_at,
+                rule.updated_at,
+                rule.next_run_at,
+            )
+            await session.commit()
+            return state
+
+    created_at, completed_at, updated_at, cursor = asyncio.run(run())
+    assert created_at == reference
+    assert completed_at == reference
+    assert updated_at == reference
+    # The advanced cursor is the first occurrence after the injected instant, not after "today".
+    assert cursor > reference
+    assert cursor.astimezone(UTC).month == 8
+
+
+def test_naive_reference_instant_is_rejected(client: TestClient) -> None:
+    """A naive value would be read in the host timezone, so it is refused outright."""
+    _identity, headers = _register(client, "Execution clock naive")
+    account, expense, _ = _create_budget_references(client, headers, "2026-08")
+    scheduled_for = datetime(2026, 8, 12, tzinfo=UTC)
+    rule_payload = _execution_rule(client, headers, account, expense, "Naive reference")
+
+    async def run() -> str:
+        await _set_rule_state(rule_payload["id"], cursor=scheduled_for, anchor=scheduled_for)
+        async with AsyncSessionFactory() as session:
+            rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
+            assert rule is not None
+            try:
+                await recurring_rules.execute_rule(
+                    session,
+                    rule,
+                    scheduled_for=scheduled_for,
+                    idempotency_key=f"naive-{uuid.uuid4()}",
+                    service_account_id=None,
+                    initiated_by=rule.created_by,
+                    request_id=str(uuid.uuid4()),
+                    trigger_type="test",
+                    now=datetime(2026, 8, 12, 12, 0),
+                )
+            except ValueError as error:
+                await session.rollback()
+                return str(error)
+            raise AssertionError("A naive reference instant was accepted")
+
+    assert "timezone-aware" in asyncio.run(run())
+
+    # The rejected call left the rule untouched.
+    async def cursor() -> datetime | None:
+        async with AsyncSessionFactory() as session:
+            rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
+            assert rule is not None
+            return rule.next_run_at
+
+    assert asyncio.run(cursor()) == scheduled_for
+
+
+def test_default_path_samples_the_clock_at_each_point(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production must keep reading the clock per sampling point, not once on entry.
+
+    The helper is replaced with a counter that hands back a strictly increasing instant, so a single
+    entry-time snapshot would make ``created_at`` and the final block identical. They must differ.
+    """
+    _identity, headers = _register(client, "Execution clock default")
+    account, expense, _ = _create_budget_references(client, headers, "2026-08")
+    scheduled_for = datetime(2026, 8, 12, tzinfo=UTC)
+    rule_payload = _execution_rule(client, headers, account, expense, "Default sampling")
+
+    base = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+    observed: list[datetime | None] = []
+
+    def counting_now(now: datetime | None) -> datetime:
+        observed.append(now)
+        return base + timedelta(seconds=len(observed))
+
+    monkeypatch.setattr(recurring_rules, "_execution_now", counting_now)
+
+    async def run() -> tuple[datetime | None, datetime | None, datetime]:
+        await _set_rule_state(rule_payload["id"], cursor=scheduled_for, anchor=scheduled_for)
+        async with AsyncSessionFactory() as session:
+            rule = await session.get(RecurringRule, uuid.UUID(rule_payload["id"]))
+            assert rule is not None
+            execution, _duplicate = await recurring_rules.execute_rule(
+                session,
+                rule,
+                scheduled_for=scheduled_for,
+                idempotency_key=f"default-{uuid.uuid4()}",
+                service_account_id=None,
+                initiated_by=rule.created_by,
+                request_id=str(uuid.uuid4()),
+                trigger_type="test",
+            )
+            state = (execution.created_at, execution.completed_at, rule.updated_at)
+            await session.commit()
+            return state
+
+    created_at, completed_at, updated_at = asyncio.run(run())
+    # Production path: every sampling point asked for the current instant itself.
+    assert observed == [None, None]
+    assert created_at == base + timedelta(seconds=1)
+    # The final block shares one sample, exactly as the pre-seam code shared its local `now`.
+    assert completed_at == updated_at == base + timedelta(seconds=2)
+    assert created_at != completed_at
+
+
+def test_execution_now_helper_contract() -> None:
+    """The helper itself: fresh read by default, passthrough for aware, refusal for naive."""
+    before = datetime.now(UTC)
+    default = recurring_rules._execution_now(None)
+    assert before <= default <= datetime.now(UTC)
+
+    aware = datetime(2026, 8, 12, 17, 0, tzinfo=ZoneInfo("Asia/Yekaterinburg"))
+    assert recurring_rules._execution_now(aware) == datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        recurring_rules._execution_now(datetime(2026, 8, 12, 12, 0))
