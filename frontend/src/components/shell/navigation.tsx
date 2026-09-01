@@ -9,6 +9,7 @@ export type AppScreen =
   | "categories"
   | "payees"
   | "rules"
+  | "rules-review"
   | "goals"
   | "imports"
   | "google"
@@ -19,8 +20,16 @@ export type AppScreen =
   | "month-close"
   | "settings";
 
+/** Sub-screens keep their parent nav item highlighted. */
+export function navigationScreen(screen: AppScreen): AppScreen {
+  return screen === "rules-review" ? "rules" : screen;
+}
+
+/** Screens that own a navigation entry. Sub-screens like "rules-review" do not. */
+export type NavScreen = Exclude<AppScreen, "rules-review">;
+
 export interface NavigationItem {
-  id: AppScreen;
+  id: NavScreen;
   label: string;
   href: string;
   icon: ReactNode;
@@ -34,7 +43,7 @@ function Icon({ children }: { children: ReactNode }) {
   );
 }
 
-const icons: Record<AppScreen, ReactNode> = {
+const icons: Record<NavScreen, ReactNode> = {
   today: <Icon><path d="M3 10.5 12 3l9 7.5M5 9.5V21h14V9.5M9 21v-7h6v7" /></Icon>,
   transactions: <Icon><path d="M7 4h10m-7-3L7 4l3 3m4 10h-4m7-3 3 3-3 3M7 17h10" /></Icon>,
   accounts: <Icon><rect height="15" rx="2" width="20" x="2" y="5"/><path d="M2 10h20M17 15h.01" /></Icon>,
