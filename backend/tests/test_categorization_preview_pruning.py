@@ -682,10 +682,19 @@ def test_daemon_survives_a_fatal_cycle_and_stops_promptly(monkeypatch: pytest.Mo
 
 
 def test_stop_interrupts_a_long_poll_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """STOP raised while the daemon sleeps ends it immediately, not after the full interval."""
+    """STOP raised during the poll sleep ends the daemon immediately, not an hour later.
+
+    The discriminator is the cycle count: a daemon that was genuinely parked on the interruptible
+    timer runs exactly one cycle across the whole test, while a hot loop would run many and a
+    non-interruptible sleep would never return.
+    """
     monkeypatch.setattr(settings, "categorization_prune_poll_seconds", 3600)
+    worker.STOP.clear()
+
+    cycles: list[int] = []
 
     async def empty(_cursor):
+        cycles.append(len(cycles))
         return worker.CycleResult()
 
     stub = _StubEngine()
@@ -696,14 +705,14 @@ def test_stop_interrupts_a_long_poll_sleep(monkeypatch: pytest.MonkeyPatch) -> N
         loop = asyncio.get_running_loop()
         started = loop.time()
         task = asyncio.create_task(worker.run())
-        # Let the first cycle finish and the daemon settle into its one-hour sleep.
+        # Let the first cycle finish and the daemon settle onto its one-hour timer.
         await asyncio.sleep(0.2)
-        assert not task.done()
         worker.STOP.set()
         await asyncio.wait_for(task, timeout=10)
         return loop.time() - started
 
     elapsed = asyncio.run(drive())
+    assert cycles == [0]
     assert elapsed < 5
     assert stub.disposed is True
 
