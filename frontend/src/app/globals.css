@@ -1206,12 +1206,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .transaction-filter-chips button.is-active { border-color: var(--border-accent); background: var(--accent-muted); color: var(--accent); }
 .transaction-result-line { display: flex; min-height: 39px; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; background: var(--surface-3); color: var(--text-secondary); font-size: 9px; }
 .transaction-result-line strong { color: var(--text-primary); }
-.transaction-bulk { display: flex; align-items: center; gap: 12px; }.transaction-bulk > span { color: var(--warning); }
+
 .transaction-table-wrap { position: relative; min-height: 250px; overflow-x: auto; }
 .transaction-table { min-width: 1000px; }
 .transaction-table th { padding: 10px 12px; color: var(--text-muted); font-size: 8px; letter-spacing: .07em; text-transform: uppercase; }
 .transaction-table td { padding: 12px; font-size: 10px; vertical-align: middle; }
-.transaction-table tr.is-selected td { background: var(--accent-soft); }
+
 .transaction-table td:nth-child(3), .transaction-table td:nth-child(5) { max-width: 210px; }
 .transaction-table td:nth-child(3) strong, .transaction-table td:nth-child(3) small, .transaction-table td:nth-child(5) strong, .transaction-table td:nth-child(5) small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transaction-table td small { margin-top: 3px; color: var(--text-secondary); font-size: 8px; }
@@ -1276,9 +1276,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .screen-header-actions { width: 100%; }.screen-header-actions > button { flex: 1; }
   .transaction-ledger { margin-inline: -3px; }
   .transaction-filters { padding: 12px; }.transaction-search { min-width: calc(100% - 76px); }.transaction-filter-chips { width: 100%; overflow-x: auto; }.transaction-filters select { flex: 1; min-width: 0; }
-  .transaction-result-line { overflow-x: auto; white-space: nowrap; }.transaction-bulk > span { display: none; }
+  .transaction-result-line { overflow-x: auto; white-space: nowrap; }
   .transaction-table { display: none; }.transaction-mobile-list { display: grid; padding: 5px 12px 12px; }
-  .transaction-mobile-card { padding: 13px 0; border-bottom: 1px solid var(--border); }.transaction-mobile-card.is-selected { margin-inline: -8px; padding-inline: 8px; border-radius: 9px; background: var(--accent-soft); }.transaction-mobile-card > div { display: grid; grid-template-columns: 18px 32px 1fr auto; align-items: center; gap: 9px; }.transaction-mobile-card > div > div { display: flex; min-width: 0; flex-direction: column; }.transaction-mobile-card strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.transaction-mobile-card small { margin-top: 3px; color: var(--text-secondary); font-size: 8px; }.transaction-mobile-card b { font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }.transaction-mobile-card footer { display: flex; align-items: center; gap: 5px; padding: 8px 0 0 59px; }.transaction-mobile-card footer .text-button:first-of-type { margin-left: auto; }
+  .transaction-mobile-card { padding: 13px 0; border-bottom: 1px solid var(--border); }.transaction-mobile-card > div { display: grid; grid-template-columns: 32px 1fr auto; align-items: center; gap: 9px; }.transaction-mobile-card > div > div { display: flex; min-width: 0; flex-direction: column; }.transaction-mobile-card strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.transaction-mobile-card small { margin-top: 3px; color: var(--text-secondary); font-size: 8px; }.transaction-mobile-card b { font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }.transaction-mobile-card footer { display: flex; align-items: center; gap: 5px; padding: 8px 0 0 41px; }.transaction-mobile-card footer .text-button:first-of-type { margin-left: auto; }
   .transaction-type-icon { display: grid; width: 31px; height: 31px; place-items: center; border-radius: 9px; background: var(--surface-3); color: var(--text-secondary); }.transaction-type-icon--income { background: var(--positive-bg); color: var(--positive); }.transaction-type-icon--transfer { background: var(--info-bg); color: var(--info); }
   .transaction-drawer { padding: 20px 16px; }.drawer-form-grid { grid-template-columns: 1fr; }.transaction-drawer footer { position: sticky; bottom: -20px; margin-inline: -16px; padding: 13px 16px 20px; background: var(--surface-2); }.transaction-drawer footer > button { flex: 1; }
 }
