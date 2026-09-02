@@ -66,9 +66,22 @@ cp -R "$source". "$target" 2>/dev/null || cp -R "$source"/. "$target"
 [ ! -f "$CORRUPT_TRANSFER" ] || printf 'corrupted' >"$target/database.dump"
 exit 0
 STUB
+# The fake docker records what the world looked like AT AUDIT TIME, which is how ordering is
+# proven: the report must not yet claim success, and the remote set must already be published.
 cat >"$bin/docker" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >>"$DOCKER_LOG"
+case "$*" in
+  *backup-remote-audit.sh*)
+    grep -o '"offhost_verified": [a-z]*' "$REPORT_PATH" | head -n 1 | awk '{print $2}' >"$AUDIT_SAW_REPORT"
+    if [ -d "$FINAL_PATH" ]; then
+      printf 'yes\n' >"$AUDIT_SAW_FINAL"
+    else
+      printf 'no\n' >"$AUDIT_SAW_FINAL"
+    fi
+    [ ! -f "$AUDIT_FAIL" ] || exit 1
+    ;;
+esac
 exit 0
 STUB
 chmod 755 "$bin/ssh" "$bin/rsync" "$bin/docker"
@@ -115,6 +128,11 @@ run_offhost() {
   SSH_FAIL="$test_root/ssh.fail" \
   RSYNC_FAIL="$test_root/rsync.fail" \
   CORRUPT_TRANSFER="$test_root/corrupt" \
+  AUDIT_FAIL="$test_root/audit.fail" \
+  AUDIT_SAW_REPORT="$test_root/audit-saw-report" \
+  AUDIT_SAW_FINAL="$test_root/audit-saw-final" \
+  REPORT_PATH="$set_dir/backup-set-report.json" \
+  FINAL_PATH="$remote_root/finspace/sets/$set_id" \
   FINSPACE_BACKUP_ROOT="$backup_root" \
   FINSPACE_BACKUP_REMOTE_HOST="${HOST_OVERRIDE-backup.example.invalid}" \
   FINSPACE_BACKUP_REMOTE_USER="finspace-backup" \
@@ -129,6 +147,7 @@ reset_logs() {
   : >"$test_root/ssh.log"
   : >"$test_root/rsync.log"
   : >"$test_root/docker.log"
+  rm -f "$test_root/audit-saw-report" "$test_root/audit-saw-final"
 }
 
 # --- A: successful copy ------------------------------------------------------------------------
@@ -265,5 +284,77 @@ if run_offhost "$set_id" >/dev/null 2>&1; then
   fail "an unverified set was copied off-host"
 fi
 assert_equal "" "$(cat "$test_root/ssh.log")" "an unverified set reached the network"
+
+
+# --- ordering: the audit row must exist before the report claims success -------------------------
+rm -rf "$remote_root/finspace"
+write_report true
+reset_logs
+run_offhost "$set_id" >/dev/null || fail "a valid off-host copy failed"
+
+# Captured by the fake docker at the moment the audit ran.
+assert_equal "false" "$(cat "$test_root/audit-saw-report")" \
+  "the report claimed off-host success before the audit row existed"
+assert_equal "yes" "$(cat "$test_root/audit-saw-final")" \
+  "the audit ran before the remote set was published"
+assert_contains "$(cat "$set_dir/backup-set-report.json")" '"offhost_verified": true' \
+  "the report was not updated after a successful audit"
+
+# --- H: audit failure after a valid remote publish ----------------------------------------------
+rm -rf "$remote_root/finspace"
+write_report true
+reset_logs
+: >"$test_root/audit.fail"
+if run_offhost "$set_id" >/dev/null 2>&1; then
+  fail "a failed audit exited zero"
+fi
+rm "$test_root/audit.fail"
+
+# The remote data is genuinely published and correct, so it is deliberately kept.
+[ -d "$final" ] || fail "a valid remote set was destroyed because the audit failed"
+assert_equal "$dump_sha" "$(sha256sum "$final/database.dump" | awk '{print $1}')" \
+  "the published remote set was damaged"
+[ ! -d "$remote_root/finspace/sets/.$set_id.partial" ] || fail "a partial survived an audit failure"
+
+# But nothing may claim off-host success without the audit row Stage B relies on.
+audit_report=$(cat "$set_dir/backup-set-report.json")
+assert_contains "$audit_report" '"offhost_verified": false' \
+  "the report claimed off-host success without an audit row"
+assert_contains "$audit_report" '"offhost_verified_at": null' "a success timestamp was recorded"
+assert_contains "$audit_report" '"offhost_destination_label": null' "a destination label was recorded"
+assert_contains "$audit_report" '"error": "remote set published but audit recording failed"' \
+  "the audit failure left no safe evidence"
+assert_contains "$audit_report" '"local_verified": true' "local verification was lost"
+case "$audit_report" in
+  *"$remote_root"*|*"$ssh_key"*|*"backup.example.invalid"*|*"finspace-backup"*)
+    fail "the failure evidence leaked a path, host, user or key" ;;
+esac
+
+# --- B (extended): a failed transfer records evidence and leaves nothing behind -------------------
+rm -rf "$remote_root/finspace"
+write_report true
+reset_logs
+: >"$test_root/rsync.fail"
+if run_offhost "$set_id" >/dev/null 2>&1; then
+  fail "a failed transfer exited zero"
+fi
+rm "$test_root/rsync.fail"
+
+[ ! -d "$remote_root/finspace/sets/$set_id" ] || fail "a failed transfer published a final set"
+[ ! -d "$remote_root/finspace/sets/.$set_id.partial" ] || fail "the remote partial was not discarded"
+assert_equal "0" "$(grep -c 'backup-remote-audit.sh' "$test_root/docker.log" || true)" \
+  "an audit row was recorded for a failed transfer"
+rsync_report=$(cat "$set_dir/backup-set-report.json")
+assert_contains "$rsync_report" '"offhost_verified": false' "a failed transfer reported success"
+assert_contains "$rsync_report" '"error": "remote transfer failed"' \
+  "a failed transfer left no safe evidence"
+case "$rsync_report" in
+  *"$remote_root"*|*"$ssh_key"*|*"backup.example.invalid"*|*"finspace-backup"*)
+    fail "the failure evidence leaked a path, host, user or key" ;;
+esac
+# Local artifacts are untouched.
+assert_equal "$dump_sha" "$(sha256sum "$dump_path" | awk '{print $1}')" "local dump after failure"
+[ -s "$dump_path.manifest.json" ] || fail "the local database manifest was disturbed"
+[ -s "$set_dir/backup-set.json" ] || fail "the local inventory was disturbed"
 
 printf 'backup-offhost test: PASS\n'

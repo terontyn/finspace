@@ -176,9 +176,24 @@ remote_sets="${remote_root}/finspace/sets"
 remote_partial="${remote_sets}/.${set_id}.partial"
 remote_final="${remote_sets}/${set_id}"
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+compose="${FINSPACE_COMPOSE:-docker compose}"
+dump_filename="$(basename "$dump_path")"
+
 # shellcheck disable=SC2086
 run_ssh() {
   ssh $ssh_options "$remote" "$@"
+}
+
+# Safe summaries only: a failure reason must never carry a host, user, remote path or key name.
+record_failure() {
+  FINSPACE_BACKUP_ROOT="$backup_root"     sh "$script_dir/backup-set-report.sh" "$set_id" --offhost-failed "$1" || true
+}
+
+# Best effort by design: a remote that cannot be cleaned must never turn a failed transfer into a
+# success, so the caller exits non-zero regardless of what happens here.
+discard_remote_partial() {
+  run_ssh "rm -rf -- '$remote_partial'" >/dev/null 2>&1 || true
 }
 
 # Refuse rather than overwrite: an existing final set is evidence of an earlier successful run.
@@ -188,14 +203,20 @@ if run_ssh "test -e '$remote_final'"; then
 fi
 run_ssh "umask 077; rm -rf -- '$remote_partial'; mkdir -p '$remote_partial'"
 
+# Explicitly guarded rather than left to `set -e`: an aborting rsync would skip both the remote
+# cleanup and the failure evidence, leaving a stale partial and a silent report.
 # shellcheck disable=SC2086
-rsync --archive --checksum --chmod=D700,F600 \
-  -e "ssh $ssh_options" "$staging/" "${remote}:${remote_partial}/"
+if ! rsync --archive --checksum --chmod=D700,F600   -e "ssh $ssh_options" "$staging/" "${remote}:${remote_partial}/"; then
+  echo "Off-host copy failed: the transfer did not complete." >&2
+  discard_remote_partial
+  record_failure "remote transfer failed"
+  exit 1
+fi
 
 if ! run_ssh "cd '$remote_partial' && sha256sum -c SHA256SUMS >/dev/null 2>&1"; then
   echo "Off-host copy failed: remote SHA-256 verification did not pass." >&2
-  run_ssh "rm -rf -- '$remote_partial'" || true
-  FINSPACE_BACKUP_ROOT="$backup_root"     sh "$(cd "$(dirname "$0")" && pwd)/backup-set-report.sh"     "$set_id" --offhost-failed "remote checksum verification failed" || true
+  discard_remote_partial
+  record_failure "remote checksum verification failed"
   exit 1
 fi
 
@@ -203,24 +224,26 @@ fi
 # look like a completed remote backup.
 if ! run_ssh "test ! -e '$remote_final' && mv '$remote_partial' '$remote_final'"; then
   echo "Off-host copy failed: the final remote set could not be published atomically." >&2
+  discard_remote_partial
+  record_failure "remote publication failed"
   exit 1
 fi
 
 cleanup_staging
 trap - EXIT HUP INT TERM
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
-compose="${FINSPACE_COMPOSE:-docker compose}"
-dump_filename="$(basename "$dump_path")"
-
-# Evidence is written only after the set is genuinely published and hash-verified on the remote.
-FINSPACE_BACKUP_ROOT="$backup_root" sh "$script_dir/backup-set-report.sh"   "$set_id" --offhost-verified "$label"
-
-# psql lives in the tools image, not on the host. The audit row reuses the existing
-# backup.remote.copy action so Stage B can correlate it with backup.created by SHA-256.
+# Stage B treats backup.remote.copy as the authoritative off-host evidence, so the audit row has to
+# exist before the report claims success — the two must never disagree. psql lives in the tools
+# image, not on the host.
+#
+# The remote set is already published and valid, so it is deliberately left in place: losing the
+# audit row is a bookkeeping failure, not a reason to destroy a good off-host copy.
 if ! $compose --profile tools run --rm backup   sh /scripts/backup-remote-audit.sh "$dump_filename" "$dump_sha" "$label" >/dev/null; then
-  echo "Off-host copy warning: the set is published but backup.remote.copy was not recorded." >&2
+  echo "Off-host copy failed: the set is published but backup.remote.copy was not recorded." >&2
+  record_failure "remote set published but audit recording failed"
   exit 1
 fi
+
+FINSPACE_BACKUP_ROOT="$backup_root"   sh "$script_dir/backup-set-report.sh" "$set_id" --offhost-verified "$label"
 
 echo "Backup set $set_id published off-host (label=$label)."
