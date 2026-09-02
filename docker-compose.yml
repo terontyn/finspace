@@ -228,6 +228,7 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       TESTING: ${TESTING:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       GOOGLE_SYNC_PROVIDER: ${GOOGLE_SYNC_PROVIDER:-apps_script_bridge}
       GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-false}
       APPS_SCRIPT_BRIDGE_ENABLED: ${APPS_SCRIPT_BRIDGE_ENABLED:-true}
@@ -272,6 +273,7 @@ services:
     environment:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       TESTING: ${TESTING:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
