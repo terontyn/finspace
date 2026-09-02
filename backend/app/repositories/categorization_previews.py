@@ -1,7 +1,7 @@
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -230,6 +230,7 @@ async def delete_expired(
     workspace_id: uuid.UUID,
     now: datetime,
     *,
+    recovery_window: timedelta,
     limit: int = 100,
 ) -> int:
     """Bounded, operation-aware physical pruning of previews whose TTL has passed.
@@ -237,12 +238,23 @@ async def delete_expired(
     Candidate preview rows are owned with ``FOR UPDATE SKIP LOCKED`` before deletion. A new apply
     claim holds ``FOR SHARE`` on the same row until its ``in_progress`` operation is committed, so
     cleanup either skips that locked preview or wins first and deletes it before the apply can
-    validate it. Already-committed in-progress operations protect their previews through the
-    anti-exists predicate. Completed operations do not pin previews because their terminal results
-    are independently replayable.
+    validate it. That lock protects a genuinely active claim regardless of how old the operation
+    is. Completed operations do not pin previews because their terminal results are independently
+    replayable.
 
-    Stage A2 enforces TTL logically on read. No scheduler invokes this primitive yet — scheduled
-    pruning is deferred to later hardening.
+    A committed in-progress operation pins its preview through the anti-exists predicate, but only
+    until ``expires_at + recovery_window``. The window is anchored on the preview's own expiry
+    rather than on an operation timestamp, so there is one lifecycle clock with an offset instead
+    of two, and the maximum physical retention of any preview is a single documented constant. The
+    boundary is inclusive: at ``expires_at == now - recovery_window`` the preview is eligible.
+
+    Nothing about financial safety depends on this pin. A committed apply result and the mutation
+    it describes share one transaction, so a same-key retry replays terminal results rather than
+    re-executing them whether or not the preview still exists; after reclamation an item that was
+    never attempted resolves to ``not_found``.
+
+    ``now`` and ``recovery_window`` are both supplied by the caller, so pruning never reads the
+    clock or the settings object and stays deterministic under test.
     """
     in_progress_operation = exists(
         select(CategorizationApplyOperation.id).where(
@@ -251,6 +263,9 @@ async def delete_expired(
             CategorizationApplyOperation.status == "in_progress",
         )
     )
+    # Written against the bare column so both branches stay eligible for
+    # ix_categorization_previews_workspace_expiry; the cutoff is a plain bound parameter.
+    recovery_elapsed = CategorizationPreview.expires_at <= now - recovery_window
     expired = list(
         (
             await session.scalars(
@@ -258,7 +273,7 @@ async def delete_expired(
                 .where(
                     CategorizationPreview.workspace_id == workspace_id,
                     CategorizationPreview.expires_at <= now,
-                    ~in_progress_operation,
+                    or_(~in_progress_operation, recovery_elapsed),
                 )
                 .order_by(CategorizationPreview.expires_at, CategorizationPreview.id)
                 .limit(limit)

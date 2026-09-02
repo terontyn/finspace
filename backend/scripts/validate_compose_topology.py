@@ -112,11 +112,16 @@ def _command(service: dict[str, Any]) -> list[str]:
     return command
 
 
+def _require_environment(service: dict[str, Any], name: str, variable: str) -> None:
+    """A runtime contract the process cannot infer must actually reach it."""
+    environment = service.get("environment") or {}
+    if not isinstance(environment, dict) or not environment.get(variable):
+        raise TopologyError(f"{name} must receive {variable}")
+
+
 def _require_log_level(service: dict[str, Any], name: str) -> None:
     """Both workers must receive the one application LOG_LEVEL contract, like the API does."""
-    environment = service.get("environment") or {}
-    if not isinstance(environment, dict) or not environment.get("LOG_LEVEL"):
-        raise TopologyError(f"{name} must receive LOG_LEVEL")
+    _require_environment(service, name, "LOG_LEVEL")
 
 
 def _mounts(service: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -213,6 +218,13 @@ def validate_production(config: dict[str, Any]) -> None:
             "Production categorization-prune must not have source or runtime mounts"
         )
     _require_log_level(prune_worker, "Production categorization-prune")
+    # The pruning process is the only one that applies the recovery-retention boundary, so the
+    # window has to reach it explicitly rather than fall back to the code default.
+    _require_environment(
+        prune_worker,
+        "Production categorization-prune",
+        "CATEGORIZATION_APPLY_RECOVERY_SECONDS",
+    )
 
     if _mounts(frontend):
         raise TopologyError("Production frontend must not have source or cache mounts")

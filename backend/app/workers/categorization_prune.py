@@ -18,7 +18,7 @@ import asyncio
 import logging
 import signal
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -59,6 +59,9 @@ async def run_cycle(cursor: uuid.UUID | None) -> CycleResult:
     logged and retried next cycle (daemon). Per-workspace failures never propagate.
     """
     cycle_now = datetime.now(UTC)
+    # Converted once per cycle: the service and repository take an explicit window and never read
+    # settings, so the retention boundary stays deterministic under test.
+    recovery_window = timedelta(seconds=settings.categorization_apply_recovery_seconds)
     result = CycleResult()
     limit = settings.categorization_prune_max_workspaces_per_cycle
 
@@ -86,6 +89,7 @@ async def run_cycle(cursor: uuid.UUID | None) -> CycleResult:
                     session,
                     workspace_id,
                     now=cycle_now,
+                    recovery_window=recovery_window,
                     batch_size=settings.categorization_prune_batch_size,
                 )
         except Exception as error:
@@ -155,7 +159,8 @@ async def run() -> None:
         "categorization_prune_started "
         f"poll_seconds={settings.categorization_prune_poll_seconds} "
         f"batch_size={settings.categorization_prune_batch_size} "
-        f"max_workspaces_per_cycle={settings.categorization_prune_max_workspaces_per_cycle}"
+        f"max_workspaces_per_cycle={settings.categorization_prune_max_workspaces_per_cycle} "
+        f"apply_recovery_seconds={settings.categorization_apply_recovery_seconds}"
     )
     _install_signal_handlers()
     cursor: uuid.UUID | None = None

@@ -20,9 +20,10 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, update
+from pydantic import ValidationError
+from sqlalchemy import event, func, select, update
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.db.models.audit import AuditLog
 from app.db.models.categorization_apply_operations import (
     CategorizationApplyOperation,
@@ -33,7 +34,7 @@ from app.db.models.categorization_rules import CategorizationRule
 from app.db.models.google_sync import SyncOutbox
 from app.db.models.transactions import FinancialTransaction
 from app.db.models.users import User, Workspace
-from app.db.session import AsyncSessionFactory
+from app.db.session import AsyncSessionFactory, engine
 from app.dependencies.context import RequestContext
 from app.repositories import categorization_previews as preview_repository
 from app.services import categorization_previews as preview_service
@@ -216,13 +217,26 @@ class _StubEngine:
         self.disposed = True
 
 
-def _prune(identity: dict, *, batch_size: int = 100) -> int:
+# A window long enough that no preview in these tests has passed its recovery boundary, so the
+# pre-Stage-C assertions keep meaning exactly what they meant: a committed in_progress operation
+# pins its preview. Boundary behaviour is exercised by tests that pass their own window.
+RECOVERY_PENDING = timedelta(days=30)
+
+
+def _prune(
+    identity: dict,
+    *,
+    batch_size: int = 100,
+    now: datetime | None = None,
+    recovery_window: timedelta = RECOVERY_PENDING,
+) -> int:
     async def run() -> int:
         async with AsyncSessionFactory() as session:
             return await preview_service.prune_workspace_previews(
                 session,
                 uuid.UUID(identity["workspace"]["id"]),
-                now=datetime.now(UTC),
+                now=now or datetime.now(UTC),
+                recovery_window=recovery_window,
                 batch_size=batch_size,
             )
 
@@ -306,6 +320,7 @@ def test_preview_locked_by_an_apply_claim_is_skipped_promptly(client: TestClient
                         pruner,
                         uuid.UUID(identity["workspace"]["id"]),
                         now=datetime.now(UTC),
+                        recovery_window=RECOVERY_PENDING,
                         batch_size=100,
                     ),
                     # SKIP LOCKED means this must return immediately, not wait for the holder.
@@ -507,9 +522,15 @@ def test_cycle_is_bounded_by_max_workspaces_and_gives_one_batch_per_workspace(
     calls: list[uuid.UUID] = []
     original = worker.service.prune_workspace_previews
 
-    async def counting(session, workspace_id, *, now, batch_size):
+    async def counting(session, workspace_id, *, now, recovery_window, batch_size):
         calls.append(workspace_id)
-        return await original(session, workspace_id, now=now, batch_size=batch_size)
+        return await original(
+            session,
+            workspace_id,
+            now=now,
+            recovery_window=recovery_window,
+            batch_size=batch_size,
+        )
 
     monkeypatch.setattr(worker.service, "prune_workspace_previews", counting)
 
@@ -589,11 +610,17 @@ def test_a_failing_workspace_does_not_block_later_ones_and_is_retried(
     original = worker.service.prune_workspace_previews
     attempts: list[uuid.UUID] = []
 
-    async def failing(session, workspace_id, *, now, batch_size):
+    async def failing(session, workspace_id, *, now, recovery_window, batch_size):
         attempts.append(workspace_id)
         if workspace_id == poisoned:
             raise RuntimeError("simulated workspace failure")
-        return await original(session, workspace_id, now=now, batch_size=batch_size)
+        return await original(
+            session,
+            workspace_id,
+            now=now,
+            recovery_window=recovery_window,
+            batch_size=batch_size,
+        )
 
     monkeypatch.setattr(worker.service, "prune_workspace_previews", failing)
     result = asyncio.run(worker.run_cycle(cursor))
@@ -790,9 +817,15 @@ def test_stop_during_a_cycle_finishes_the_batch_and_starts_no_new_workspace(
     original = worker.service.prune_workspace_previews
     examined: list[uuid.UUID] = []
 
-    async def stop_after_first(session, workspace_id, *, now, batch_size):
+    async def stop_after_first(session, workspace_id, *, now, recovery_window, batch_size):
         examined.append(workspace_id)
-        deleted = await original(session, workspace_id, now=now, batch_size=batch_size)
+        deleted = await original(
+            session,
+            workspace_id,
+            now=now,
+            recovery_window=recovery_window,
+            batch_size=batch_size,
+        )
         # Shutdown arrives while this batch is committing; it must still complete.
         worker.STOP.set()
         return deleted
@@ -817,6 +850,7 @@ def test_prune_service_rejects_a_naive_instant(client: TestClient) -> None:
                     session,
                     uuid.UUID(identity["workspace"]["id"]),
                     now=datetime(2026, 9, 1, 12, 0),
+                    recovery_window=RECOVERY_PENDING,
                     batch_size=10,
                 )
             except ValueError as error:
@@ -842,3 +876,287 @@ def test_workspace_keyset_paging_is_bounded_and_ordered(client: TestClient) -> N
     # Strictly greater than the cursor: no workspace is returned twice across pages.
     assert asyncio.run(page(everything[0], 1000)) == everything[1:]
     assert asyncio.run(page(everything[-1], 1000)) == []
+
+
+# --- Stage C: bounded recovery for abandoned applies ------------------------------------------
+
+
+async def _set_expiry(preview_id: str, expires_at: datetime) -> None:
+    """Pin an exact expiry instant so the recovery boundary can be probed to the microsecond."""
+    async with AsyncSessionFactory() as session:
+        await session.execute(
+            update(CategorizationPreview)
+            .where(CategorizationPreview.id == uuid.UUID(preview_id))
+            .values(created_at=expires_at - timedelta(hours=24), expires_at=expires_at)
+        )
+        await session.commit()
+
+
+async def _add_operation(identity: dict, preview_id: str, status: str) -> uuid.UUID:
+    async with AsyncSessionFactory() as session:
+        operation = CategorizationApplyOperation(
+            workspace_id=uuid.UUID(identity["workspace"]["id"]),
+            preview_id=uuid.UUID(preview_id),
+            actor_user_id=uuid.UUID(identity["user"]["id"]),
+            idempotency_key=f"recovery-{uuid.uuid4()}",
+            request_hash="0" * 64,
+            status=status,
+            requested_count=2,
+            completed_at=datetime.now(UTC) if status == "completed" else None,
+        )
+        session.add(operation)
+        await session.commit()
+        return operation.id
+
+
+async def _operation_status(operation_id: uuid.UUID) -> str | None:
+    async with AsyncSessionFactory() as session:
+        operation = await session.get(CategorizationApplyOperation, operation_id)
+        return None if operation is None else operation.status
+
+
+def _pinned_scenario(client: TestClient, label: str) -> tuple[dict, dict, datetime]:
+    """A workspace whose only preview expired at a known instant under an unfinished apply."""
+    identity, headers = _register(client, label)
+    account = _account(client, headers, f"{label} card")
+    transaction_id = asyncio.run(_insert_transaction(identity, account["id"], f"{label} Shop"))
+    preview = _preview(client, headers, [transaction_id])
+    expires_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    asyncio.run(_set_expiry(preview["id"], expires_at))
+    asyncio.run(_add_operation(identity, preview["id"], "in_progress"))
+    return identity, preview, expires_at
+
+
+def test_recovery_boundary_is_inclusive_to_the_microsecond(client: TestClient) -> None:
+    identity, preview, expires_at = _pinned_scenario(client, "Prune boundary")
+    window = timedelta(hours=24)
+    boundary = expires_at + window
+
+    # Logically expired for a whole day already, but still inside the recovery window.
+    assert _prune(identity, now=boundary - timedelta(microseconds=1), recovery_window=window) == 0
+    assert asyncio.run(_preview_exists(preview["id"])) is True
+
+    # Exactly at the boundary the pin is gone: expires_at == now - recovery_window is eligible.
+    assert _prune(identity, now=boundary, recovery_window=window) == 1
+    assert asyncio.run(_preview_exists(preview["id"])) is False
+
+
+def test_recovery_boundary_is_past_after_the_window(client: TestClient) -> None:
+    identity, preview, expires_at = _pinned_scenario(client, "Prune past boundary")
+    window = timedelta(hours=24)
+    later = expires_at + window + timedelta(microseconds=1)
+
+    assert _prune(identity, now=later, recovery_window=window) == 1
+    assert asyncio.run(_preview_exists(preview["id"])) is False
+
+
+def test_a_fresh_in_progress_operation_still_pins_a_logically_expired_preview(
+    client: TestClient,
+) -> None:
+    identity, preview, expires_at = _pinned_scenario(client, "Prune fresh pin")
+
+    # One second past the logical TTL: ordinary expiry has passed, recovery has not.
+    assert (
+        _prune(
+            identity,
+            now=expires_at + timedelta(seconds=1),
+            recovery_window=timedelta(hours=24),
+        )
+        == 0
+    )
+    assert asyncio.run(_preview_exists(preview["id"])) is True
+
+
+def test_without_an_operation_ordinary_expiry_still_prunes_immediately(client: TestClient) -> None:
+    identity, headers = _register(client, "Prune no operation")
+    account = _account(client, headers, "No operation card")
+    transaction_id = asyncio.run(_insert_transaction(identity, account["id"], "No Operation Shop"))
+    preview = _preview(client, headers, [transaction_id])
+    expires_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    asyncio.run(_set_expiry(preview["id"], expires_at))
+
+    # The recovery window governs pins only; an unreferenced preview goes at expires_at.
+    assert _prune(identity, now=expires_at, recovery_window=timedelta(days=30)) == 1
+    assert asyncio.run(_preview_exists(preview["id"])) is False
+
+
+def test_a_completed_operation_never_pins_regardless_of_the_window(client: TestClient) -> None:
+    identity, headers = _register(client, "Prune completed pin")
+    account = _account(client, headers, "Completed card")
+    transaction_id = asyncio.run(_insert_transaction(identity, account["id"], "Completed Shop"))
+    preview = _preview(client, headers, [transaction_id])
+    expires_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    asyncio.run(_set_expiry(preview["id"], expires_at))
+    asyncio.run(_add_operation(identity, preview["id"], "completed"))
+
+    assert _prune(identity, now=expires_at, recovery_window=timedelta(days=30)) == 1
+    assert asyncio.run(_preview_exists(preview["id"])) is False
+
+
+def test_a_share_locked_preview_is_skipped_even_after_its_recovery_window(
+    client: TestClient,
+) -> None:
+    """Row-lock safety is independent of the age predicate.
+
+    The recovery window has long passed, so the anti-exists no longer protects this preview, but a
+    concurrent transaction holds FOR SHARE on the row. SKIP LOCKED must make cleanup return
+    promptly having deleted nothing, rather than block behind the holder.
+    """
+    identity, preview, expires_at = _pinned_scenario(client, "Prune locked old pin")
+    window = timedelta(hours=24)
+    reference = expires_at + timedelta(days=7)
+
+    async def race() -> int:
+        async with AsyncSessionFactory() as holder:
+            locked = await preview_repository.get_preview(
+                holder,
+                uuid.UUID(identity["workspace"]["id"]),
+                uuid.UUID(preview["id"]),
+                for_share=True,
+            )
+            assert locked is not None
+            async with AsyncSessionFactory() as pruner:
+                deleted = await asyncio.wait_for(
+                    preview_service.prune_workspace_previews(
+                        pruner,
+                        uuid.UUID(identity["workspace"]["id"]),
+                        now=reference,
+                        recovery_window=window,
+                        batch_size=100,
+                    ),
+                    timeout=10,
+                )
+            await holder.rollback()
+            return deleted
+
+    assert asyncio.run(race()) == 0
+    assert asyncio.run(_preview_exists(preview["id"])) is True
+    # Once the holder is gone the same call reclaims it.
+    assert _prune(identity, now=reference, recovery_window=window) == 1
+    assert asyncio.run(_preview_exists(preview["id"])) is False
+
+
+def test_partial_apply_evidence_survives_recovery_expiry(client: TestClient) -> None:
+    """The preview goes; the ledger row and every one of its fields stay exactly as they were."""
+    identity, headers = _register(client, "Prune partial evidence")
+    account = _account(client, headers, "Partial card")
+    transaction_id = asyncio.run(_insert_transaction(identity, account["id"], "Partial Shop"))
+    preview = _preview(client, headers, [transaction_id])
+    expires_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    asyncio.run(_set_expiry(preview["id"], expires_at))
+    operation_id = asyncio.run(_add_operation(identity, preview["id"], "in_progress"))
+
+    async def add_result() -> uuid.UUID:
+        async with AsyncSessionFactory() as session:
+            row = CategorizationApplyResult(
+                operation_id=operation_id,
+                item_id=uuid.uuid4(),
+                sequence=0,
+                transaction_id=uuid.UUID(transaction_id),
+                status="applied",
+                error_code=None,
+                expected_version=1,
+                current_version=2,
+            )
+            session.add(row)
+            await session.commit()
+            return row.id
+
+    result_id = asyncio.run(add_result())
+
+    async def snapshot() -> tuple:
+        async with AsyncSessionFactory() as session:
+            row = await session.get(CategorizationApplyResult, result_id)
+            assert row is not None
+            return (
+                row.operation_id,
+                row.item_id,
+                row.sequence,
+                row.transaction_id,
+                row.status,
+                row.error_code,
+                row.expected_version,
+                row.current_version,
+                row.created_at,
+            )
+
+    before = asyncio.run(snapshot())
+    assert asyncio.run(_item_count(preview["id"])) == 1
+
+    reclaimed = _prune(
+        identity,
+        now=expires_at + timedelta(days=2),
+        recovery_window=timedelta(hours=24),
+    )
+
+    assert reclaimed == 1
+    assert asyncio.run(_preview_exists(preview["id"])) is False
+    assert asyncio.run(_item_count(preview["id"])) == 0
+    # The operation keeps its honest status; nothing is silently finalized.
+    assert asyncio.run(_operation_status(operation_id)) == "in_progress"
+    assert asyncio.run(snapshot()) == before
+
+
+def test_recovery_predicate_keeps_the_candidate_query_bounded(client: TestClient) -> None:
+    """No per-preview lookup and no apply-results aggregate, whatever the row counts are."""
+    identity, headers = _register(client, "Prune query shape")
+    account = _account(client, headers, "Query shape card")
+    expires_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    for index in range(4):
+        transaction_id = asyncio.run(
+            _insert_transaction(identity, account["id"], f"Query Shop {index}")
+        )
+        preview = _preview(client, headers, [transaction_id])
+        asyncio.run(_set_expiry(preview["id"], expires_at))
+        # Two unfinished operations per preview: an aggregate-based predicate would show up here.
+        asyncio.run(_add_operation(identity, preview["id"], "in_progress"))
+        asyncio.run(_add_operation(identity, preview["id"], "in_progress"))
+
+    statements: list[str] = []
+
+    def capture(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: object,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if "categorization_preview" in normalized or "categorization_apply" in normalized:
+            statements.append(normalized)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        deleted = _prune(
+            identity,
+            now=expires_at + timedelta(days=2),
+            recovery_window=timedelta(hours=24),
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+
+    assert deleted == 4
+    # Exactly one bounded candidate SELECT plus one DELETE, whatever the preview/operation counts.
+    selects = [item for item in statements if item.startswith("select")]
+    deletes = [item for item in statements if item.startswith("delete")]
+    assert len(selects) == 1, selects
+    assert len(deletes) == 1, deletes
+    assert "for update" in selects[0]
+    assert "skip locked" in selects[0]
+    assert "categorization_apply_results" not in selects[0]
+    assert "group by" not in selects[0]
+    assert "count(" not in selects[0]
+
+
+def test_recovery_setting_default_and_bounds() -> None:
+    field = Settings.model_fields["categorization_apply_recovery_seconds"]
+    assert field.default == 86400
+
+    for accepted in (300, 86400, 2592000):
+        configured = Settings(categorization_apply_recovery_seconds=accepted)
+        assert configured.categorization_apply_recovery_seconds == accepted
+
+    for rejected in (299, 2592001):
+        with pytest.raises(ValidationError):
+            Settings(categorization_apply_recovery_seconds=rejected)
