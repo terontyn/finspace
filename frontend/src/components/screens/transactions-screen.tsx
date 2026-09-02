@@ -23,12 +23,23 @@ function TransactionDrawer({ accounts, categories, editing, form, isSaving, onCh
   onChange: (next: TransactionForm) => void; onClose: () => void; onError: (error: unknown) => void; onSave: (event: React.FormEvent) => void;
 }) {
   const drawerRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
   const visibleCategories = categories.filter((category) => category.category_type === form.transactionType || category.category_type === "both");
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => drawerRef.current?.querySelector<HTMLElement>("input, select, button")?.focus());
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  // Mount-only, like EntityDrawer: the parent recreates closeDrawer on every render, so depending on
+  // onClose here would tear down and re-run initial focus after each character typed into the form.
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const contentControl = drawerRef.current?.querySelector<HTMLElement>('input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled])');
+      const fallbackControl = drawerRef.current?.querySelector<HTMLElement>("button:not([disabled])");
+      (contentControl ?? fallbackControl)?.focus();
+    });
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
       if (event.key !== "Tab" || !drawerRef.current) return;
       const focusable = Array.from(drawerRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])'));
       if (!focusable.length) return;
@@ -38,7 +49,7 @@ function TransactionDrawer({ accounts, categories, editing, form, isSaving, onCh
     };
     window.addEventListener("keydown", handleKey);
     return () => { window.cancelAnimationFrame(frame); window.removeEventListener("keydown", handleKey); };
-  }, [onClose]);
+  }, []);
 
   function setType(transactionType: TransactionForm["transactionType"]) {
     const account = accounts.find((item) => item.id === form.accountId);
