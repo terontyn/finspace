@@ -320,6 +320,8 @@ services:
       BACKUP_REMOTE_PROVIDER: ${BACKUP_REMOTE_PROVIDER:-disabled}
       BACKUP_SECONDARY_PATH: /secondary
       BACKUP_REMOTE_AFTER_VERIFY: ${BACKUP_REMOTE_AFTER_VERIFY:-true}
+      FINSPACE_COMMIT: ${FINSPACE_COMMIT:-}
+      FINSPACE_TAG: ${FINSPACE_TAG:-}
     volumes:
       - ./backups:/backups
       - ${BACKUP_SECONDARY_PATH:-./backups/secondary}:/secondary
@@ -329,6 +331,20 @@ services:
         condition: service_healthy
     networks:
       - finspace
+
+  # One-shot helper that reads the n8n state volume so the archive never touches Docker internals
+  # under /var/lib/docker/volumes. It runs only under `--profile tools`, has no ports, no restart
+  # policy, no application secrets and no network, and the caller stops n8n first so the copy is
+  # cold. It shares the backup tool image, so no new image enters the deployment.
+  n8n-backup:
+    image: postgres:17
+    profiles: ["tools"]
+    entrypoint: ["sh"]
+    command: ["-c", "echo 'Run: docker compose --profile tools run --rm n8n-backup sh /scripts/n8n-archive-volume.sh SET_ID'"]
+    volumes:
+      - n8n_data:/source:ro
+      - ./backups:/backups
+      - ./scripts:/scripts:ro
 
 networks:
   finspace:
