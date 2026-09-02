@@ -130,6 +130,7 @@ cd /opt/finspace
 sudo finspace-compose logs --tail 100 frontend
 sudo finspace-compose logs --tail 100 backend
 sudo finspace-compose logs --tail 100 sync-worker
+sudo finspace-compose logs --tail 100 categorization-prune
 ```
 
 Restart выполняйте только для нужного сервиса:
@@ -141,6 +142,40 @@ sudo finspace-compose restart frontend
 
 После backend restart проверьте health, readiness и Google heartbeat. После frontend
 restart проверьте `/login` и восстановление сессии.
+
+### 5.1 Проверка worker-процессов
+
+Оба worker-процесса пишут те же JSON-логи, что и backend. Ни у одного нет порта и ни у
+одного нет Docker healthcheck: `Up` подтверждает только то, что процесс жив, а
+доказательством выполненной работы служат логи циклов.
+
+```bash
+sudo finspace-compose ps sync-worker
+sudo finspace-compose logs --tail 100 sync-worker
+sudo finspace-compose ps categorization-prune
+sudo finspace-compose logs --tail 100 categorization-prune
+```
+
+Маркеры в логах `categorization-prune`:
+
+| маркер | уровень | что означает |
+|---|---|---|
+| `categorization_prune_started` | INFO | процесс стартовал; в строке видны действующие `poll_seconds`, `batch_size`, `max_workspaces_per_cycle` |
+| `categorization_prune_cycle_finished` | INFO | цикл отработал: `workspaces_examined`, `workspaces_failed`, `previews_deleted`, `duration_ms`, `next_cursor` |
+| `categorization_prune_workspace_failed` | WARNING | один workspace не обработан; курсор идёт дальше, повтор на следующем обороте |
+| `categorization_prune_cycle_failed` | ERROR | сбой цикла целиком; daemon не завершается, следующая попытка после обычной паузы |
+| `categorization_prune_stopping` | INFO | штатное завершение по SIGTERM/SIGINT |
+| `categorization_prune_disabled` | INFO | `CATEGORIZATION_PRUNE_ENABLED=false` |
+
+Нормальная картина: одна строка `categorization_prune_started` на процесс и далее по
+одной `categorization_prune_cycle_finished` каждые `CATEGORIZATION_PRUNE_POLL_SECONDS`
+секунд (по умолчанию 900, то есть 15 минут). Повторяющийся `categorization_prune_started`
+без `categorization_prune_stopping` между ними означает restart loop. Отсутствие
+`categorization_prune_cycle_finished` дольше одного интервала при статусе `Up` означает
+зависший или постоянно падающий цикл — смотрите `categorization_prune_cycle_failed`.
+
+Для рутинной проверки здоровья worker-процессов достаточно `ps` и логов; запросы к
+таблицам базы для этого не нужны.
 
 ## 6. Безопасный deploy
 

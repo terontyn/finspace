@@ -71,5 +71,27 @@ class ComposeVersionTest(unittest.TestCase):
             self.assertEqual(validator.main(), 0)
 
 
+class WorkerLogLevelTest(unittest.TestCase):
+    """Both workers must receive the one application LOG_LEVEL contract, like the API does.
+
+    The rule is unit-tested here and applied to the real merged Compose document by the release
+    gate, which runs this script against `docker compose config` output. The Compose files
+    themselves are not readable from the backend test image, which mounts only `backend`.
+    """
+
+    def test_declared_log_level_is_accepted(self) -> None:
+        service = {"environment": {"LOG_LEVEL": "INFO"}}
+        validator._require_log_level(service, "Production sync-worker")
+
+    def test_missing_or_empty_log_level_is_rejected(self) -> None:
+        for environment in ({}, {"LOG_LEVEL": ""}, None):
+            with self.subTest(environment=environment):
+                with self.assertRaises(validator.TopologyError):
+                    validator._require_log_level(
+                        {"environment": environment},
+                        "Production categorization-prune",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,20 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
+    """Install the single JSON console handler on the root logger.
+
+    ``dictConfig`` replaces the root handler list rather than appending to it, so calling this more
+    than once — the API process at import, each worker in its ``main()`` — is idempotent and never
+    duplicates a line.
+
+    ``LOG_LEVEL=INFO`` applies to the root logger, so third-party loggers inherit it too. ``httpx``
+    emits one INFO record per request containing the full request URL, and Google Sheets URLs carry
+    the spreadsheet identifier and A1 ranges; that is not information this application needs in
+    normal output. Those two loggers are therefore bounded to WARNING instead of being disabled, so
+    genuine transport failures still surface. SQLAlchemy needs no equivalent bound: importing it
+    pins the ``sqlalchemy`` logger to WARNING, so statements and bound parameters stay unlogged
+    unless ``echo`` is enabled, which this project never does.
+    """
     logging.config.dictConfig(
         {
             "version": 1,
@@ -39,6 +53,10 @@ def configure_logging() -> None:
                     "formatter": "json",
                     "stream": "ext://sys.stdout",
                 }
+            },
+            "loggers": {
+                "httpx": {"level": "WARNING"},
+                "httpcore": {"level": "WARNING"},
             },
             "root": {"handlers": ["console"], "level": settings.log_level},
         }

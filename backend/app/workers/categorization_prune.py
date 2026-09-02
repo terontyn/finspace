@@ -21,6 +21,7 @@ import uuid
 from datetime import UTC, datetime
 
 from app.core.config import settings
+from app.core.logging import configure_logging
 from app.db.session import AsyncSessionFactory, engine
 from app.repositories import categorization_previews as repository
 from app.services import categorization_previews as service
@@ -148,6 +149,14 @@ async def run() -> None:
     if not settings.categorization_prune_enabled:
         logger.info("categorization_prune_disabled")
         return
+    # One line per process, so a restart loop is obvious in `docker compose logs` and the effective
+    # bounds are on the record next to the cycles they produced.
+    logger.info(
+        "categorization_prune_started "
+        f"poll_seconds={settings.categorization_prune_poll_seconds} "
+        f"batch_size={settings.categorization_prune_batch_size} "
+        f"max_workspaces_per_cycle={settings.categorization_prune_max_workspaces_per_cycle}"
+    )
     _install_signal_handlers()
     cursor: uuid.UUID | None = None
     while not STOP.is_set():
@@ -163,6 +172,9 @@ async def run() -> None:
             await asyncio.wait_for(STOP.wait(), timeout=settings.categorization_prune_poll_seconds)
         except TimeoutError:
             pass
+    # Reached only by STOP, so this line distinguishes a clean SIGTERM from a crash or a restart
+    # loop. A cycle-wide failure never ends the daemon, so it can never reach here.
+    logger.info("categorization_prune_stopping")
     await engine.dispose()
 
 
@@ -176,6 +188,9 @@ def main(argv: list[str] | None = None) -> int:
         help="run exactly one bounded cycle and exit instead of polling",
     )
     arguments = parser.parse_args(argv)
+    # Configured here and nowhere else: `run`, `run_once` and `run_cycle` stay callable from tests
+    # without mutating the calling process's global logging state.
+    configure_logging()
     if arguments.once:
         return asyncio.run(run_once())
     asyncio.run(run())

@@ -112,6 +112,13 @@ def _command(service: dict[str, Any]) -> list[str]:
     return command
 
 
+def _require_log_level(service: dict[str, Any], name: str) -> None:
+    """Both workers must receive the one application LOG_LEVEL contract, like the API does."""
+    environment = service.get("environment") or {}
+    if not isinstance(environment, dict) or not environment.get("LOG_LEVEL"):
+        raise TopologyError(f"{name} must receive LOG_LEVEL")
+
+
 def _mounts(service: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw_mounts = service.get("volumes") or []
     if not isinstance(raw_mounts, list):
@@ -198,12 +205,14 @@ def validate_production(config: dict[str, Any]) -> None:
 
     if _mounts(worker):
         raise TopologyError("Production sync-worker must not have source or runtime mounts")
+    _require_log_level(worker, "Production sync-worker")
 
     prune_worker = _service(config, "categorization-prune")
     if _mounts(prune_worker):
         raise TopologyError(
             "Production categorization-prune must not have source or runtime mounts"
         )
+    _require_log_level(prune_worker, "Production categorization-prune")
 
     if _mounts(frontend):
         raise TopologyError("Production frontend must not have source or cache mounts")

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.errors import ApiError
+from app.core.logging import configure_logging
 from app.db.models.google_sync import GoogleConnection, GoogleSheetBinding, SyncOutbox, SyncRun
 from app.db.models.users import User, Workspace
 from app.db.session import AsyncSessionFactory, engine
@@ -22,7 +23,10 @@ from app.services.audit import record_audit
 from app.services.google_oauth import access_token
 from app.services.google_sheets import _snapshot_rows
 
-logger = logging.getLogger(__name__)
+# Named explicitly, like the prune worker: under `python -m app.workers.sync_worker` the module
+# runs as `__main__`, and `logger` is the field that identifies the process in the shared JSON
+# schema, so deriving the name from `__name__` would label every production line "__main__".
+logger = logging.getLogger("app.workers.sync_worker")
 WORKER_ID = f"{socket.gethostname()}:{uuid.uuid4()}"
 STOP = asyncio.Event()
 LAYOUTS = {
@@ -267,8 +271,16 @@ async def process_once(client: GoogleRestClient) -> int:
             try:
                 await _push_binding(session, client, binding, current_events)
             except (GoogleApiError, ApiError) as exc:
+                # JsonFormatter emits a fixed payload and drops `extra=`, so the machine-readable
+                # code has to live in the message text. Only safe identifiers are logged: the raw
+                # Google error text can name the spreadsheet and its ranges, and it is already
+                # persisted on the outbox row and the binding for the UI to show.
                 logger.warning(
-                    "Google sync batch failed", extra={"code": getattr(exc, "code", None)}
+                    "google_sync_batch_failed "
+                    f"workspace_id={binding.workspace_id} "
+                    f"binding_id={binding.id} "
+                    f"events={len(current_events)} "
+                    f"code={getattr(exc, 'code', None)}"
                 )
                 error = exc
             await _finish_group(session, binding, current_events, error)
@@ -310,5 +322,16 @@ async def run() -> None:
     await engine.dispose()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Process entrypoint: configure logging once, then run the daemon.
+
+    Logging is configured here rather than at import or inside ``run``/``process_once`` so that
+    importing this module, or calling ``run`` directly from a test, never touches the global
+    logging state of the calling process.
+    """
+    configure_logging()
     asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()
