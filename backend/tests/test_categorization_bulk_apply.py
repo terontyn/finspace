@@ -239,12 +239,23 @@ async def _expire_preview(preview_id: str) -> None:
         await session.commit()
 
 
-async def _prune_preview(identity: dict, *, now: datetime | None = None) -> int:
+# Long enough that no preview here has passed its recovery boundary, so an in_progress operation
+# still pins exactly as it did before Stage C. Boundary behaviour lives in the pruning suite.
+RECOVERY_PENDING = timedelta(days=30)
+
+
+async def _prune_preview(
+    identity: dict,
+    *,
+    now: datetime | None = None,
+    recovery_window: timedelta = RECOVERY_PENDING,
+) -> int:
     async with AsyncSessionFactory() as session:
         removed = await preview_repository.delete_expired(
             session,
             uuid.UUID(identity["workspace"]["id"]),
             now or datetime.now(UTC),
+            recovery_window=recovery_window,
         )
         await session.commit()
         return removed
@@ -989,6 +1000,7 @@ def test_cleanup_lock_wins_before_new_apply_claim(
                     PausedCleanupSession(cleanup_session),  # type: ignore[arg-type]
                     uuid.UUID(identity["workspace"]["id"]),
                     datetime.now(UTC),
+                    recovery_window=RECOVERY_PENDING,
                 )
             )
             await asyncio.wait_for(cleanup_locked.wait(), timeout=5)
@@ -1529,3 +1541,246 @@ def test_rule_mutation_waits_for_a_bulk_apply_holding_the_shared_rule_set_lock(
     committed = client.get(f"/api/v1/transactions/{transaction_id}", headers=headers)
     assert committed.json()["category"]["id"] == category["id"]
     assert asyncio.run(_audit_count(transaction_id)) == 1
+
+
+# --- Stage C: recovery after the preview pin has expired ---------------------------------------
+
+
+RECOVERY_ELAPSED = timedelta(0)
+
+
+def _interrupted_two_item_operation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    key: str,
+    *,
+    stop_at: int,
+) -> tuple[dict, dict[str, str], dict, list[str], list[str], CategorizationApplyOperation]:
+    """Drive a real apply that dies part-way, leaving a committed in_progress operation.
+
+    ``stop_at`` is the 1-based item index whose processing raises, so ``stop_at=2`` leaves the
+    first item terminal and the second never attempted, and a value past the end leaves every item
+    terminal with the operation still ``in_progress``.
+    """
+    identity, headers = _register(client, label)
+    account = _account(client, headers, f"{label} card")
+    category = _category(client, headers, f"{label} target")
+    _rule(
+        client,
+        headers,
+        name=f"{label} rule",
+        category_id=category["id"],
+        priority=10,
+        counterparty_contains="apply shop",
+    )
+    transaction_ids = [
+        asyncio.run(
+            _insert_transaction(identity, account["id"], counterparty=f"Apply Shop {label} {index}")
+        )
+        for index in range(2)
+    ]
+    preview = _preview(client, headers, transaction_ids)
+    items = _items(client, headers, preview["id"])
+    item_ids = [item["id"] for item in items]
+
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    original_process_item = apply_service._process_item
+    attempted = 0
+
+    async def stop_at_item(*args: object, **kwargs: object):
+        nonlocal attempted
+        attempted += 1
+        if attempted == stop_at:
+            raise SimulatedProcessDeath
+        return await original_process_item(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(apply_service, "_process_item", stop_at_item)
+
+    async def start_and_interrupt() -> None:
+        async with AsyncSessionFactory() as session:
+            await apply_service.apply_preview_items(
+                session,
+                await _context_for(identity, session),
+                uuid.UUID(preview["id"]),
+                CategorizationApplyRequest(item_ids=[uuid.UUID(value) for value in item_ids]),
+                key,
+            )
+
+    if stop_at <= len(item_ids):
+        with pytest.raises(SimulatedProcessDeath):
+            asyncio.run(start_and_interrupt())
+    else:
+        # Every item is processed; the interruption lands after the loop, before completion.
+        original_complete = apply_service.repository.complete_operation
+
+        async def die_before_completion(*args: object, **kwargs: object) -> None:
+            raise SimulatedProcessDeath
+
+        monkeypatch.setattr(apply_service.repository, "complete_operation", die_before_completion)
+        with pytest.raises(SimulatedProcessDeath):
+            asyncio.run(start_and_interrupt())
+        monkeypatch.setattr(apply_service.repository, "complete_operation", original_complete)
+
+    monkeypatch.setattr(apply_service, "_process_item", original_process_item)
+    operation = asyncio.run(_operation_for(identity, key))
+    assert operation.status == "in_progress"
+    return identity, headers, preview, item_ids, transaction_ids, operation
+
+
+def test_same_key_retry_after_recovery_expiry_replays_and_reports_not_found(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Stage C recovery contract, end to end.
+
+    One item is already terminal and one was never attempted when the preview is reclaimed. The
+    committed item must be replayed untouched; the unattempted one can no longer be proved, so it
+    resolves to ``not_found`` with no transaction of its own — never to a second mutation and never
+    to a request-level 422.
+    """
+    key = "key-recovery-expired"
+    identity, headers, preview, item_ids, transaction_ids, operation = (
+        _interrupted_two_item_operation(
+            client,
+            monkeypatch,
+            "Apply recovery expired",
+            key,
+            stop_at=2,
+        )
+    )
+    canonical = sorted(item_ids)
+    applied_item_id = canonical[0]
+
+    persisted = asyncio.run(_results_for(str(operation.id)))
+    assert len(persisted) == 1
+    committed = persisted[0]
+    assert str(committed.item_id) == applied_item_id
+    assert committed.status == "applied"
+    applied_transaction_id = str(committed.transaction_id)
+    unattempted_transaction_id = next(
+        value for value in transaction_ids if value != applied_transaction_id
+    )
+
+    # Past the recovery boundary the unfinished operation no longer pins its expired preview.
+    asyncio.run(_expire_preview(preview["id"]))
+    assert asyncio.run(_prune_preview(identity, recovery_window=RECOVERY_ELAPSED)) == 1
+    assert asyncio.run(_preview_storage(preview["id"])) == (False, 0)
+
+    version = asyncio.run(_transaction_row(applied_transaction_id)).version
+    audit_count = asyncio.run(_audit_count(applied_transaction_id))
+    outbox_count = asyncio.run(_outbox_count(applied_transaction_id))
+    other_version = asyncio.run(_transaction_row(unattempted_transaction_id)).version
+    other_audit = asyncio.run(_audit_count(unattempted_transaction_id))
+
+    resumed = _apply(client, headers, preview["id"], item_ids, key)
+
+    assert resumed.status_code == 200, resumed.text
+    by_item = {row["item_id"]: row for row in resumed.json()["results"]}
+    replayed = by_item[applied_item_id]
+    assert replayed["status"] == "applied"
+    assert replayed["transaction_id"] == applied_transaction_id
+    assert replayed["expected_version"] == committed.expected_version
+    assert replayed["current_version"] == committed.current_version
+    assert replayed["error_code"] == committed.error_code
+
+    missing = by_item[canonical[1]]
+    assert missing["status"] == "not_found"
+    assert missing["transaction_id"] is None
+
+    # The replayed item was not re-executed: nothing about it moved.
+    assert asyncio.run(_transaction_row(applied_transaction_id)).version == version
+    assert asyncio.run(_audit_count(applied_transaction_id)) == audit_count
+    assert asyncio.run(_outbox_count(applied_transaction_id)) == outbox_count
+    # The unattempted item's transaction was never touched either.
+    assert asyncio.run(_transaction_row(unattempted_transaction_id)).version == other_version
+    assert asyncio.run(_audit_count(unattempted_transaction_id)) == other_audit
+
+    # Exactly one new terminal result was added, and the committed one is unchanged.
+    after = {row.item_id: row for row in asyncio.run(_results_for(str(operation.id)))}
+    assert len(after) == 2
+    still = after[committed.item_id]
+    assert (still.status, still.transaction_id, still.expected_version, still.current_version) == (
+        committed.status,
+        committed.transaction_id,
+        committed.expected_version,
+        committed.current_version,
+    )
+    assert asyncio.run(_operation_for(identity, key)).status == "completed"
+
+
+def test_every_item_terminal_before_completion_still_completes_after_pruning(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reachable last-result-before-complete crash.
+
+    Every requested item already has a terminal result but the operation never reached
+    ``completed``. After its preview is reclaimed a same-key retry must replay all of them, mutate
+    nothing, need no preview item, and finish the operation.
+    """
+    key = "key-recovery-all-terminal"
+    identity, headers, preview, item_ids, transaction_ids, operation = (
+        _interrupted_two_item_operation(
+            client,
+            monkeypatch,
+            "Apply recovery complete",
+            key,
+            stop_at=99,
+        )
+    )
+    persisted = asyncio.run(_results_for(str(operation.id)))
+    assert len(persisted) == len(item_ids) == operation.requested_count
+    assert {row.status for row in persisted} == {"applied"}
+
+    asyncio.run(_expire_preview(preview["id"]))
+    assert asyncio.run(_prune_preview(identity, recovery_window=RECOVERY_ELAPSED)) == 1
+    assert asyncio.run(_preview_storage(preview["id"])) == (False, 0)
+
+    versions = [asyncio.run(_transaction_row(value)).version for value in transaction_ids]
+    audits = [asyncio.run(_audit_count(value)) for value in transaction_ids]
+    outbox = [asyncio.run(_outbox_count(value)) for value in transaction_ids]
+
+    resumed = _apply(client, headers, preview["id"], item_ids, key)
+
+    assert resumed.status_code == 200, resumed.text
+    assert [row["status"] for row in resumed.json()["results"]] == ["applied", "applied"]
+    assert [asyncio.run(_transaction_row(value)).version for value in transaction_ids] == versions
+    assert [asyncio.run(_audit_count(value)) for value in transaction_ids] == audits
+    assert [asyncio.run(_outbox_count(value)) for value in transaction_ids] == outbox
+    assert len(asyncio.run(_results_for(str(operation.id)))) == len(item_ids)
+
+    finished = asyncio.run(_operation_for(identity, key))
+    assert finished.status == "completed"
+    assert finished.completed_at is not None
+
+    # And the canonical response is stable across a further replay.
+    assert _apply(client, headers, preview["id"], item_ids, key).json() == resumed.json()
+
+
+def test_expired_then_reclaimed_preview_moves_from_410_to_404_for_new_operations(
+    client: TestClient,
+) -> None:
+    """Logical TTL first, physical absence second — and both are terminal refusals."""
+    identity, headers, _account_row, _category_row, _rule_row, _transaction_id, preview, items = (
+        _matched_scenario(client, "Apply lifecycle codes")
+    )
+    item_ids = [items[0]["id"]]
+
+    asyncio.run(_expire_preview(preview["id"]))
+    expired = _apply(client, headers, preview["id"], item_ids, "key-lifecycle-expired")
+    assert expired.status_code == 410
+    assert expired.json()["error"]["code"] == "CATEGORIZATION_PREVIEW_EXPIRED"
+
+    assert asyncio.run(_prune_preview(identity, recovery_window=RECOVERY_ELAPSED)) == 1
+
+    reclaimed = _apply(client, headers, preview["id"], item_ids, "key-lifecycle-reclaimed")
+    assert reclaimed.status_code == 404
+    assert reclaimed.json()["error"]["code"] == "CATEGORIZATION_PREVIEW_NOT_FOUND"
+
+    # A preview that never existed is indistinguishable from one that was reclaimed.
+    missing = _apply(client, headers, str(uuid.uuid4()), item_ids, "key-lifecycle-missing")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "CATEGORIZATION_PREVIEW_NOT_FOUND"

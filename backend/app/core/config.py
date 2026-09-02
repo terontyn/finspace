@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     categorization_prune_batch_size: int = Field(default=100, ge=1, le=500)
     categorization_prune_max_workspaces_per_cycle: int = Field(default=50, ge=1, le=500)
 
+    # How long an expired preview stays physically protected while a committed in-progress apply
+    # operation still references it. The default is one more preview lifetime: the product already
+    # treats 24 hours as how long a categorization proposal is meaningful, so an unfinished
+    # operation gets exactly one more of them to be resumed, and no preview is physically retained
+    # beyond roughly its creation plus the logical TTL plus this window. The lower bound stays well
+    # clear of the longest plausible in-flight apply; the upper bound keeps the pin bounded.
+    categorization_apply_recovery_seconds: int = Field(default=86400, ge=300, le=2592000)
+
     n8n_heartbeat_stale_minutes: int = Field(default=15, ge=1, le=1440)
     backup_stale_hours: int = Field(default=36, ge=1, le=8760)
     backup_metadata_path: Path = Path("/app/backups/database")

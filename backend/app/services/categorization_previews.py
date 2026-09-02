@@ -298,6 +298,7 @@ async def prune_workspace_previews(
     workspace_id: uuid.UUID,
     *,
     now: datetime,
+    recovery_window: timedelta,
     batch_size: int,
 ) -> int:
     """Physically delete one bounded batch of expired previews for one workspace, and commit it.
@@ -307,14 +308,19 @@ async def prune_workspace_previews(
     the repository, which stays commit-free, and rather than in the worker, which stays free of SQL.
 
     ``now`` is supplied by the caller and must be timezone-aware; nothing here reads the clock, so a
-    whole cycle can compare every workspace against one instant.
+    whole cycle can compare every workspace against one instant. ``recovery_window`` travels the
+    same way: how long an unfinished apply keeps its expired preview is a caller decision, so the
+    boundary is exercisable without patching a clock or a settings object.
     """
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
+    if recovery_window < timedelta(0):
+        raise ValueError("recovery_window must not be negative")
     deleted = await repository.delete_expired(
         session,
         workspace_id,
         now,
+        recovery_window=recovery_window,
         limit=batch_size,
     )
     await session.commit()

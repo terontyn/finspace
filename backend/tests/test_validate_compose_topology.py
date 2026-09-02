@@ -93,5 +93,27 @@ class WorkerLogLevelTest(unittest.TestCase):
                     )
 
 
+class PruneRecoveryEnvironmentTest(unittest.TestCase):
+    """The pruning process applies the recovery boundary, so the window must actually reach it."""
+
+    def test_declared_recovery_window_is_accepted(self) -> None:
+        service = {"environment": {"CATEGORIZATION_APPLY_RECOVERY_SECONDS": "86400"}}
+        validator._require_environment(
+            service,
+            "Production categorization-prune",
+            "CATEGORIZATION_APPLY_RECOVERY_SECONDS",
+        )
+
+    def test_missing_or_empty_recovery_window_is_rejected(self) -> None:
+        for environment in ({}, {"CATEGORIZATION_APPLY_RECOVERY_SECONDS": ""}, None):
+            with self.subTest(environment=environment):
+                with self.assertRaises(validator.TopologyError):
+                    validator._require_environment(
+                        {"environment": environment},
+                        "Production categorization-prune",
+                        "CATEGORIZATION_APPLY_RECOVERY_SECONDS",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

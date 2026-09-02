@@ -386,6 +386,7 @@ def test_daemon_logs_one_start_line_with_effective_bounds_and_one_stop_line(
     monkeypatch.setattr(settings, "categorization_prune_poll_seconds", 900)
     monkeypatch.setattr(settings, "categorization_prune_batch_size", 100)
     monkeypatch.setattr(settings, "categorization_prune_max_workspaces_per_cycle", 50)
+    monkeypatch.setattr(settings, "categorization_apply_recovery_seconds", 86400)
     monkeypatch.setattr(prune_worker, "engine", _StubEngine())
 
     async def one_cycle(cursor: uuid.UUID | None) -> prune_worker.CycleResult:
@@ -398,8 +399,10 @@ def test_daemon_logs_one_start_line_with_effective_bounds_and_one_stop_line(
 
     info = _messages(prune_records, logging.INFO)
     assert len(info) == 3, info
+    # The start line records the whole retention contract the process is running under.
     assert info[0] == (
-        "categorization_prune_started poll_seconds=900 batch_size=100 max_workspaces_per_cycle=50"
+        "categorization_prune_started poll_seconds=900 batch_size=100 "
+        "max_workspaces_per_cycle=50 apply_recovery_seconds=86400"
     )
     assert info[1].startswith("categorization_prune_cycle_finished ")
     for field in (

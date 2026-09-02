@@ -1053,6 +1053,7 @@ def test_expired_preview_reports_gone_while_foreign_workspace_stays_not_found(
                 session,
                 uuid.UUID(identity["workspace"]["id"]),
                 datetime.now(UTC),
+                recovery_window=timedelta(days=30),
             )
             await session.commit()
             return removed
