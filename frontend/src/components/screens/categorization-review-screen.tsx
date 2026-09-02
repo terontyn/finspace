@@ -49,6 +49,28 @@ interface UiError {
 
 type Stage = "select" | "review" | "results";
 
+/**
+ * The two ways a preview stops being usable. Both are terminal refusals that mutate nothing and
+ * both recover the same way — by building a new list — so they share one banner and one action.
+ * They are kept apart only so the expired case can say something more specific than the reclaimed
+ * one is allowed to.
+ */
+type PreviewUnavailable = "expired" | "gone";
+
+/**
+ * Keyed on the machine error code, never on the HTTP status: a 404 from rules, categories,
+ * transactions or the history endpoints must keep its ordinary error handling.
+ */
+const PREVIEW_LIFECYCLE_CODES: Record<string, PreviewUnavailable> = {
+  CATEGORIZATION_PREVIEW_EXPIRED: "expired",
+  CATEGORIZATION_PREVIEW_NOT_FOUND: "gone",
+};
+
+function previewUnavailableFrom(error: unknown): PreviewUnavailable | null {
+  if (!(error instanceof ApiClientError)) return null;
+  return PREVIEW_LIFECYCLE_CODES[error.code] ?? null;
+}
+
 function toUiError(error: unknown): UiError {
   if (error instanceof ApiClientError) {
     return { code: error.code, message: error.message, requestId: error.requestId };
@@ -99,7 +121,7 @@ export function CategorizationReviewScreen({
   const [attempt, setAttempt] = useState<ApplyAttempt | null>(null);
   const [applyResponse, setApplyResponse] = useState<CategorizationApplyResponse | null>(null);
   const [error, setError] = useState<UiError | null>(null);
-  const [expired, setExpired] = useState(false);
+  const [unavailable, setUnavailable] = useState<PreviewUnavailable | null>(null);
   const [ambiguous, setAmbiguous] = useState(false);
 
   const canApply = role === "owner" || role === "editor";
@@ -144,7 +166,8 @@ export function CategorizationReviewScreen({
         setOffset(nextOffset);
       } catch (loadError) {
         if (token !== generation.current) return;
-        if (loadError instanceof ApiClientError && loadError.status === 410) setExpired(true);
+        const lifecycle = previewUnavailableFrom(loadError);
+        if (lifecycle) setUnavailable(lifecycle);
         else setError(toUiError(loadError));
       } finally {
         if (token === generation.current) setLoadingItems(false);
@@ -159,7 +182,7 @@ export function CategorizationReviewScreen({
     generation.current = token;
     setCreating(true);
     setError(null);
-    setExpired(false);
+    setUnavailable(null);
     setAmbiguous(false);
     setApplyResponse(null);
     setAttempt(null);
@@ -190,7 +213,7 @@ export function CategorizationReviewScreen({
       const token = generation.current + 1;
       generation.current = token;
       setError(null);
-      setExpired(false);
+      setUnavailable(null);
       setAmbiguous(false);
       setApplyResponse(null);
       setAttempt(null);
@@ -289,7 +312,8 @@ export function CategorizationReviewScreen({
           return;
         }
         setAttempt({ ...active, state: "idle" });
-        if (applyError instanceof ApiClientError && applyError.status === 410) setExpired(true);
+        const lifecycle = previewUnavailableFrom(applyError);
+        if (lifecycle) setUnavailable(lifecycle);
         else setError(toUiError(applyError));
       } finally {
         if (token === generation.current) setApplying(false);
@@ -309,7 +333,7 @@ export function CategorizationReviewScreen({
     setApplyResponse(null);
     setAttempt(null);
     setError(null);
-    setExpired(false);
+    setUnavailable(null);
     setAmbiguous(false);
   }, []);
 
@@ -374,10 +398,12 @@ export function CategorizationReviewScreen({
         </div>
       ) : null}
 
-      {expired ? (
+      {unavailable ? (
         <div className="notice notice--warning" role="status">
           <span>
-            Список устарел. Составьте новый, чтобы увидеть актуальные операции и правила.
+            {unavailable === "expired"
+              ? "Список устарел. Составьте новый, чтобы увидеть актуальные операции и правила."
+              : "Список больше недоступен. Составьте новый."}
           </span>
           <button className="primary-button" onClick={startOver} type="button">
             Составить новый список

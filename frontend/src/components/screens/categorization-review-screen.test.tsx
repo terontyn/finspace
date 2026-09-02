@@ -778,3 +778,144 @@ test("import-scoped review links to unscoped history without claiming provenance
     );
   } finally { await harness.cleanup(); }
 });
+
+// --- Stage B: reclaimed-preview lifecycle UX ---------------------------------------------------
+
+/**
+ * A preview reclaimed between screen load and apply answers 404 on the new claim, so the apply
+ * path is a real source of this code and must recover rather than dead-end.
+ */
+test("a reclaimed preview offers creating a new one without disclosing that it existed", async () => {
+  const harness = await createHarness({
+    items: [item("a", "matched")],
+    onApply: () =>
+      new ApiClientError("Categorization preview not found", "CATEGORIZATION_PREVIEW_NOT_FOUND", 404),
+  });
+  try {
+    await submitFilters(harness);
+    await toggleRow(harness, 0);
+    await act(async () => { button(harness.root, "Применить выбранные").props.onClick(); });
+    await act(async () => { button(harness.root, "Подтвердить и применить").props.onClick(); });
+    await act(async () => { await settle(); });
+
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /Список больше недоступен\. Составьте новый\./);
+    assert.ok(findButton(harness.root, "Составить новый список"));
+    // Neutral for reclaimed, foreign and never-existent alike.
+    assert.doesNotMatch(text, /удал[её]н/i);
+    assert.doesNotMatch(text, /очищен/i);
+    assert.doesNotMatch(text, /существовал/i);
+    assert.doesNotMatch(text, /истёк|устарел/i);
+    // No generic request-error panel and no summary claiming the apply succeeded.
+    assert.doesNotMatch(text, /CATEGORIZATION_PREVIEW_NOT_FOUND/);
+    assert.doesNotMatch(text, /Запрос /);
+    assert.doesNotMatch(text, /Применено/);
+  } finally { await harness.cleanup(); }
+});
+
+test("an expired preview keeps its own wording and never leaks the error code", async () => {
+  const harness = await createHarness({
+    items: [item("a", "matched")],
+    onApply: () => new ApiClientError("Список устарел", "CATEGORIZATION_PREVIEW_EXPIRED", 410),
+  });
+  try {
+    await submitFilters(harness);
+    await toggleRow(harness, 0);
+    await act(async () => { button(harness.root, "Применить выбранные").props.onClick(); });
+    await act(async () => { button(harness.root, "Подтвердить и применить").props.onClick(); });
+    await act(async () => { await settle(); });
+
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /Список устарел/);
+    assert.ok(findButton(harness.root, "Составить новый список"));
+    assert.doesNotMatch(text, /CATEGORIZATION_PREVIEW_EXPIRED/);
+    assert.doesNotMatch(text, /Запрос /);
+  } finally { await harness.cleanup(); }
+});
+
+test("a preview reclaimed before its items load recovers the same way", async () => {
+  const harness = await createHarness({});
+  const originalGet = apiClient.get;
+  apiClient.get = (<T,>(path: string) => {
+    if (path.includes("/items")) {
+      return Promise.reject(
+        new ApiClientError("Categorization preview not found", "CATEGORIZATION_PREVIEW_NOT_FOUND", 404),
+      ) as Promise<T>;
+    }
+    return originalGet<T>(path);
+  }) as typeof apiClient.get;
+  try {
+    await submitFilters(harness);
+
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /Список больше недоступен\. Составьте новый\./);
+    assert.ok(findButton(harness.root, "Составить новый список"));
+  } finally {
+    apiClient.get = originalGet;
+    await harness.cleanup();
+  }
+});
+
+test("an unrelated 404 keeps ordinary error handling", async () => {
+  const harness = await createHarness({
+    onCreate: () => new ApiClientError("Правило не найдено", "CATEGORIZATION_RULE_NOT_FOUND", 404),
+  });
+  try {
+    await submitFilters(harness);
+
+    const text = renderedText(harness.renderer.toJSON());
+    assert.match(text, /Правило не найдено/);
+    assert.match(text, /CATEGORIZATION_RULE_NOT_FOUND/);
+    // Not mistaken for a preview lifecycle problem just because it is a 404.
+    assert.doesNotMatch(text, /Список больше недоступен/);
+    assert.doesNotMatch(text, /Список устарел/);
+  } finally { await harness.cleanup(); }
+});
+
+test("creating a new list after a reclaimed preview returns to the empty builder", async () => {
+  const harness = await createHarness({
+    items: [item("a", "matched")],
+    onApply: () =>
+      new ApiClientError("Categorization preview not found", "CATEGORIZATION_PREVIEW_NOT_FOUND", 404),
+  });
+  try {
+    await submitFilters(harness);
+    await toggleRow(harness, 0);
+    await act(async () => { button(harness.root, "Применить выбранные").props.onClick(); });
+    await act(async () => { button(harness.root, "Подтвердить и применить").props.onClick(); });
+    await act(async () => { await settle(); });
+    const appliesBefore = harness.applyCalls.length;
+
+    await act(async () => { button(harness.root, "Составить новый список").props.onClick(); });
+    await act(async () => { await settle(); });
+
+    const text = renderedText(harness.renderer.toJSON());
+    assert.doesNotMatch(text, /Список больше недоступен/);
+    // Back in the ordinary builder with nothing selected and nothing applied on its own.
+    assert.ok(findButton(harness.root, "Составить список"));
+    assert.equal(checkboxes(harness.root).length, 0);
+    assert.equal(harness.applyCalls.length, appliesBefore);
+  } finally { await harness.cleanup(); }
+});
+
+test("import-scoped review never renders the apply history panel", async () => {
+  const harness = await createHarness({
+    history: [historyOperation()],
+    importScope: { kind: "valid", importBatchId: scopedBatchId },
+  });
+  try {
+    const text = renderedText(harness.renderer.toJSON());
+    // The scoped screen explains where history lives, so assert on the panel's own markers rather
+    // than on that sentence: no journal heading, no refresh control, no empty-state copy.
+    assert.doesNotMatch(text, /Операционный журнал/);
+    assert.doesNotMatch(text, /Обновить историю/);
+    assert.doesNotMatch(text, /Попыток применения пока нет/);
+    assert.doesNotMatch(text, /Историческая попытка применения/);
+    assert.equal(findButton(harness.root, "Обновить историю"), undefined);
+    // And the scoped screen never asks the history endpoint for anything.
+    assert.equal(
+      harness.getCalls.some((path) => path.startsWith("/api/v1/categorization-apply-operations")),
+      false,
+    );
+  } finally { await harness.cleanup(); }
+});

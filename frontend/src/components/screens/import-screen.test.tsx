@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import Link from "next/link";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import { apiClient } from "@/lib/api-client";
@@ -316,4 +317,106 @@ test("late commit response cannot replace a newer selected import batch", async 
     apiClient.post = originalPost;
     restoreBrowserGlobals();
   }
+});
+
+// --- Stage B: scoped review from durable import history ----------------------------------------
+
+const REVIEW_LABEL = "Проверить категоризацию";
+
+function linkLabel(children: unknown): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(linkLabel).join("");
+  return "";
+}
+
+function optionalButton(renderer: ReactTestRenderer, label: string) {
+  return renderer.root.findAllByType("button").find((node) =>
+    node.children.some((child) => typeof child === "string" && child.includes(label)),
+  );
+}
+
+/** Mount the screen showing only the durable history table for one batch. */
+async function historyHarness(historyBatch: ImportBatch) {
+  const restoreBrowserGlobals = installBrowserGlobals();
+  const originalGet = apiClient.get;
+  apiClient.get = (<T,>(path: string) => {
+    if (path.startsWith("/api/v1/imports?")) {
+      return Promise.resolve({
+        items: [historyBatch],
+        page: { limit: 50, offset: 0, total: 1 },
+      } as T);
+    }
+    throw new Error(`Unexpected request: ${path}`);
+  }) as typeof apiClient.get;
+
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ImportScreen onError={(error) => { throw error; }} />);
+    await settle();
+  });
+
+  return {
+    get renderer() { return renderer as ReactTestRenderer; },
+    reviewLinks() {
+      return (renderer as ReactTestRenderer).root
+        .findAllByType(Link)
+        .filter((node) => linkLabel(node.props.children).includes(REVIEW_LABEL));
+    },
+    async cleanup() {
+      await act(async () => renderer?.unmount());
+      apiClient.get = originalGet;
+      restoreBrowserGlobals();
+    },
+  };
+}
+
+test("imported history row with review candidates links to its scoped review", async () => {
+  const harness = await historyHarness(batch("imported"));
+  try {
+    const links = harness.reviewLinks();
+    assert.equal(links.length, 1);
+    assert.equal(links[0].props.href, `/rules/review?import_batch_id=${importBatchId}`);
+    // The destructive action for an imported batch keeps its place.
+    assert.ok(optionalButton(harness.renderer, "Откатить"));
+  } finally { await harness.cleanup(); }
+});
+
+test("imported history row without review candidates offers no review link", async () => {
+  const historyBatch = batch("imported");
+  const harness = await historyHarness({
+    ...historyBatch,
+    summary: { ...historyBatch.summary, review_candidates_at_commit: 0 },
+  });
+  try {
+    assert.equal(harness.reviewLinks().length, 0);
+    assert.ok(optionalButton(harness.renderer, "Откатить"));
+  } finally { await harness.cleanup(); }
+});
+
+test("a batch that was never imported offers no review link even with candidates", async () => {
+  const harness = await historyHarness(batch("ready"));
+  try {
+    assert.equal(harness.reviewLinks().length, 0);
+    // A cancellable batch keeps its cancel action and gains no rollback.
+    assert.ok(optionalButton(harness.renderer, "Отменить"));
+    assert.equal(optionalButton(harness.renderer, "Откатить"), undefined);
+  } finally { await harness.cleanup(); }
+});
+
+test("a summary without the candidate field offers no review link", async () => {
+  const historyBatch = batch("imported");
+  const summary: Record<string, unknown> = { ...historyBatch.summary };
+  delete summary.review_candidates_at_commit;
+  const harness = await historyHarness({ ...historyBatch, summary });
+  try {
+    assert.equal(harness.reviewLinks().length, 0);
+  } finally { await harness.cleanup(); }
+});
+
+test("a rolled back batch offers neither review nor rollback", async () => {
+  const harness = await historyHarness(batch("rolled_back"));
+  try {
+    assert.equal(harness.reviewLinks().length, 0);
+    assert.equal(optionalButton(harness.renderer, "Откатить"), undefined);
+  } finally { await harness.cleanup(); }
 });
