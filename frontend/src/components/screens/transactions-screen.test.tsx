@@ -4,6 +4,7 @@ import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 import { apiClient } from "@/lib/api-client";
+import type { Transaction } from "@/types/finance";
 
 import { TransactionsScreen } from "./transactions-screen";
 
@@ -246,5 +247,147 @@ test("Shift+Tab wraps from the first control back to the last", async () => {
 
     assert.equal(backward.prevented, true);
     assert.equal(document.activeElement, browser.submitButton);
+  });
+});
+
+// --- Transaction list: only supported actions are offered --------------------------------------
+
+const listedTransaction: Transaction = {
+  account: { id: "account-1", name: "Основной" },
+  amount: "1250.0000",
+  category: { id: "category-1", name: "Продукты" },
+  comment: null,
+  counterparty: "Кофейня",
+  created_at: "2026-08-20T09:00:00Z",
+  currency: "RUB",
+  description: "Завтрак",
+  external_id: null,
+  id: "transaction-1",
+  occurred_at: "2026-08-20T09:00:00Z",
+  payee: null,
+  related_transaction_id: null,
+  source: "manual",
+  splits: [],
+  status: "confirmed",
+  target_account: null,
+  transaction_type: "expense",
+  updated_at: "2026-08-20T09:00:00Z",
+  version: 1,
+};
+
+/** Mount the screen with one transaction and the drawer closed, i.e. the ordinary ledger view. */
+async function withLedger(body: (renderer: ReactTestRenderer) => Promise<void> | void) {
+  const originalGet = apiClient.get;
+  apiClient.get = (<T,>(path: string) => {
+    if (path.startsWith("/api/v1/transactions")) {
+      return Promise.resolve({
+        items: [listedTransaction],
+        page: { limit: 10, offset: 0, total: 1 },
+      } as T);
+    }
+    return Promise.resolve(emptyPage as T);
+  }) as typeof apiClient.get;
+  const browser = installBrowserGlobals();
+  let renderer: ReactTestRenderer | undefined;
+  try {
+    await act(async () => {
+      renderer = create(
+        <TransactionsScreen onError={(error) => { throw error; }} role="owner" roleLoading={false}/>,
+        { createNodeMock: (node) => (node.props as { className?: string }).className === "transaction-drawer" ? browser.drawerNode : null },
+      );
+      await settle();
+    });
+    if (!renderer) throw new Error("Renderer was not created");
+    await body(renderer);
+  } finally {
+    if (renderer) await act(async () => renderer?.unmount());
+    browser.restore();
+    apiClient.get = originalGet;
+  }
+}
+
+function textOf(node: unknown): string {
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (node && typeof node === "object" && "children" in node) {
+    return textOf((node as { children: unknown }).children);
+  }
+  return "";
+}
+
+function checkboxes(renderer: ReactTestRenderer) {
+  return renderer.root.findAllByType("input").filter((node) => node.props.type === "checkbox");
+}
+
+function buttonLabels(renderer: ReactTestRenderer): string[] {
+  return renderer.root.findAllByType("button").map((node) => textOf(node.props.children));
+}
+
+test("the ledger offers no unsupported bulk-edit affordance", async () => {
+  await withLedger(async (renderer) => {
+    // The toolbar only ever appeared once a row was selected, so selecting is what proves it gone.
+    for (const box of checkboxes(renderer)) {
+      await act(async () => box.props.onChange({ target: { checked: true } }));
+    }
+
+    const rendered = JSON.stringify(renderer.toJSON());
+    assert.doesNotMatch(rendered, /Пакетные изменения требуют API/);
+    assert.doesNotMatch(rendered, /Выбрано:/);
+    assert.doesNotMatch(rendered, /Снять выбор/);
+    assert.doesNotMatch(rendered, /Requires API support/);
+    assert.doesNotMatch(rendered, /transaction-bulk/);
+  });
+});
+
+test("no transaction selection controls are rendered at all", async () => {
+  await withLedger((renderer) => {
+    // Neither per-row checkboxes nor a select-all checkbox: selection had no supported action.
+    assert.equal(checkboxes(renderer).length, 0);
+    const rendered = JSON.stringify(renderer.toJSON());
+    assert.doesNotMatch(rendered, /Выбрать страницу/);
+    assert.doesNotMatch(rendered, /Выбрать Кофейня/);
+    assert.doesNotMatch(rendered, /is-selected/);
+  });
+});
+
+test("every real per-transaction action survives", async () => {
+  await withLedger((renderer) => {
+    const labels = buttonLabels(renderer);
+    // Desktop row and mobile card each offer the same real actions.
+    for (const label of ["Правило", "Изменить", "История"]) {
+      assert.ok(labels.filter((item) => item === label).length >= 2, `missing action: ${label}`);
+    }
+    // A confirmed transaction can still be cancelled, and the ledger can still be extended.
+    assert.ok(labels.includes("Отменить"));
+    assert.ok(labels.some((item) => item.includes("Добавить операцию")));
+    assert.ok(labels.includes("Обновить"));
+  });
+});
+
+test("filters, search and the result line still render", async () => {
+  await withLedger((renderer) => {
+    const rendered = JSON.stringify(renderer.toJSON());
+    assert.match(rendered, /Найдено:/);
+    assert.ok(renderer.root.findAllByProps({ "aria-label": "Поиск" }).length > 0);
+    for (const label of ["Фильтр по статусу", "Фильтр по счёту", "Фильтр по категории"]) {
+      assert.ok(renderer.root.findAllByProps({ "aria-label": label }).length > 0, label);
+    }
+    assert.ok(buttonLabels(renderer).includes("Найти"));
+  });
+});
+
+test("the mobile card list still renders its transaction without selection controls", async () => {
+  await withLedger((renderer) => {
+    const cards = renderer.root.findAll(
+      (node) => typeof node.props.className === "string"
+        && node.props.className.startsWith("transaction-mobile-card"),
+    );
+    assert.equal(cards.length, 1);
+    // Inspect inside the card itself, not the whole screen.
+    assert.equal(
+      cards[0].findAllByType("input").filter((node) => node.props.type === "checkbox").length,
+      0,
+    );
+    assert.ok(cards[0].findAllByType("button").length >= 3, "card actions disappeared");
   });
 });
