@@ -51,7 +51,11 @@ printf '{\n  "filename": "%s",\n  "sha256": "%s",\n  "created_at": "%s",\n  "dat
   >"${manifest_path}.partial"
 mv "${manifest_path}.partial" "$manifest_path"
 
-psql -Xq -v filename="$filename" -v sha256="$sha256" -v size_bytes="$size_bytes" <<'SQL'
+# The revision travels with the audit event as well as in the manifest. The manifest stays part of
+# the restore artifact and remains authoritative there, but it lives in a 0700 root-owned directory
+# the non-root backend cannot read; the audit row is the operational read model. The value is the
+# one already captured above — no second query against alembic_version.
+psql -Xq   -v filename="$filename"   -v sha256="$sha256"   -v size_bytes="$size_bytes"   -v alembic_revision="$alembic_revision" <<'SQL'
 INSERT INTO audit_log (
   id, workspace_id, actor_user_id, entity_type, entity_id, action,
   before_data, after_data, request_id, source
@@ -59,7 +63,12 @@ INSERT INTO audit_log (
 VALUES (
   gen_random_uuid(), NULL, NULL, 'backup', gen_random_uuid(), 'backup.created',
   NULL,
-  jsonb_build_object('filename', :'filename', 'sha256', :'sha256', 'size_bytes', :'size_bytes'::bigint),
+  jsonb_build_object(
+    'filename', :'filename',
+    'sha256', :'sha256',
+    'size_bytes', :'size_bytes'::bigint,
+    'alembic_revision', :'alembic_revision'
+  ),
   NULL, 'system'
 );
 SQL
