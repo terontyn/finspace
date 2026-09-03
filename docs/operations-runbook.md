@@ -4,6 +4,14 @@
 не содержит секретных значений. Подробные технические контракты остаются в тематических
 документах; здесь собраны повседневные действия и безопасные команды.
 
+Установка с нуля — [production-install.md](production-install.md); переход между
+релизами и откат — [upgrade.md](upgrade.md). Этот документ описывает уже установленный
+сервер.
+
+Все production-команды Compose выполняются через `sudo`, потому что `.env` принадлежит
+root: Compose читает его на хосте. `sudo -E` на этом сервере не поддерживается — если
+команде нужна переменная, передавайте её явно, `sudo env VAR=value ...`.
+
 ## 1. Что где находится
 
 | Объект | Расположение |
@@ -15,7 +23,7 @@
 | Backend для Apps Script | `https://terontyn-pc.tailfcdf00.ts.net:8443` |
 | Локальный frontend на сервере | `http://127.0.0.1:3000` |
 | Локальный backend на сервере | `http://127.0.0.1:8000` |
-| Production Compose wrapper | `sudo finspace-compose` |
+| Production Compose wrapper | `sudo finspace-compose`, ставится `sudo ./scripts/install-finspace-compose.sh` |
 | Version-controlled production override | `/opt/finspace/compose.production.yml` |
 
 Production UI доступен устройствам, вошедшим в нужный tailnet. Порт 8443 публичен только
@@ -285,67 +293,31 @@ release с этим исправлением, затем немедленно з
 
 ### Полный deploy на Ubuntu
 
+Канонический порядок обновления и все три сценария отката вынесены в отдельный документ:
+**[upgrade.md](upgrade.md)**. Он и есть контракт; здесь не дублируется его команда за
+командой, чтобы две последовательности не разошлись.
+
 Commit/push и deploy выполняются только после разрешения владельца. `release_ref` должен
-быть точным проверенным tag или commit, а не плавающей веткой. Безопасная
-последовательность обязательна:
+быть точным проверенным tag или commit, а не плавающей веткой.
 
-1. Проверить clean worktree, текущую ревизию, backup policy и создать проверяемую точку
-   восстановления.
-2. Остановить только application services; PostgreSQL и Redis оставить работающими.
-3. Получить и выбрать точный release.
-4. Идемпотентно подготовить утверждённые writable runtime directories.
-5. Установить version-controlled production override и проверить merged Compose.
-6. Собрать images target release.
-7. Выполнить migration из нового backend image.
-8. Запустить backend.
-9. Дождаться readiness.
-10. Запустить sync-worker и frontend.
-11. Выполнить smoke tests и проверить логи.
+Инварианты, которые нельзя нарушать ни в одном варианте deploy:
 
-```bash
-ssh finspace
-cd /opt/finspace
-
-./scripts/git-status-strict.sh
-git rev-parse HEAD
-sudo finspace-compose --profile tools run --rm backup \
-  sh /scripts/verify-backup.sh --create
-
-sudo finspace-compose stop frontend sync-worker backend
-
-git fetch --tags origin
-release_ref="EXACT_TAG_OR_COMMIT"
-git switch --detach "$release_ref"
-git rev-parse HEAD
-sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
-./scripts/git-status-strict.sh
-
-sudo cp -a /etc/finspace/compose.server.yml \
-  "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
-sudo install -o root -g root -m 0644 \
-  /opt/finspace/compose.production.yml /etc/finspace/compose.server.yml
-sudo finspace-compose config --quiet
-sudo finspace-compose config --format json |
-  python3 backend/scripts/validate_compose_topology.py production --stdin
-
-sudo finspace-compose build backend sync-worker frontend
-sudo finspace-compose run --rm --no-deps backend alembic upgrade head
-
-sudo finspace-compose up -d --no-deps --force-recreate backend
-curl -fsS http://127.0.0.1:8000/api/v1/health/ready
-
-sudo finspace-compose up -d --no-deps --force-recreate sync-worker frontend
-sudo finspace-compose ps
-curl -fsS -o /dev/null -w 'login: HTTP %{http_code}\n' \
-  http://127.0.0.1:3000/login
-docker exec finspace-backend-1 python scripts/google_config_check.py
-```
+1. Свежая копия, **проверенная восстановлением**, создаётся до обновления, а не после.
+2. Точный release выбирается до сборки; код приложения и код миграций принадлежат одному
+   checkout.
+3. Production-оверлей берётся из этого же checkout через `finspace-compose`. Внешний
+   `/etc/finspace/compose.server.yml` больше не участвует в процедуре: wrapper
+   устанавливается из репозитория командой `sudo ./scripts/install-finspace-compose.sh`.
+4. Merged Compose проходит validator до сборки.
+5. Migration выполняется образом целевого релиза, до запуска приложения.
+6. Пересоздаются только нужные application services; PostgreSQL, Redis и n8n остаются.
+7. Никакого автоматического downgrade production DB. `alembic downgrade` не является
+   механизмом отката.
 
 Нельзя выполнять `git pull` поверх работающего source-mounted backend: изменение checkout
 немедленно меняет исполняемый код и обходит build/restart boundary. В корректной
 production-топологии source mounts отсутствуют, но application services всё равно
-останавливаются до смены release, чтобы порядок deploy оставался однозначным. Никогда не
-делайте автоматический downgrade production DB.
+останавливаются до смены release, чтобы порядок deploy оставался однозначным.
 
 ### Frontend-only release
 

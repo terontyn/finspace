@@ -106,22 +106,27 @@ sudo finspace-compose config --format json |
 Проверка завершается ошибкой при source mount в production backend/worker/frontend,
 `--reload`, неверной frontend-команде, лишнем mount или неверном read-only режиме.
 
-## Server override
+## Production override
 
-На Ubuntu содержимое `/etc/finspace/compose.server.yml` должно совпадать с
-`compose.production.yml`. Если `finspace-compose` уже вызывает базовый файл и этот server
-override, обновление выполняется только как часть безопасного release-порядка из
-[operations-runbook.md](operations-runbook.md). Сам шаг установки выглядит так:
+Оверлей берётся прямо из checkout: wrapper `finspace-compose` объединяет
+`/opt/finspace/docker-compose.yml` и `/opt/finspace/compose.production.yml` в фиксированном
+порядке. Отдельной root-owned копии оверлея на хосте нет и быть не должно — иначе выбор
+релиза перестаёт означать выбор топологии.
+
+> [!IMPORTANT]
+> Прежний внешний файл `/etc/finspace/compose.server.yml` больше не является контрактом.
+> На сервере, где он остался, достаточно установить wrapper из репозитория
+> (`sudo ./scripts/install-finspace-compose.sh`) и убедиться, что merged-конфигурация
+> проходит validator. Ни одна процедура его больше не читает.
 
 ```bash
-sudo cp -a /etc/finspace/compose.server.yml "/etc/finspace/compose.server.yml.backup-$(date +%Y%m%d-%H%M%S)"
-sudo install -o root -g root -m 0644 /opt/finspace/compose.production.yml /etc/finspace/compose.server.yml
+sudo ./scripts/install-finspace-compose.sh
 sudo finspace-compose config --quiet
 sudo finspace-compose config --format json |
   python3 backend/scripts/validate_compose_topology.py production --stdin
 ```
 
-Не копируйте override и не меняйте checkout в обход полного deploy-порядка, если
+Не меняйте checkout в обход полного deploy-порядка, если
 application services продолжают работать из source mounts. После запуска в логах frontend
 должна присутствовать строка `next start`, а запросов к `/_next/webpack-hmr` быть не
 должно. Проверка с хоста:
