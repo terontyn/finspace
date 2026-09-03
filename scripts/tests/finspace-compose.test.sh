@@ -47,22 +47,43 @@ STUB
 chmod 755 "$bin/docker"
 
 argv_log="$test_root/docker-argv.log"
-# Needed by the "no docker on PATH" case: env resolves the program it execs through the PATH it
-# was given, so sh itself has to be named absolutely there.
-sh_binary=$(command -v sh)
 
 # The fake docker's exit code travels through this variable rather than through a command prefix:
 # a prefixed assignment on a function call persists after the call in some POSIX shells and would
 # leak into the next case.
 docker_exit_code=0
 
+# Both scripts are run the way an operator runs them — directly, through the shebang — never as
+# `sh <script>`. Interposing an interpreter supplies the execute permission the file is supposed to
+# carry itself, which is exactly how a checkout that ships them non-executable slipped through.
 run_wrapper() {
   DOCKER_ARGV_LOG="$argv_log" \
   DOCKER_EXIT_CODE="$docker_exit_code" \
   PATH="$bin:/usr/bin:/bin" \
   FINSPACE_PROJECT_ROOT="$project" \
-  sh "$wrapper" "$@"
+  "$wrapper" "$@"
 }
+
+# --- both scripts are executable in the checkout -------------------------------------------------
+# `sudo ./scripts/install-finspace-compose.sh` is the documented command. A file committed with
+# mode 100644 fails it with "Permission denied" on a fresh clone, and no amount of documentation
+# repairs that: the permission has to survive the checkout.
+[ -x "$installer" ] || fail "scripts/install-finspace-compose.sh is not executable in the checkout"
+[ -x "$wrapper" ] || fail "scripts/finspace-compose.sh is not executable in the checkout"
+
+# The runtime bit above is the property that matters, but on some filesystems (Windows checkouts,
+# bind mounts that flatten permissions) it is reported the same either way. Where Git can answer
+# for this working tree, ask it what will actually be checked out instead.
+if command -v git >/dev/null 2>&1 &&
+  git -C "$repository_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  for tracked in scripts/finspace-compose.sh scripts/install-finspace-compose.sh \
+    scripts/tests/finspace-compose.test.sh; do
+    index_mode=$(git -C "$repository_root" ls-files -s -- "$tracked" | cut -d' ' -f1)
+    assert_equal "100755" "$index_mode" "index mode of $tracked"
+  done
+else
+  printf 'finspace-compose test: note: Git index modes not checked here\n'
+fi
 
 # --- no generated code ------------------------------------------------------------------------
 # A wrapper that builds its command line as a string and evals it can be steered by an argument.
@@ -163,7 +184,7 @@ assert_wrapper_refuses "a checkout without the base compose file" \
 mkdir -p "$test_root/empty-bin"
 assert_wrapper_refuses "a host without docker" \
   env DOCKER_ARGV_LOG="$argv_log" PATH="$test_root/empty-bin" \
-  FINSPACE_PROJECT_ROOT="$project" "$sh_binary" "$wrapper" ps
+  FINSPACE_PROJECT_ROOT="$project" "$wrapper" ps
 
 # --- the wrapper carries no secrets and no host specifics ---------------------------------------
 wrapper_text=$(cat "$wrapper")
@@ -193,7 +214,7 @@ message=$(sh "$installer" extra-argument 2>&1) || status=$?
 
 if [ "$(id -u)" -eq 0 ]; then
   target="$target_directory/finspace-compose"
-  FINSPACE_COMPOSE_BIN="$target" sh "$installer" >"$test_root/install.log" 2>&1 ||
+  FINSPACE_COMPOSE_BIN="$target" "$installer" >"$test_root/install.log" 2>&1 ||
     fail "the installer failed as root"
   assert_contains "$(cat "$test_root/install.log")" "PASS" "the installer printed no success line"
   cmp -s "$wrapper" "$target" || fail "the installed wrapper differs from the repository copy"
@@ -201,7 +222,7 @@ if [ "$(id -u)" -eq 0 ]; then
   assert_equal "0" "$(stat -c '%u' "$target")" "installed owner"
 
   # Re-running is how an update is performed, so it must be idempotent rather than an error.
-  FINSPACE_COMPOSE_BIN="$target" sh "$installer" >/dev/null 2>&1 ||
+  FINSPACE_COMPOSE_BIN="$target" "$installer" >/dev/null 2>&1 ||
     fail "re-running the installer failed"
   cmp -s "$wrapper" "$target" || fail "the update left a different wrapper in place"
 
@@ -213,7 +234,7 @@ if [ "$(id -u)" -eq 0 ]; then
     fail "the installed wrapper built a different command than the repository copy"
 else
   status=0
-  message=$(FINSPACE_COMPOSE_BIN="$target_directory/finspace-compose" sh "$installer" 2>&1) || status=$?
+  message=$(FINSPACE_COMPOSE_BIN="$target_directory/finspace-compose" "$installer" 2>&1) || status=$?
   [ "$status" -ne 0 ] || fail "the installer ran without root"
   assert_contains "$message" "root" "the installer did not explain that root is required"
   printf 'finspace-compose test: note: not root, install assertions were reduced\n'
