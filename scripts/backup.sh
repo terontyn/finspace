@@ -64,5 +64,21 @@ VALUES (
 );
 SQL
 
+# Deterministic handoff for unattended callers: the scheduler must know exactly which dump this
+# run created, never "whichever file sorts last" — a concurrent or manual run would make that
+# ambiguous. The basename is written atomically and only inside the backup tree.
+if [ -n "${BACKUP_RESULT_FILE:-}" ]; then
+  case "$BACKUP_RESULT_FILE" in
+    /backups/*) ;;
+    *) echo "Backup failed: BACKUP_RESULT_FILE must stay inside /backups." >&2; exit 1 ;;
+  esac
+  case "$BACKUP_RESULT_FILE" in
+    *..*) echo "Backup failed: BACKUP_RESULT_FILE must not traverse directories." >&2; exit 1 ;;
+  esac
+  printf '%s
+' "$filename" >"${BACKUP_RESULT_FILE}.partial"
+  mv "${BACKUP_RESULT_FILE}.partial" "$BACKUP_RESULT_FILE"
+fi
+
 trap - EXIT HUP INT TERM
 echo "$dump_path"

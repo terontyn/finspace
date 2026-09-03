@@ -450,6 +450,10 @@ class BackupStatusResponse(ApiModel):
     status: Literal["healthy", "stale", "missing", "unverified"]
     last_backup_at: datetime | None
     last_verified_at: datetime | None
+    # Off-host evidence for this exact backup. The label is an opaque operator name such as "nas";
+    # the remote host, user, root path and key location are never exposed.
+    last_offhost_at: datetime | None = None
+    offhost_destination_label: str | None = Field(default=None, max_length=60)
     revision: str | None
     age_hours: Decimal | None
     sha256_short: str | None

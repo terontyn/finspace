@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily Finspace verified backup
+Documentation=file:///opt/finspace/docs/backup-and-restore.md
+
+[Timer]
+# HOST LOCAL TIME, not UTC. Daily is deliberate: it pairs with BACKUP_STALE_HOURS=36, so one
+# missed run warns without a single late start raising an alarm.
+OnCalendar=*-*-* 01:00:00
+# A host that was off at 01:00 still runs the backup once it comes back.
+Persistent=true
+# Spreads the start so a backup never collides predictably with other nightly work.
+RandomizedDelaySec=15min
+AccuracySec=1min
+Unit=finspace-backup.service
+
+[Install]
+WantedBy=timers.target
