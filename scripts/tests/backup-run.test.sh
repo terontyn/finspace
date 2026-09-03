@@ -42,15 +42,10 @@ project="$test_root/project"
 backup_root="$project/backups"
 mkdir -p "$bin" "$project/scripts" "$backup_root/database" "$backup_root/sets"
 
-# A real repository so the runner can resolve its own commit and tag exactly as it does in
-# production, rather than trusting anything from the environment.
-git -C "$project" init -q
-git -C "$project" config user.name "Backup run test"
-git -C "$project" config user.email "backup-run-test@example.invalid"
-printf 'fixture\n' >"$project/README.md"
-git -C "$project" add README.md
-git -C "$project" -c commit.gpgsign=false commit -qm "fixture"
-commit=$(git -C "$project" rev-parse HEAD)
+# Release metadata comes from a fake git rather than a real fixture repository: what these tests
+# need to prove is how the runner *invokes* git under a root-owned service, and a real repository
+# would answer even without the scoped safe.directory the production defect required.
+commit="4d0b1f9c2a7e5b3d8f6a0c4e2b9d7f1a3c5e8b02"
 
 cp "$repository_root/scripts/backup-run.sh" "$project/scripts/backup-run.sh"
 cp "$repository_root/scripts/backup-set-cleanup.sh" "$project/scripts/backup-set-cleanup.sh"
@@ -90,6 +85,51 @@ STUB
 chmod 755 "$bin/docker" "$bin/backup-offhost-stub.sh"
 cp "$bin/backup-offhost-stub.sh" "$project/scripts/backup-offhost.sh"
 
+# A fake git that stands in for the production ownership refusal: it answers only when the caller
+# has scoped safe.directory to the exact project root it is also operating on. Anything else — no
+# override, a wildcard, the wrong directory — behaves like the root-owned systemd run did.
+cat >"$bin/git" <<'STUB'
+#!/bin/sh
+printf 'git %s\n' "$*" >>"$GIT_LOG"
+scoped=""
+directory=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -c)
+      [ "$2" != "safe.directory=$EXPECTED_ROOT" ] || scoped="yes"
+      case "$2" in
+        safe.directory=\*) printf 'wildcard safe.directory is forbidden\n' >&2; exit 128 ;;
+      esac
+      shift 2
+      ;;
+    -C) directory="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+case "${1:-}" in
+  config)
+    printf 'the runner must never write git configuration\n' >&2
+    exit 128
+    ;;
+esac
+if [ "$scoped" != "yes" ] || [ "$directory" != "$EXPECTED_ROOT" ]; then
+  printf 'fatal: detected dubious ownership in repository at %s\n' "$directory" >&2
+  exit 128
+fi
+case "${1:-}" in
+  rev-parse)
+    [ ! -f "$GIT_REVPARSE_FAIL" ] || exit 128
+    printf '%s\n' "$FAKE_COMMIT"
+    ;;
+  describe)
+    [ ! -f "$GIT_DESCRIBE_FAIL" ] || exit 128
+    printf '%s\n' "${FAKE_TAG:-}"
+    ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod 755 "$bin/git"
+
 run_backup() {
   PATH="$bin:/usr/bin:/bin" \
   STEP_LOG="$test_root/steps.log" \
@@ -100,6 +140,12 @@ run_backup() {
   SET_FAIL="$test_root/set.fail" \
   OFFHOST_FAIL="$test_root/offhost.fail" \
   CLEANUP_FAIL="$test_root/cleanup.fail" \
+  GIT_LOG="$test_root/git.log" \
+  EXPECTED_ROOT="$project" \
+  FAKE_COMMIT="${COMMIT_OVERRIDE-$commit}" \
+  FAKE_TAG="${TAG_OVERRIDE-}" \
+  GIT_REVPARSE_FAIL="$test_root/revparse.fail" \
+  GIT_DESCRIBE_FAIL="$test_root/describe.fail" \
   FINSPACE_PROJECT_ROOT="$project" \
   FINSPACE_BACKUP_ROOT="$backup_root" \
   FINSPACE_BACKUP_LOCK_FILE="$test_root/backup.lock" \
@@ -109,6 +155,7 @@ run_backup() {
 
 reset_run() {
   : >"$test_root/steps.log"
+  : >"$test_root/git.log"
   rm -rf "$backup_root/sets"/* "$backup_root/database"/*
   mkdir -p "$backup_root/sets"
 }
@@ -239,5 +286,76 @@ run_backup >/dev/null 2>&1 || fail "the lock was not released after a failed run
 # No secrets are ever echoed.
 assert_absent "$(cat "$test_root/steps.log")" "PASSWORD" "a secret reached the log"
 assert_absent "$(cat "$test_root/steps.log")" "JWT_SECRET" "a secret reached the log"
+
+
+# --- Git metadata under a root-owned service ------------------------------------------------------
+# Production runs the service as root against a checkout owned by the operator, so Git refuses the
+# repository under its ownership protection. The fake git above reproduces that refusal exactly: it
+# answers only when the caller scoped safe.directory to the same directory it is operating on.
+reset_run
+output=$(run_backup 2>&1) || fail "the runner could not read Git metadata"
+
+git_log=$(cat "$test_root/git.log")
+assert_contains "$git_log" "-c safe.directory=$project -C $project rev-parse HEAD" \
+  "rev-parse did not carry a command-scoped safe.directory"
+assert_contains "$git_log" "-c safe.directory=$project -C $project describe --exact-match --tags" \
+  "describe did not carry a command-scoped safe.directory"
+# The scope must be exactly the directory being read, and nothing broader.
+assert_absent "$git_log" "safe.directory=*" "a wildcard safe.directory was used"
+assert_absent "$git_log" "config" "the runner touched Git configuration"
+assert_absent "$git_log" "--global" "the runner used a global Git setting"
+assert_contains "$(cat "$test_root/steps.log")" "FINSPACE_COMMIT=$commit" \
+  "the commit was not obtained through the scoped command"
+
+# An exact tag is passed through; anything unsafe becomes empty rather than reaching the inventory.
+reset_run
+TAG_OVERRIDE="local-v0.16" run_backup >/dev/null 2>&1 || fail "a tagged checkout failed"
+assert_contains "$(cat "$test_root/steps.log")" "FINSPACE_TAG=local-v0.16" "the exact tag was lost"
+
+reset_run
+TAG_OVERRIDE="v1.0; rm -rf /" run_backup >/dev/null 2>&1 || fail "an unsafe tag broke the run"
+assert_absent "$(cat "$test_root/steps.log")" "rm -rf" "an unsafe tag reached the set build"
+
+reset_run
+: >"$test_root/describe.fail"
+run_backup >/dev/null 2>&1 || fail "an untagged checkout must still back up"
+rm "$test_root/describe.fail"
+assert_contains "$(cat "$test_root/steps.log")" "FINSPACE_TAG=" "an untagged run recorded no tag field"
+
+# Inherited environment must never stand in for the checkout: a scheduled run has no operator, and
+# a stale exported value would describe a different release entirely.
+reset_run
+FINSPACE_COMMIT=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef FINSPACE_TAG=local-v9.9 \
+  run_backup >/dev/null 2>&1 || fail "the run failed with inherited metadata present"
+steps=$(cat "$test_root/steps.log")
+assert_contains "$steps" "FINSPACE_COMMIT=$commit" "an inherited commit replaced the checkout"
+assert_absent "$steps" "deadbeefdeadbeef" "an inherited commit replaced the checkout"
+assert_absent "$steps" "local-v9.9" "an inherited tag replaced the checkout"
+
+# --- Git metadata failure still fails closed -------------------------------------------------------
+reset_run
+: >"$test_root/revparse.fail"
+if output=$(run_backup 2>&1); then
+  rm "$test_root/revparse.fail"
+  fail "an unreadable checkout still ran a backup"
+fi
+rm "$test_root/revparse.fail"
+assert_contains "$output" "backup_run_failed reason=commit_unavailable" "the failure reason changed"
+[ -z "$(step_index '/scripts/backup.sh')" ] || fail "a dump was created without release metadata"
+
+# A project root that does not exist is refused before Git is ever consulted.
+reset_run
+if output=$(FINSPACE_PROJECT_ROOT="$test_root/not-a-checkout" \
+  PATH="$bin:/usr/bin:/bin" \
+  STEP_LOG="$test_root/steps.log" GIT_LOG="$test_root/git.log" EXPECTED_ROOT="$project" \
+  FAKE_COMMIT="$commit" BACKUP_ROOT="$backup_root" \
+  FINSPACE_BACKUP_ROOT="$backup_root" \
+  FINSPACE_BACKUP_LOCK_FILE="$test_root/backup.lock" \
+  FINSPACE_BACKUP_OFFHOST_ENABLED=false \
+  sh "$project/scripts/backup-run.sh" 2>&1); then
+  fail "a missing project root was accepted"
+fi
+assert_contains "$output" "backup_run_failed reason=project_root_missing" "missing root reason"
+assert_equal "" "$(cat "$test_root/git.log")" "Git was consulted for a missing project root"
 
 printf 'backup-run test: PASS\n'
