@@ -60,16 +60,27 @@ case "$offhost_enabled" in
   true|false) ;;
   *) fail "invalid_offhost_flag" ;;
 esac
+[ -n "$project_root" ] || fail "project_root_missing"
+[ -d "$project_root" ] || fail "project_root_missing"
 [ -d "$backup_root" ] || fail "backup_root_missing"
 
 # Release metadata is read here rather than trusted from the environment: a scheduled run has no
 # operator to export it, and an inherited value could describe a different checkout entirely.
-commit="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"
+#
+# The service runs as root while /opt/finspace belongs to the operator, so Git refuses the checkout
+# under its ownership protection. The trust is granted per command and only for the one directory
+# this runner was configured to operate on — never `safe.directory=*`, never a global Git
+# configuration, and never by taking ownership of the repository away from its owner.
+git_metadata() {
+  git -c "safe.directory=$project_root" -C "$project_root" "$@" 2>/dev/null || true
+}
+
+commit="$(git_metadata rev-parse HEAD)"
 case "$commit" in
   '') fail "commit_unavailable" ;;
   *[!0-9a-f]*) fail "commit_unsafe" ;;
 esac
-tag="$(git -C "$project_root" describe --exact-match --tags HEAD 2>/dev/null || true)"
+tag="$(git_metadata describe --exact-match --tags HEAD)"
 case "$tag" in
   *[!A-Za-z0-9._-]*) tag="" ;;
 esac

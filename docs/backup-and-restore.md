@@ -243,6 +243,11 @@ journalctl -u finspace-backup.service -n 200 --no-pager
 `backup_run_offhost_verified` / `backup_run_offhost_skipped`, `backup_run_retention_finished`,
 `backup_run_finished`, `backup_run_failed reason=…`, `backup_run_locked lock=busy`.
 
+Планировщик работает от root, а `/opt/finspace` принадлежит оператору, поэтому Git отказывается
+читать checkout по своей защите владения. Runner передаёт `safe.directory` **только этой командой и
+только для настроенного project root**; глобальная конфигурация Git не меняется, владелец
+репозитория не меняется, `safe.directory=*` не используется.
+
 ### Блокировка
 
 `backup-run.sh` выполняется под `flock` (`/run/finspace-backup.lock`), поэтому таймер и ручной
