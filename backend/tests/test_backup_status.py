@@ -6,8 +6,10 @@ vouch for a newer dump. A backup that exists only on this host is deliberately n
 local-only storage is not disaster recovery.
 """
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import delete
@@ -21,6 +23,7 @@ from app.services.backup_status import get_backup_status
 DUMP = "finspace_2026-09-03T010000Z.dump"
 SHA = "a" * 64
 OTHER_SHA = "b" * 64
+REVISION = "0017_categorization_history"
 
 
 async def _clear() -> None:
@@ -264,3 +267,145 @@ async def test_an_oversized_destination_label_is_truncated() -> None:
 
     assert result.offhost_destination_label is not None
     assert len(result.offhost_destination_label) <= 60
+
+
+async def _created_with_revision(revision: object) -> None:
+    """A backup.created event carrying whatever the backup process recorded, valid or not."""
+    await _record(
+        "backup.created",
+        {"filename": DUMP, "sha256": SHA, "size_bytes": 1024, "alembic_revision": revision},
+    )
+
+
+def _manifest_dir(tmp_path: Path, revision: str | None) -> Path:
+    directory = tmp_path / "database"
+    directory.mkdir(parents=True, exist_ok=True)
+    if revision is not None:
+        (directory / f"{DUMP}.manifest.json").write_text(
+            json.dumps({"filename": DUMP, "sha256": SHA, "alembic_revision": revision}),
+            encoding="utf-8",
+        )
+    return directory
+
+
+async def test_revision_comes_from_the_audit_event_without_reading_the_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The exact production defect: backups are 0700 root-owned, the backend runs as `app`.
+
+    The manifest is deliberately unreadable here — the directory does not even exist — and the
+    revision must still be reported, because the backup process already recorded it.
+    """
+    monkeypatch.setattr(settings, "backup_metadata_path", tmp_path / "unreadable")
+    await _created_with_revision(REVISION)
+
+    result = await _status()
+
+    assert result.revision == REVISION
+
+
+async def test_the_audit_revision_wins_over_a_stale_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", _manifest_dir(tmp_path, "0009_stale"))
+    await _created_with_revision(REVISION)
+
+    result = await _status()
+
+    # The backend must not silently depend on whatever the filesystem happens to still hold.
+    assert result.revision == REVISION
+
+
+async def test_a_legacy_event_falls_back_to_a_readable_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", _manifest_dir(tmp_path, REVISION))
+    # Written before the audit payload carried the revision; historical rows are never rewritten.
+    await _created()
+
+    result = await _status()
+
+    assert result.revision == REVISION
+
+
+async def test_a_legacy_event_without_a_readable_manifest_reports_no_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", tmp_path / "missing")
+    await _created()
+
+    result = await _status()
+
+    assert result.revision is None
+    # A missing historical revision is acceptable; the health calculation still works.
+    assert result.status == "unverified"
+    assert result.last_backup_at is not None
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [None, 12345, {"nested": "value"}, ["list"], "", "   ", "x" * 500],
+)
+async def test_a_malformed_audit_revision_falls_back_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    malformed: object,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", _manifest_dir(tmp_path, REVISION))
+    await _created_with_revision(malformed)
+
+    result = await _status()
+
+    assert result.revision == REVISION
+
+
+async def test_a_malformed_audit_revision_without_a_manifest_is_simply_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", tmp_path / "missing")
+    await _created_with_revision({"unexpected": "shape"})
+
+    result = await _status()
+
+    assert result.revision is None
+    assert result.status == "unverified"
+
+
+async def test_off_host_semantics_are_unchanged_by_the_revision_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", tmp_path / "unreadable")
+    await _created_with_revision(REVISION)
+    await _record("backup.verified", {"filename": DUMP, "sha256": SHA})
+
+    result = await _status()
+
+    # Reading the revision from the audit log must not make a local-only backup look healthy.
+    assert result.status == "unverified"
+    assert result.stale is True
+    assert result.revision == REVISION
+    assert result.last_verified_at is not None
+    assert result.last_offhost_at is None
+    assert result.offhost_destination_label is None
+    assert result.warning is not None
+    assert "вне этого хоста" in result.warning
+
+
+async def test_the_response_never_exposes_a_backup_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(settings, "backup_metadata_path", _manifest_dir(tmp_path, REVISION))
+    await _created_with_revision(REVISION)
+
+    serialized = (await _status()).model_dump_json()
+
+    assert str(tmp_path) not in serialized
+    assert "manifest" not in serialized
+    assert "/backups" not in serialized

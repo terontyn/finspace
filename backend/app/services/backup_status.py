@@ -18,6 +18,23 @@ from app.schemas.automations import BackupStatusResponse
 # rows for the current backup while keeping the query bounded on a growing audit log.
 _EVIDENCE_SCAN_LIMIT = 20
 _LABEL_MAX_LENGTH = 60
+_REVISION_MAX_LENGTH = 100
+
+
+def _revision_from_event(metadata: dict) -> str | None:
+    """Read the Alembic revision the backup process recorded alongside the dump.
+
+    Audit payloads are stored JSON and are treated as untrusted on the way back out: anything that
+    is not a short, plain, non-empty string is ignored so a malformed historical row falls through
+    to the legacy reader instead of breaking backup health.
+    """
+    revision = metadata.get("alembic_revision")
+    if not isinstance(revision, str):
+        return None
+    revision = revision.strip()
+    if not revision or len(revision) > _REVISION_MAX_LENGTH:
+        return None
+    return revision
 
 
 async def _matching_evidence(
@@ -76,7 +93,13 @@ async def get_backup_status(session: AsyncSession) -> BackupStatusResponse:
     metadata = created.after_data or {}
     filename = str(metadata.get("filename", ""))
     sha = str(metadata.get("sha256", ""))
-    revision = _manifest_revision(filename)
+    # The audit event is the canonical source: the backup process knows the revision before it
+    # writes the dump, and the backend must not need to read a deliberately private 0700 backup
+    # directory to report it. The manifest reader stays only as a fallback for events written
+    # before that field existed; historical rows are never rewritten to fill it in.
+    revision = _revision_from_event(metadata)
+    if revision is None:
+        revision = _manifest_revision(filename)
 
     verified = await _matching_evidence(session, "backup.verified", filename, sha)
     offhost = await _matching_evidence(session, "backup.remote.copy", filename, sha)
