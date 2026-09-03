@@ -11,10 +11,23 @@ if [ "${1:-}" = "--create" ]; then
   create_backup="true"
   shift
 fi
-[ "$#" -eq 0 ] || { echo "Usage: verify-backup.sh [--create]" >&2; exit 2; }
+[ "$#" -le 1 ] || { echo "Usage: verify-backup.sh [--create] [DUMP_FILE]" >&2; exit 2; }
+requested_dump="${1:-}"
+[ "$create_backup" = "false" ] || [ -z "$requested_dump" ] || {
+  echo "Usage: verify-backup.sh [--create] [DUMP_FILE]" >&2
+  exit 2
+}
 
 if [ "$create_backup" = "true" ]; then
   dump_path="$(sh /scripts/backup.sh | tail -n 1)"
+elif [ -n "$requested_dump" ]; then
+  # Verifying one named dump instead of the newest one: a backup set must prove the exact
+  # artifact it references, not whatever happens to sort last.
+  case "$requested_dump" in
+    "$backup_dir"/finspace_*.dump) ;;
+    *) echo "Backup verification refused: dump path is outside the backup directory." >&2; exit 1 ;;
+  esac
+  dump_path="$requested_dump"
 else
   dump_path="$(find "$backup_dir" -maxdepth 1 -type f -name 'finspace_*.dump' -printf '%p\n' | sort -r | head -n 1)"
 fi
