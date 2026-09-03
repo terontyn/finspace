@@ -14,6 +14,42 @@ from app.core.errors import ApiError
 from app.db.models.audit import AuditLog
 from app.schemas.automations import BackupStatusResponse
 
+# Evidence rows are written once per backup run, so a short newest-first window always contains the
+# rows for the current backup while keeping the query bounded on a growing audit log.
+_EVIDENCE_SCAN_LIMIT = 20
+_LABEL_MAX_LENGTH = 60
+
+
+async def _matching_evidence(
+    session: AsyncSession,
+    action: str,
+    filename: str,
+    sha256: str,
+) -> AuditLog | None:
+    """Return the newest evidence row describing *this* backup, not merely the newest row.
+
+    Correlating on both filename and digest is what stops an older off-host copy from vouching for
+    a newer dump. The query stays bounded: one action scan, newest first, small limit.
+    """
+    if not filename or not sha256:
+        return None
+    rows = await session.scalars(
+        select(AuditLog)
+        .where(AuditLog.action == action)
+        .order_by(AuditLog.created_at.desc())
+        .limit(_EVIDENCE_SCAN_LIMIT)
+    )
+    for row in rows:
+        payload = row.after_data or {}
+        if payload.get("sha256") != sha256:
+            continue
+        recorded_name = payload.get("filename")
+        # backup.verified predates the filename field, so a digest match alone still counts there.
+        if recorded_name is not None and recorded_name != filename:
+            continue
+        return row
+    return None
+
 
 async def get_backup_status(session: AsyncSession) -> BackupStatusResponse:
     created = await session.scalar(
@@ -22,17 +58,13 @@ async def get_backup_status(session: AsyncSession) -> BackupStatusResponse:
         .order_by(AuditLog.created_at.desc())
         .limit(1)
     )
-    verified = await session.scalar(
-        select(AuditLog)
-        .where(AuditLog.action == "backup.verified")
-        .order_by(AuditLog.created_at.desc())
-        .limit(1)
-    )
     if created is None:
         return BackupStatusResponse(
             status="missing",
             last_backup_at=None,
             last_verified_at=None,
+            last_offhost_at=None,
+            offhost_destination_label=None,
             revision=None,
             age_hours=None,
             sha256_short=None,
@@ -45,27 +77,43 @@ async def get_backup_status(session: AsyncSession) -> BackupStatusResponse:
     filename = str(metadata.get("filename", ""))
     sha = str(metadata.get("sha256", ""))
     revision = _manifest_revision(filename)
-    same_verified = verified is not None and (verified.after_data or {}).get(
-        "sha256"
-    ) == metadata.get("sha256")
+
+    verified = await _matching_evidence(session, "backup.verified", filename, sha)
+    offhost = await _matching_evidence(session, "backup.remote.copy", filename, sha)
     stale = age > settings.backup_stale_hours
-    if not same_verified:
+
+    # Precedence is deliberate: local verification, then off-host confirmation, then age. A backup
+    # that exists only on this machine is not a disaster-recovery backup, so it is never healthy.
+    if verified is None:
         status: Literal["healthy", "stale", "unverified"] = "unverified"
         warning = "Последняя резервная копия ещё не прошла проверку восстановления."
+    elif offhost is None:
+        status = "unverified"
+        warning = "Последняя проверенная копия ещё не подтверждена вне этого хоста."
     elif stale:
         status = "stale"
         warning = f"Резервная копия старше {settings.backup_stale_hours} ч."
     else:
         status = "healthy"
         warning = None
+
+    label = None
+    if offhost is not None:
+        raw_label = (offhost.after_data or {}).get("destination_label")
+        if isinstance(raw_label, str) and raw_label:
+            # An opaque operator label, never a security boundary: truncated, never a host or path.
+            label = raw_label[:_LABEL_MAX_LENGTH]
+
     return BackupStatusResponse(
         status=status,
         last_backup_at=created.created_at,
         last_verified_at=verified.created_at if verified is not None else None,
+        last_offhost_at=offhost.created_at if offhost is not None else None,
+        offhost_destination_label=label,
         revision=revision,
         age_hours=age,
         sha256_short=f"{sha[:12]}..." if len(sha) == 64 else None,
-        stale=stale or not same_verified,
+        stale=status != "healthy",
         warning=warning,
     )
 

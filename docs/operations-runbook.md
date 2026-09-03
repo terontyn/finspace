@@ -379,6 +379,30 @@ sudo finspace-compose --profile tools run --rm backup \
 - сверить Alembic revision и основные таблицы;
 - удалить только временную БД.
 
+### Плановые backup (systemd)
+
+Backup выполняет host systemd, а не n8n и не контейнер:
+
+```bash
+systemctl list-timers finspace-backup.timer
+sudo systemctl start finspace-backup.service
+journalctl -u finspace-backup.service -n 200 --no-pager
+```
+
+Ежедневно в 01:00 **по локальному времени хоста**, с наверстыванием пропуска и разбросом старта.
+Одновременные запуски исключены `flock`: второй пишет `backup_run_locked lock=busy` и завершается
+ошибкой.
+
+Признак нормального прогона в журнале: `backup_run_started` → `backup_run_created` →
+`backup_run_local_verified` → `backup_run_offhost_verified` (или `backup_run_offhost_skipped` в
+временном режиме local-only) → `backup_run_retention_finished` → `backup_run_finished`.
+
+Пока внешнее хранилище Homelab не построено, в `/etc/finspace/backup.env` допустим
+`FINSPACE_BACKUP_OFFHOST_ENABLED=false`. Тогда `/api/v1/automation/backup/status` штатно отвечает
+`unverified` («не подтверждена вне этого хоста»), и это ожидаемо: копия только на этом сервере не
+является защитой от потери сервера. Подробности и порядок включения внешней копии —
+[backup-and-restore.md](backup-and-restore.md).
+
 Рабочую БД не восстанавливайте «поверх» без отдельного плана, проверенного dump и точного
 подтверждения владельца. Локальный backup не защищает от потери всего сервера: нужна
 внешняя зашифрованная копия и отдельно сохранённые ключи.

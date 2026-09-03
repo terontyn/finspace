@@ -1,0 +1,28 @@
+[Unit]
+Description=Finspace verified backup run
+Documentation=file:///opt/finspace/docs/backup-and-restore.md
+# Docker must be up, but nothing here depends on n8n or restarts application containers: the
+# backup is a host-owned maintenance job, not part of the application's failure domain.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/finspace
+# Host-only operational configuration. Application secrets live in /opt/finspace/.env and must
+# never appear here; see docs/backup-and-restore.md.
+EnvironmentFile=/etc/finspace/backup.env
+ExecStart=/opt/finspace/scripts/backup-run.sh
+# Generous enough for a dump plus a full restore verification, bounded so a hung run cannot hold
+# the lock forever.
+TimeoutStartSec=30min
+UMask=0077
+# stdout and stderr go to journald; nothing writes an unmanaged log file.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=finspace-backup
+
+[Install]
+WantedBy=multi-user.target

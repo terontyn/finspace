@@ -135,11 +135,19 @@ backups/
 
 ```bash
 cd /opt/finspace
-FINSPACE_COMMIT=$(git rev-parse HEAD) \
-FINSPACE_TAG=$(git describe --exact-match --tags 2>/dev/null || true) \
-sudo -E finspace-compose --profile tools run --rm backup sh /scripts/backup-set.sh \
+sudo env \
+  FINSPACE_COMMIT="$(git rev-parse HEAD)" \
+  FINSPACE_TAG="$(git describe --exact-match --tags 2>/dev/null || true)" \
+  finspace-compose --profile tools run --rm backup sh /scripts/backup-set.sh \
   /backups/database/finspace_<timestamp>.dump
 ```
+
+`sudo -E` **не работает** на production-сервере: политика sudo сбрасывает окружение, и
+переменные до контейнера не доходят. Передавайте их явно через `sudo env`. Командам, которые
+читают защищённый production `.env`, нужен root.
+
+Планировщик Stage B (`scripts/backup-run.sh`) определяет commit и tag сам, поэтому в ручной
+передаче этих переменных больше не нуждается.
 
 `local_verified=true` означает, что отработал существующий контракт проверки
 (`verify-backup.sh`): восстановление во временную БД, сверка Alembic revision, обязательных
@@ -163,7 +171,7 @@ export FINSPACE_BACKUP_REMOTE_ROOT=/srv/backup
 export FINSPACE_BACKUP_SSH_KEY=/etc/finspace/id_backup       # chmod 600, владелец root
 export FINSPACE_BACKUP_KNOWN_HOSTS=/etc/finspace/known_hosts # host key закреплён заранее
 export FINSPACE_BACKUP_REMOTE_LABEL=nas
-sudo -E ./scripts/backup-offhost.sh <set_id>
+sudo env $(grep -v '^#' /etc/finspace/backup.env | xargs) ./scripts/backup-offhost.sh <set_id>
 ```
 
 Порядок: локальная сверка SHA-256 всех артефактов → staging-каталог → rsync в
@@ -204,9 +212,124 @@ sudo -E ./scripts/backup-offhost.sh <set_id>
 Дамп базы **без** `GOOGLE_TOKEN_ENCRYPTION_KEY` восстанавливает всю финансовую историю, но не
 Google-подключения. Это первое, что должен знать оператор.
 
-## Что ещё не сделано в Stage A
+## Расписание: systemd timer
 
-Артефакты backup set и удалённые копии **пока не имеют собственной политики хранения и не
-создаются по расписанию**. Планировщик, блокировка одновременных запусков, согласованная
-retention для set и off-host-семантика в `/automation/backup/status` появляются в Stage B; до
-этого set создаются и копируются вручную по командам выше.
+Планировщик — host systemd, а не n8n и не контейнер: backup не должен зависеть от опционального
+сервиса автоматизации, должен переживать пересоздание контейнеров и быть виден в journald.
+
+```bash
+sudo install -m 0644 infrastructure/systemd/finspace-backup.service /etc/systemd/system/
+sudo install -m 0644 infrastructure/systemd/finspace-backup.timer   /etc/systemd/system/
+sudo install -d -m 0700 -o root -g root /etc/finspace
+sudo install -m 0600 -o root -g root /dev/null /etc/finspace/backup.env
+sudo systemctl daemon-reload
+sudo systemctl enable --now finspace-backup.timer
+systemctl list-timers finspace-backup.timer
+```
+
+Каденция по умолчанию — **ежедневно в 01:00 по локальному времени хоста** (не UTC), с
+`Persistent=true` (пропущенный запуск наверстывается после включения хоста) и
+`RandomizedDelaySec=15min`. Это согласовано с `BACKUP_STALE_HOURS=36`: один пропуск даёт
+предупреждение, а не тревогу.
+
+Ручной запуск и просмотр журнала:
+
+```bash
+sudo systemctl start finspace-backup.service
+journalctl -u finspace-backup.service -n 200 --no-pager
+```
+
+Маркеры в журнале: `backup_run_started`, `backup_run_created`, `backup_run_local_verified`,
+`backup_run_offhost_verified` / `backup_run_offhost_skipped`, `backup_run_retention_finished`,
+`backup_run_finished`, `backup_run_failed reason=…`, `backup_run_locked lock=busy`.
+
+### Блокировка
+
+`backup-run.sh` выполняется под `flock` (`/run/finspace-backup.lock`), поэтому таймер и ручной
+запуск делят одну блокировку. Второй одновременный запуск не начинает dump, пишет
+`backup_run_locked lock=busy` и завершается ненулевым кодом. Блокировка снимается и после успеха,
+и после ошибки.
+
+## /etc/finspace/backup.env
+
+Host-only конфигурация, `root:root`, режим `0600`. Секреты приложения живут в `/opt/finspace/.env`
+и сюда **не попадают**: ни `JWT_SECRET_KEY`, ни `GOOGLE_TOKEN_ENCRYPTION_KEY`, ни
+`N8N_ENCRYPTION_KEY`, ни `POSTGRES_PASSWORD`, ни `GOOGLE_CLIENT_SECRET`.
+
+```env
+FINSPACE_BACKUP_ROOT=/opt/finspace/backups
+FINSPACE_COMPOSE=finspace-compose
+FINSPACE_BACKUP_OFFHOST_ENABLED=true
+FINSPACE_BACKUP_REMOTE_HOST=nas.example.internal
+FINSPACE_BACKUP_REMOTE_USER=finspace-backup
+FINSPACE_BACKUP_REMOTE_ROOT=/srv/backup
+FINSPACE_BACKUP_SSH_KEY=/etc/finspace/id_backup
+FINSPACE_BACKUP_KNOWN_HOSTS=/etc/finspace/known_hosts
+FINSPACE_BACKUP_REMOTE_LABEL=homelab-backup
+```
+
+Настройки SSH не передаются в backend, frontend и worker-контейнеры.
+
+## Порядок запуска и retention
+
+При `FINSPACE_BACKUP_OFFHOST_ENABLED=true`:
+
+```
+dump -> проверка восстановлением -> backup set -> внешняя копия -> сверка SHA на приёмнике
+     -> атомарная публикация -> backup.remote.copy -> offhost_verified=true
+     -> retention БД -> retention set
+```
+
+**Если внешняя копия не удалась, retention в этом запуске не выполняется вовсе.** Неудачный новый
+прогон не должен стоить нам уже сохранённых точек восстановления.
+
+Политика хранения дампов остаётся прежней (`backup-cleanup.sh`, 7 daily + 4 weekly) — планировщик
+решает только *когда* она отрабатывает. `backup-set-cleanup.sh` не заводит вторую календарную
+политику: set живёт ровно столько, сколько живёт дамп, на который ссылается его опись. Всё
+непонятное — испорченная опись, путь с `..`, чужой каталог — логируется и **не удаляется**.
+
+Проверка выполняется ровно один раз за прогон: `backup.sh` создаёт дамп, `backup-set.sh` вызывает
+полный контракт `verify-backup.sh` для этого конкретного файла. Ранняя очистка при этом не
+запускается: `backup-cleanup.sh` внутри `verify-backup.sh` выполняется только в режиме `--create`,
+которым планировщик не пользуется.
+
+## Временный режим local-only
+
+Пока внешнее хранилище Homelab не построено, допустим явный деградированный режим:
+
+```env
+FINSPACE_BACKUP_OFFHOST_ENABLED=false
+```
+
+Тогда создание, проверка и backup set выполняются как обычно, внешняя копия пропускается явно, в
+journald пишется `backup_run_degraded offhost_disabled=true`, `backup.remote.copy` не создаётся, а
+`backup_status` продолжает отвечать `unverified`. Это ожидаемо и правильно.
+
+**Режим local-only не удовлетворяет контракту DR для Finspace v1.0.** Он закрывает F002
+(автоматические проверенные backup), но физическая приёмка F003 остаётся открытой, пока не появится
+действительно отдельный хост и один реальный перенос по rsync/SSH не будет на нём проверен.
+
+## Удалённое хранение: append-only
+
+Stage B **не удаляет ничего на приёмнике**. Пока реальная NAS не введена в эксплуатацию, её объём и
+политика неизвестны, и удалять внешние точки восстановления до первой проверки на настоящем
+приёмнике опаснее, чем позволить им временно расти. Политика удалённого хранения будет выбрана при
+вводе Homelab-хранилища, до финальной приёмки v1.0.
+
+## Семантика backup_status
+
+`GET /api/v1/automation/backup/status` сопоставляет три audit-события — `backup.created`,
+`backup.verified` и `backup.remote.copy` — по **имени файла и SHA-256**, поэтому вчерашняя внешняя
+копия не может «подтвердить» сегодняшний dump.
+
+| состояние | ответ |
+|---|---|
+| нет `backup.created` | `missing` |
+| нет проверки для этого dump | `unverified` — «не прошла проверку восстановления» |
+| проверка есть, внешней копии нет | `unverified` — «не подтверждена вне этого хоста» |
+| обе есть, но dump старше `BACKUP_STALE_HOURS` | `stale` |
+| обе есть и dump свежий | `healthy` |
+
+Приоритет предупреждений: локальная проверка → внешняя копия → возраст. **Копия только на этом
+хосте никогда не считается healthy.** Ответ содержит `last_offhost_at` и непрозрачную метку
+`offhost_destination_label`; ни хост, ни пользователь, ни путь, ни файл ключа не публикуются.
