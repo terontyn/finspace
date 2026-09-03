@@ -29,7 +29,11 @@ Host-порты привязаны к loopback. Браузер обращает�
 Next.js проксирует во внутренний `http://backend:8000/api/*`; публичный backend-порт
 браузеру не требуется.
 
-## Первый запуск
+## Быстрый старт
+
+Поддерживаются ровно два пути. Не смешивайте их.
+
+### Разработка
 
 ```powershell
 Copy-Item .env.example .env
@@ -44,31 +48,55 @@ docker compose ps
 либо на странице входа подготовьте development-пользователя и задайте ему пароль.
 Bootstrap не обходит аутентификацию и недоступен вне development.
 
-Текущая вершина миграций — `0008_month_close_invariants`. Применённые миграции
-`0001`–`0008` не редактируются задним числом.
+Базовый `docker-compose.yml` — это конфигурация разработки: source mounts, backend с
+`--reload`, frontend в dev-режиме. Подробнее:
+[локальная разработка](docs/local-development.md).
 
-Базовый `docker-compose.yml` предназначен для разработки и сохраняет source mounts и
-backend `--reload`. Production обязан использовать `compose.production.yml`: backend,
-sync-worker и frontend работают из собранных images без source mounts, backend — без
-`--reload`, frontend — через `npm run start`. Production topology требует Docker Compose
-2.24.4+, потому что `compose.production.yml` использует `!override`. Перед deploy validator
-обязан завершиться с PASS:
+Текущая вершина миграций — `0017_categorization_history`. Уже применённые миграции не
+редактируются задним числом.
+
+### Production (self-hosted)
+
+Канонический путь установки на чистый сервер —
+[production install](docs/production-install.md), обновление и откат —
+[upgrade](docs/upgrade.md). Ниже только то, что нужно знать до их открытия.
+
+- **`docker compose up` с development-настройками не является production-установкой.**
+  Production обязан объединять базовый файл с `compose.production.yml`, и делает это
+  единственная поддерживаемая точка входа — wrapper `finspace-compose`, который
+  устанавливается из репозитория командой `sudo ./scripts/install-finspace-compose.sh`.
+  Топология требует Docker Compose 2.24.4+, потому что оверлей использует `!override`.
+- Разворачивается **точный тег релиза**, а не плавающая ветка; код приложения и код
+  миграций всегда принадлежат одному checkout.
+- `.env` управляется оператором, принадлежит root с режимом `0600` и не попадает в Git.
+  Поэтому production-команды Compose выполняются через `sudo`, а `sudo -E` не
+  поддерживается: переменные передаются явно, как `sudo env VAR=value ...`.
+- Плановые проверенные backup — **часть поддерживаемой установки**, а не дополнение к
+  ней: host systemd timer, ежедневный dump с проверкой восстановлением.
+- **PostgreSQL durable** и остаётся единственным источником финансовой истины. **Redis
+  disposable**: в нём живут только счётчики ограничений, короткая защита от повторов и
+  heartbeat, финансовых данных нет.
+- **n8n необязателен** и не участвует в восстановлении финансовых данных.
+
+Перед deploy validator обязан завершиться с PASS:
 
 ```bash
-python3 backend/scripts/validate_compose_topology.py all
+sudo finspace-compose config --format json |
+  python3 backend/scripts/validate_compose_topology.py production --stdin
 ```
 
-Перед первым production-запуском и после изменения runtime storage contract подготовьте
-три writable bind mount’а от имени root. Скрипт сохраняет владельцу checkout доступ для
-Git, предоставляет backend доступ через runtime GID из `backend/runtime-identity.env`,
-не использует world-writable permissions и не делает рекурсивный `chown`:
+Перед первым production-запуском и после изменения runtime storage contract root
+идемпотентно готовит три writable bind mount’а. Скрипт сохраняет владельцу checkout
+доступ для Git, предоставляет backend доступ через runtime GID из
+`backend/runtime-identity.env`, не использует world-writable permissions и не делает
+рекурсивный `chown`:
 
 ```bash
 sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
 ```
 
-Безопасный production release-порядок описан в
-[эксплуатационной инструкции](docs/operations-runbook.md#6-безопасный-deploy).
+Повседневные команды и аварийные сценарии:
+[эксплуатационная инструкция](docs/operations-runbook.md).
 
 ## Автоматизации и Telegram
 
@@ -154,8 +182,8 @@ make backup-cleanup
 ## Проверки
 
 Backend работает с отдельной `TEST_DATABASE_URL` и проверяет миграционный цикл вплоть до
-`0008_month_close_invariants`, включая повторный downgrade до
-`0005_apps_script_bridge` и upgrade до head, затем удаляет только уникальную тестовую БД.
+текущего head, включая повторные downgrade до `0005_apps_script_bridge` и `0010_goals` с
+обратным upgrade до head, затем удаляет только уникальную тестовую БД.
 
 ```powershell
 make test
@@ -200,6 +228,8 @@ docker compose exec frontend npm run build
 ## Документация
 
 - [История этапов и текущее состояние](docs/project-history-and-status.md)
+- [Production-установка на чистый сервер](docs/production-install.md)
+- [Обновление и откат](docs/upgrade.md)
 - [Эксплуатационная инструкция](docs/operations-runbook.md)
 - [Prompt для следующего ассистента](docs/next-assistant-handoff.md)
 - [Архитектура](docs/architecture.md)

@@ -28,7 +28,8 @@ Compose намеренно имеет два режима. Базовый `docke
 frontend использует development image, source mount и cache volumes. Это обеспечивает
 быстрый локальный цикл и не является production-конфигурацией.
 
-Production всегда объединяет base с `compose.production.yml`. Override полностью заменяет
+Production всегда объединяет base с `compose.production.yml` через wrapper
+`finspace-compose`; порядок файлов фиксирован. Override полностью заменяет
 backend mounts утверждённым набором runtime data, удаляет mounts worker/frontend, задаёт
 backend-команду без `--reload` и production target/`npm run start` для frontend. Поэтому
 application code backend, worker и frontend поступает только из собранных immutable
@@ -36,9 +37,10 @@ images; изменение server checkout само по себе не меня�
 
 Итоговая топология проверяется
 `backend/scripts/validate_compose_topology.py`: validator не печатает rendered environment
-и прекращает deploy при утечке dev mount/command в production. Канонический server
-override хранится в Git как `compose.production.yml`, а root-owned копия подключается
-production wrapper из `/etc/finspace/compose.server.yml`.
+и прекращает deploy при утечке dev mount/command в production. Канонический production
+override хранится в Git как `compose.production.yml` и подключается wrapper
+`finspace-compose` прямо из checkout: второй копии оверлея на хосте нет, поэтому выбор
+релиза одновременно означает выбор топологии.
 
 ## Backend-слои
 
