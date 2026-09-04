@@ -54,3 +54,6 @@ no_implicit_optional = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "requires_database: exercises real SQL and needs the isolated test PostgreSQL",
+]

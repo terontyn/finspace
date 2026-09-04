@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     import_max_rows: int = Field(default=100000, ge=1, le=1000000)
     import_allowed_extensions: str = "csv,xlsx"
     import_storage_path: Path = Path("/app/data/imports")
+    # Reclamation of staged upload artifacts. The grace period applies only to files no import
+    # batch references at all: it must stay far longer than the longest upload, because an upload
+    # in flight has written its file but not yet committed its row.
+    import_staging_reclaim_enabled: bool = True
+    import_staging_reclaim_grace_hours: int = Field(default=72, ge=1, le=8760)
+    import_staging_reclaim_batch_size: int = Field(default=200, ge=1, le=5000)
 
     google_client_id: SecretStr | None = None
     google_client_secret: SecretStr | None = None

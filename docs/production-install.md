@@ -406,6 +406,30 @@ FINSPACE_BACKUP_REMOTE_LABEL=<непрозрачная метка для UI>
 Порядок переноса, проверка SHA-256 на приёмнике и поведение при отказе описаны в
 [backup-and-restore.md](backup-and-restore.md#внешняя-копия-на-другой-хост).
 
+## 9.5 Уборка staging импорта — необязательно
+
+`./data/imports` хранит загруженные файлы импорта. Штатно они удаляются сразу при commit,
+cancel или ошибке загрузки, поэтому каталог не растёт; остатки появляются только после
+аварийной остановки процесса. Осмотр безопасен и ничего не удаляет:
+
+```bash
+cd /opt/finspace
+sudo finspace-compose run --rm --no-deps backend python scripts/import_staging_reclaim.py
+```
+
+Периодическую уборку можно включить отдельным таймером — это необязательная часть
+установки:
+
+```bash
+sudo install -m 0644 infrastructure/systemd/finspace-import-reclaim.service /etc/systemd/system/
+sudo install -m 0644 infrastructure/systemd/finspace-import-reclaim.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now finspace-import-reclaim.timer
+```
+
+Классы, grace-период и настройки: [import.md](import.md#освобождение-staging-reclamation).
+Staging-файлы резервной копией не являются — за восстановление отвечает раздел 9.
+
 ## 10. n8n — опционально
 
 n8n не нужен для работы финансового ядра и не участвует в восстановлении данных.
