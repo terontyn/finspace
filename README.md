@@ -230,6 +230,7 @@ docker compose exec frontend npm run build
 - [История этапов и текущее состояние](docs/project-history-and-status.md)
 - [Production-установка на чистый сервер](docs/production-install.md)
 - [Обновление и откат](docs/upgrade.md)
+- [Учение по восстановлению в чистой среде](docs/disaster-recovery-drill.md)
 - [Эксплуатационная инструкция](docs/operations-runbook.md)
 - [Prompt для следующего ассистента](docs/next-assistant-handoff.md)
 - [Архитектура](docs/architecture.md)
