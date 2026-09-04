@@ -96,11 +96,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     report = asyncio.run(_execute(arguments.apply))
-    import_staging.log_report(report)
 
     if arguments.as_json:
+        # stdout has to stay parseable, and the application's log handler writes there too. The
+        # document carries every number the summary line would have, so it is skipped in this mode.
+        # The scheduled --apply run does not use --json and still writes its line to the journal.
         print(json.dumps(report.as_dict(), indent=2, sort_keys=True))
     else:
+        import_staging.log_report(report)
         print(_human(report))
 
     return 1 if report.failures else 0

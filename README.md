@@ -231,6 +231,7 @@ docker compose exec frontend npm run build
 - [Production-установка на чистый сервер](docs/production-install.md)
 - [Обновление и откат](docs/upgrade.md)
 - [Учение по восстановлению в чистой среде](docs/disaster-recovery-drill.md)
+- [Жизненный цикл данных и рост хранилища](docs/data-lifecycle.md)
 - [Эксплуатационная инструкция](docs/operations-runbook.md)
 - [Prompt для следующего ассистента](docs/next-assistant-handoff.md)
 - [Архитектура](docs/architecture.md)
