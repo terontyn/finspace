@@ -456,6 +456,54 @@ immutable snapshot.
 повторите тот же confirm/reopen с тем же ключом и payload. Reconciliation уже закрытой
 операции разрешён и не требует reopen. Полный контракт: [Hard Month Close](month-close.md).
 
+## 8.2. Что занимает место
+
+Полная опись доменов, их владельцев retention и запретов —
+[data-lifecycle.md](data-lifecycle.md). Все команды ниже **только читают**: режима удаления у
+них нет.
+
+```bash
+# Хост целиком: файловая система + PostgreSQL + staging импорта.
+sudo /opt/finspace/scripts/data-lifecycle-report.sh
+
+# Только PostgreSQL, человеко-читаемо и машинно-читаемо.
+cd /opt/finspace
+sudo finspace-compose run --rm --no-deps backend python scripts/data_lifecycle_report.py
+sudo finspace-compose run --rm --no-deps backend python scripts/data_lifecycle_report.py --json
+
+# Staging импорта отдельно (F010, только осмотр).
+sudo finspace-compose run --rm --no-deps backend python scripts/import_staging_reclaim.py
+
+# Место на диске и размеры томов.
+df -h /opt/finspace /var/lib/docker
+sudo du -sh /opt/finspace/backups/database /opt/finspace/backups/sets
+sudo docker system df -v | head -30
+```
+
+Снимок для сравнения во времени:
+
+```bash
+sudo finspace-compose run --rm --no-deps backend python scripts/data_lifecycle_report.py --json \
+  > "/opt/finspace/data/acceptance/data-lifecycle-$(date -u +%Y-%m-%dT%H%M%SZ).json"
+```
+
+Куда смотреть, если растёт:
+
+| домен | владелец | что делать |
+|---|---|---|
+| финансовые таблицы | только действие пользователя | ничего; это работа приложения |
+| `audit_log`, `auth_sessions` | никакого сегодня | наблюдать; политика удержания — отдельное решение |
+| `categorization_previews` | worker `categorization-prune` | проверить `categorization_prune_cycle_finished` в логах |
+| `data/imports` | F010 | осмотр, затем `--apply` |
+| `backups/database`, `backups/sets` | `backup-cleanup.sh`, `backup-set-cleanup.sh` | менять `BACKUP_RETENTION_*`, не удалять руками |
+| `data/acceptance`, `backups/acceptance-reports` | оператор | архивировать вручную |
+| логи Docker, journald | **хост** | `daemon.json` `log-opts`, `journald.conf` |
+| незнакомая таблица | никто | классифицировать в `data_lifecycle.py` |
+
+> [!CAUTION]
+> Никогда: `docker system prune -a`, `docker volume prune`, `docker compose down -v`, ручное
+> удаление содержимого `finspace_postgres_data`, дампов, backup sets или строк `audit_log`.
+
 ## 9. Google Sheets Bridge
 
 ### Обычные действия в книге

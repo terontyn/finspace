@@ -438,6 +438,27 @@ def test_apply_is_refused_while_reclamation_is_disabled(
     assert "without --apply to inspect" in captured.err
 
 
+def test_json_mode_puts_nothing_but_the_document_on_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The application logs to stdout, so a summary line there would make --json unparseable."""
+    from scripts import import_staging_reclaim
+
+    prepared = import_staging.StagingReport(
+        root="/app/data/imports", grace_hours=72, batch_size=200
+    )
+    prepared.scanned = 3
+
+    async def execute(apply: bool) -> import_staging.StagingReport:
+        return prepared
+
+    monkeypatch.setattr(import_staging_reclaim, "_execute", execute)
+    assert import_staging_reclaim.main(["--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["scanned"] == 3
+    assert document["applied"] is False
+
+
 def test_the_human_summary_reports_usage_and_never_lists_a_batch() -> None:
     from scripts import import_staging_reclaim
 
