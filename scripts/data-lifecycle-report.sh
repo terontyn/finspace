@@ -82,9 +82,30 @@ directory_usage() {
     return 0
   fi
 
-  count=$(find "$path" -maxdepth "$depth" -type f 2>/dev/null | wc -l | tr -d ' ')
-  bytes=$(find "$path" -maxdepth "$depth" -type f -printf '%s\n' 2>/dev/null |
-    awk '{ total += $1 } END { printf "%d", total + 0 }')
+  # find reports an unreadable subdirectory on stderr and carries on. Discarding that is exactly
+  # how a partial traversal gets published as a total, so it is captured rather than silenced.
+  # find exits non-zero on an unreadable subtree, which is exactly the case being detected here;
+  # without the guard `set -e` would kill the report instead of letting it report the problem.
+  scan_errors=$(find "$path" -maxdepth "$depth" 2>&1 >/dev/null || true)
+  # A directory sitting at the maximum depth may hold files this traversal never reached.
+  deeper=$(find "$path" -mindepth "$depth" -type d 2>/dev/null | head -n 1 || true)
+
+  sizes=$(find "$path" -maxdepth "$depth" -type f -printf '%s\n' 2>/dev/null || true)
+  count=$(printf '%s\n' "$sizes" | grep -c . || true)
+  bytes=$(printf '%s\n' "$sizes" | awk '{ total += $1 } END { printf "%d", total + 0 }')
+
+  if [ -n "$scan_errors" ] || [ -n "$deeper" ]; then
+    if [ -n "$scan_errors" ]; then
+      reason="part of the tree could not be read"
+    else
+      reason="content below depth $depth was not traversed"
+    fi
+    # A lower bound, marked as one: an incomplete total must never read as the answer.
+    printf '%-28s %8s files %12s bytes  PARTIAL: %s\n' "$label" "$count" ">=$bytes" "$reason"
+    failures=$((failures + 1))
+    return 0
+  fi
+
   printf '%-28s %8s files %12s bytes  %s\n' "$label" "$count" "$bytes" "$owner"
 }
 

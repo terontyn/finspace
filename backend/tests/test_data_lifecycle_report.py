@@ -9,6 +9,7 @@ queries really work against the real schema.
 import ast
 import json
 import re
+import unittest.mock
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -299,26 +300,104 @@ async def test_negative_catalog_values_are_never_reported() -> None:
 # --------------------------------------------------------------------------------------------
 
 
+async def _report_with_directory(
+    usage: data_lifecycle.DirectoryUsage,
+) -> data_lifecycle.LifecycleReport:
+    """Build a report whose only managed directory is the one under test."""
+    with unittest.mock.patch.object(data_lifecycle, "_scan_directory", lambda path, owner: usage):
+        return await _build(StubSession([_row(name) for name in TABLE_POLICIES]))
+
+
 def test_a_readable_directory_is_measured_without_reading_contents(tmp_path: Path) -> None:
     (tmp_path / "a.csv").write_bytes(b"x" * 100)
     (tmp_path / "b.csv").write_bytes(b"y" * 50)
     usage = data_lifecycle._scan_directory(tmp_path, "test owner")
     assert usage.readable is True
+    assert usage.complete is True
     assert usage.entries == 2
     assert usage.total_bytes == 150
 
 
-def test_a_nested_directory_is_counted_but_not_descended(tmp_path: Path) -> None:
+async def test_a_fully_measured_directory_keeps_the_report_ok(tmp_path: Path) -> None:
+    (tmp_path / "a.csv").write_bytes(b"x" * 100)
+    usage = data_lifecycle._scan_directory(tmp_path, "test owner")
+    report = await _report_with_directory(usage)
+    assert report.status == "ok"
+    assert report.warnings == []
+
+
+def test_a_missing_path_is_a_legitimate_zero(tmp_path: Path) -> None:
+    usage = data_lifecycle._scan_directory(tmp_path / "absent", "test owner")
+    assert usage.readable is True
+    assert usage.complete is True
+    assert usage.total_bytes == 0
+    assert "does not exist" in usage.detail
+
+
+async def test_a_missing_path_does_not_make_the_report_partial(tmp_path: Path) -> None:
+    usage = data_lifecycle._scan_directory(tmp_path / "absent", "test owner")
+    report = await _report_with_directory(usage)
+    assert report.status == "ok"
+
+
+async def test_a_nested_directory_makes_the_total_a_lower_bound(tmp_path: Path) -> None:
+    """The nested bytes are real and uncounted, so the total is not an answer."""
     (tmp_path / "flat.csv").write_bytes(b"x" * 10)
     nested = tmp_path / "nested"
     nested.mkdir()
     (nested / "huge.csv").write_bytes(b"z" * 10_000)
     usage = data_lifecycle._scan_directory(tmp_path, "test owner")
+    assert usage.readable is True
+    assert usage.complete is False
     assert usage.total_bytes == 10
-    assert "not descended" in usage.detail
+    assert "not descended into" in usage.detail
+    report = await _report_with_directory(usage)
+    assert report.status == "partial"
+    assert any(warning["code"] == "path_partial" for warning in report.warnings)
 
 
-def test_a_symlink_is_skipped_rather_than_followed(tmp_path: Path) -> None:
+async def test_the_scan_limit_makes_the_total_a_lower_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(data_lifecycle, "_MANAGED_DIRECTORY_SCAN_LIMIT", 3)
+    for index in range(6):
+        (tmp_path / f"file{index}.csv").write_bytes(b"x" * 100)
+    usage = data_lifecycle._scan_directory(tmp_path, "test owner")
+    assert usage.readable is True
+    assert usage.complete is False
+    assert usage.entries == 3
+    assert usage.total_bytes == 300
+    assert "scan limit" in usage.detail
+    report = await _report_with_directory(usage)
+    assert report.status == "partial"
+    assert any(warning["code"] == "path_partial" for warning in report.warnings)
+
+
+async def test_a_child_that_cannot_be_inspected_makes_the_total_a_lower_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "readable.csv").write_bytes(b"x" * 100)
+    (tmp_path / "broken.csv").write_bytes(b"y" * 999)
+    real_lstat = Path.lstat
+
+    def refuse_one(self: Path) -> object:
+        if self.name == "broken.csv":
+            raise OSError("cannot stat")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", refuse_one)
+    usage = data_lifecycle._scan_directory(tmp_path, "test owner")
+    monkeypatch.undo()
+    assert usage.readable is True
+    assert usage.complete is False
+    assert usage.total_bytes == 100
+    assert "could not be accounted for" in usage.detail
+    report = await _report_with_directory(usage)
+    assert report.status == "partial"
+    assert any(warning["code"] == "path_partial" for warning in report.warnings)
+
+
+async def test_a_child_symlink_is_skipped_and_the_total_says_so(tmp_path: Path) -> None:
     target = tmp_path / "outside"
     target.mkdir()
     (target / "big.csv").write_bytes(b"z" * 5000)
@@ -330,11 +409,14 @@ def test_a_symlink_is_skipped_rather_than_followed(tmp_path: Path) -> None:
         pytest.skip("this platform does not permit creating symlinks")
     usage = data_lifecycle._scan_directory(managed, "test owner")
     assert usage.total_bytes == 0
-    assert "symlink" in usage.detail
+    assert usage.complete is False
+    assert "could not be accounted for" in usage.detail
     assert (target / "big.csv").exists()
+    report = await _report_with_directory(usage)
+    assert report.status == "partial"
 
 
-def test_a_directory_that_is_itself_a_symlink_is_refused(tmp_path: Path) -> None:
+async def test_a_directory_that_is_itself_a_symlink_is_refused(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
     (real / "big.csv").write_bytes(b"z" * 5000)
@@ -345,27 +427,96 @@ def test_a_directory_that_is_itself_a_symlink_is_refused(tmp_path: Path) -> None
         pytest.skip("this platform does not permit creating symlinks")
     usage = data_lifecycle._scan_directory(link, "test owner")
     assert usage.readable is False
+    assert usage.complete is False
     assert usage.total_bytes == 0
     assert "symlink" in usage.detail
+    report = await _report_with_directory(usage)
+    assert report.status == "partial"
+    assert any(warning["code"] == "path_unreadable" for warning in report.warnings)
 
 
-def test_a_missing_path_is_reported_as_missing_not_as_empty(tmp_path: Path) -> None:
-    usage = data_lifecycle._scan_directory(tmp_path / "absent", "test owner")
-    assert usage.readable is True
-    assert usage.total_bytes == 0
-    assert "does not exist" in usage.detail
+async def test_a_dangling_symlink_is_refused_rather_than_called_absent(tmp_path: Path) -> None:
+    """exists() follows the link, so asking it first would report a refusal as an innocent zero."""
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(tmp_path / "never-created", target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - platform without symlinks
+        pytest.skip("this platform does not permit creating symlinks")
+    assert link.exists() is False, "the fixture is not a dangling link"
+    usage = data_lifecycle._scan_directory(link, "test owner")
+    assert usage.readable is False
+    assert usage.complete is False
+    assert "symlink" in usage.detail
+    assert "does not exist" not in usage.detail
+    report = await _report_with_directory(usage)
+    assert report.status == "partial"
+    assert any(warning["code"] == "path_unreadable" for warning in report.warnings)
+
+
+def test_a_path_that_is_not_a_directory_is_refused(tmp_path: Path) -> None:
+    plain = tmp_path / "a-file"
+    plain.write_bytes(b"x")
+    usage = data_lifecycle._scan_directory(plain, "test owner")
+    assert usage.readable is False
+    assert usage.complete is False
 
 
 async def test_an_unreadable_managed_path_warns_instead_of_claiming_zero(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     blocked = data_lifecycle.DirectoryUsage(
-        str(tmp_path), "test owner", False, 0, 0, "not readable by this process"
+        str(tmp_path), "test owner", False, False, 0, 0, "not readable by this process"
     )
-    monkeypatch.setattr(data_lifecycle, "_scan_directory", lambda path, owner: blocked)
-    report = await _build(StubSession([_row("transactions")]))
+    report = await _report_with_directory(blocked)
     assert any(warning["code"] == "path_unreadable" for warning in report.warnings)
     assert report.status == "partial"
+
+
+async def test_the_json_document_carries_the_completeness_bit(tmp_path: Path) -> None:
+    partial = data_lifecycle.DirectoryUsage(
+        str(tmp_path),
+        "test owner",
+        True,
+        False,
+        4,
+        120,
+        "1 nested directories were not descended into",
+    )
+    document = (await _report_with_directory(partial)).as_dict()
+    filesystem = document["filesystem"]
+    assert isinstance(filesystem, dict)
+    directory = filesystem["directories"][0]  # type: ignore[index]
+    assert directory["readable"] is True
+    assert directory["complete"] is False
+    assert directory["total_bytes"] == 120
+    assert document["status"] == "partial"
+    codes = [warning["code"] for warning in document["warnings"]]  # type: ignore[union-attr]
+    assert "path_partial" in codes
+    json.dumps(document)
+
+
+def test_the_human_summary_marks_a_partial_total_as_a_lower_bound(tmp_path: Path) -> None:
+    from scripts import data_lifecycle_report
+
+    report = data_lifecycle.LifecycleReport(generated_at="2026-09-04T12:00:00Z")
+    report.directories.append(
+        data_lifecycle.DirectoryUsage(
+            "/app/data/acceptance", "operator evidence", True, False, 4, 1024, "1 nested directory"
+        )
+    )
+    report.directories.append(
+        data_lifecycle.DirectoryUsage(
+            "/app/data/imports", "F010", True, True, 2, 2048, "fully measured"
+        )
+    )
+    rendered = data_lifecycle_report.render(report, top=15)
+    assert "PARTIAL" in rendered
+    assert ">= 1.0 KiB" in rendered
+    assert "2.0 KiB" in rendered
+    # The complete directory must not be tarred with the same brush.
+    complete_line = next(line for line in rendered.splitlines() if "/app/data/imports" in line)
+    assert "PARTIAL" not in complete_line
+    assert ">=" not in complete_line
 
 
 def test_staged_import_classification_is_delegated_to_f010() -> None:

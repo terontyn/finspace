@@ -81,11 +81,17 @@ def render(report: data_lifecycle.LifecycleReport, *, top: int) -> str:
 
     lines += ["", "MANAGED DIRECTORIES VISIBLE TO THIS PROCESS"]
     for directory in report.directories:
-        state = "readable" if directory.readable else "UNREADABLE"
-        lines.append(
-            f"{directory.path:<38} {human_bytes(directory.total_bytes):>10} "
-            f"{directory.entries:>10} entries  {state}"
-        )
+        if not directory.readable:
+            state = "UNREADABLE"
+        elif not directory.complete:
+            state = "PARTIAL"
+        else:
+            state = "complete"
+        # An incomplete total is printed as a lower bound, so it cannot be read as the answer.
+        size = human_bytes(directory.total_bytes)
+        if directory.readable and not directory.complete:
+            size = f">= {size}"
+        lines.append(f"{directory.path:<38} {size:>13} {directory.entries:>8} entries  {state}")
         lines.append(f"{'':<38} owner: {directory.lifecycle_owner}")
         if directory.detail:
             lines.append(f"{'':<38} note:  {directory.detail}")

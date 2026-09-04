@@ -155,6 +155,58 @@ else
 fi
 mkdir -p "$project/data/acceptance"
 
+# --- a dangling root symlink is refused, not called absent ---------------------------------------
+rm -rf -- "$project/data/acceptance"
+ln -s "$test_root/never-created" "$project/data/acceptance" 2>/dev/null || true
+if [ -L "$project/data/acceptance" ]; then
+  [ ! -e "$project/data/acceptance" ] || fail "the dangling-link fixture is not dangling"
+  run_report
+  [ "$status" -ne 0 ] || fail "a dangling root symlink did not make the run partial"
+  assert_contains "$output" "SYMLINK" "a dangling symlink was not refused"
+  assert_missing "$output" "data/acceptance             absent" \
+    "a dangling symlink was reported as an absent path"
+  rm -f -- "$project/data/acceptance"
+else
+  printf 'data-lifecycle-report test: note: symlinks are not supported here; dangling case skipped\n'
+  rm -rf -- "$project/data/acceptance"
+fi
+mkdir -p "$project/data/acceptance"
+
+# --- an unreadable subdirectory makes the total a lower bound --------------------------------------
+# find keeps going past a subdirectory it cannot enter, so its total would otherwise be published
+# as if the whole tree had been measured.
+mkdir -p "$project/backups/sets/2026-09-02T010000Z"
+printf 'x' >"$project/backups/sets/2026-09-02T010000Z/backup-set.json"
+chmod 000 "$project/backups/sets/2026-09-02T010000Z" 2>/dev/null || true
+if [ -r "$project/backups/sets/2026-09-02T010000Z" ] && [ -x "$project/backups/sets/2026-09-02T010000Z" ]; then
+  chmod 755 "$project/backups/sets/2026-09-02T010000Z" 2>/dev/null || true
+  printf 'data-lifecycle-report test: note: permissions are not enforced here; subtree case skipped\n'
+else
+  run_report
+  chmod 755 "$project/backups/sets/2026-09-02T010000Z"
+  [ "$status" -ne 0 ] || fail "an unreadable subtree did not make the run partial"
+  assert_contains "$output" "PARTIAL: part of the tree could not be read" \
+    "an unreadable subtree was not called out"
+  assert_contains "$output" "PARTIAL" "the run did not report itself partial"
+fi
+rm -rf -- "$project/backups/sets/2026-09-02T010000Z"
+
+# --- content below the traversal depth is a lower bound, not a total -------------------------------
+mkdir -p "$project/data/imports/nested"
+printf 'never counted' >"$project/data/imports/nested/deep.csv"
+run_report
+[ "$status" -ne 0 ] || fail "untraversed nested content did not make the run partial"
+assert_contains "$output" "PARTIAL: content below depth 1 was not traversed" \
+  "nested content beyond the traversal depth was not called out"
+assert_missing "$output" "deep.csv" "a nested filename was printed"
+rm -rf -- "$project/data/imports/nested"
+
+# --- a complete directory is still reported as complete --------------------------------------------
+run_report
+[ "$status" -eq 0 ] || fail "a fully measurable tree was reported partial: $output"
+assert_missing "$output" "PARTIAL" "a complete run reported a partial directory"
+assert_contains "$output" "2 files         1010 bytes" "the complete total lost its exact value"
+
 # --- an absent path is stated, not invented -------------------------------------------------------
 rm -rf -- "$project/backups/acceptance-reports"
 run_report

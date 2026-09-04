@@ -16,6 +16,7 @@ continue while the report runs, and row counts are PostgreSQL's own estimates.
 """
 
 import logging
+import stat
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -174,9 +175,19 @@ class TableUsage:
 
 @dataclass
 class DirectoryUsage:
+    """One managed directory, and how much of it was actually accounted for.
+
+    ``readable`` and ``complete`` are separate on purpose. A directory can be perfectly readable
+    and still yield a total that is only a lower bound — the scan hit its limit, or there was
+    nested content this report deliberately does not descend into. Reporting that as a finished
+    number is how a growth report ends up lying about growth, so an incomplete total is always
+    marked and always warns.
+    """
+
     path: str
     lifecycle_owner: str
     readable: bool
+    complete: bool
     entries: int
     total_bytes: int
     detail: str
@@ -186,6 +197,7 @@ class DirectoryUsage:
             "path": self.path,
             "lifecycle_owner": self.lifecycle_owner,
             "readable": self.readable,
+            "complete": self.complete,
             "entries": self.entries,
             "total_bytes": self.total_bytes,
             "detail": self.detail,
@@ -267,51 +279,74 @@ def _scan_directory(path: Path, owner: str) -> DirectoryUsage:
     """Measure one managed directory without reading a byte of its contents.
 
     Never recurses and never follows a symlink: this is a size report, not a crawler, and a link
-    is exactly how a size report escapes the tree it was pointed at. A directory it cannot read is
-    reported as unreadable — claiming zero bytes there would be a lie an operator might act on.
+    is exactly how a size report escapes the tree it was pointed at.
+
+    Anything the scan could not account for makes the total a lower bound rather than an answer:
+    a hit scan limit, a subdirectory it declined to descend into, a child it could not stat. Those
+    are marked incomplete, never rounded down into a confident number an operator might act on.
     """
     display = str(path)
-    if not path.exists():
-        return DirectoryUsage(display, owner, True, 0, 0, "path does not exist on this host")
+    # Asked before exists(), which follows the link: a dangling symlink would otherwise look like
+    # an innocent absent path instead of the refusal it is.
     if path.is_symlink():
-        return DirectoryUsage(display, owner, False, 0, 0, "path is a symlink and was not followed")
+        return DirectoryUsage(
+            display, owner, False, False, 0, 0, "path is a symlink and was not followed"
+        )
+    if not path.exists():
+        # Genuinely nothing here: zero is the true total and the scan is complete.
+        return DirectoryUsage(display, owner, True, True, 0, 0, "path does not exist on this host")
     if not path.is_dir():
-        return DirectoryUsage(display, owner, False, 0, 0, "path is not a directory")
+        return DirectoryUsage(display, owner, False, False, 0, 0, "path is not a directory")
 
     entries = 0
     total = 0
-    skipped_links = 0
+    unaccounted = 0
     nested = 0
+    truncated = False
     try:
         for child in path.iterdir():
+            if entries >= _MANAGED_DIRECTORY_SCAN_LIMIT:
+                truncated = True
+                break
             entries += 1
-            if entries > _MANAGED_DIRECTORY_SCAN_LIMIT:
-                return DirectoryUsage(
-                    display, owner, True, entries, total, "scan limit reached; totals are partial"
-                )
-            if child.is_symlink():
-                skipped_links += 1
+            # One lstat per child, and its failure is contained here. Asking is_symlink() and
+            # is_dir() first would stat the child twice and let a single un-stattable entry abort
+            # the whole directory, turning one bad file into "this directory is unreadable".
+            try:
+                child_stat = child.lstat()
+            except OSError:
+                unaccounted += 1
                 continue
-            if child.is_dir():
+            mode = child_stat.st_mode
+            if stat.S_ISLNK(mode):
+                # lstat does not follow the link, and neither does this report, so its bytes are
+                # deliberately not part of the total.
+                unaccounted += 1
+                continue
+            if stat.S_ISDIR(mode):
                 nested += 1
                 continue
-            try:
-                total += child.lstat().st_size
-            except OSError:
-                skipped_links += 1
+            if not stat.S_ISREG(mode):
+                unaccounted += 1
+                continue
+            total += child_stat.st_size
     except PermissionError:
-        return DirectoryUsage(display, owner, False, 0, 0, "not readable by this process")
+        return DirectoryUsage(display, owner, False, False, 0, 0, "not readable by this process")
     except OSError as error:
         return DirectoryUsage(
-            display, owner, False, 0, 0, f"could not be read: {type(error).__name__}"
+            display, owner, False, False, 0, 0, f"could not be read: {type(error).__name__}"
         )
 
-    detail_parts = []
+    reasons = []
+    if truncated:
+        reasons.append(f"scan limit of {_MANAGED_DIRECTORY_SCAN_LIMIT} entries reached")
     if nested:
-        detail_parts.append(f"{nested} nested directories were not descended")
-    if skipped_links:
-        detail_parts.append(f"{skipped_links} entries skipped (symlink or unreadable)")
-    return DirectoryUsage(display, owner, True, entries, total, "; ".join(detail_parts))
+        reasons.append(f"{nested} nested directories were not descended into")
+    if unaccounted:
+        reasons.append(f"{unaccounted} entries could not be accounted for (symlink or unreadable)")
+    if reasons:
+        return DirectoryUsage(display, owner, True, False, entries, total, "; ".join(reasons))
+    return DirectoryUsage(display, owner, True, True, entries, total, "fully measured")
 
 
 def _managed_directories() -> list[tuple[Path, str]]:
@@ -384,6 +419,10 @@ async def build_report(
         report.directories.append(usage)
         if not usage.readable:
             report.warn("path_unreadable", f"{usage.path}: {usage.detail}")
+        elif not usage.complete:
+            # Readable but only partly accounted for. The number below it is a lower bound, and a
+            # report that called that "ok" would be the exact failure this warning exists to stop.
+            report.warn("path_partial", f"{usage.path}: totals are incomplete: {usage.detail}")
 
     return report
 
