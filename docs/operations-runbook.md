@@ -456,6 +456,29 @@ immutable snapshot.
 повторите тот же confirm/reopen с тем же ключом и payload. Reconciliation уже закрытой
 операции разрешён и не требует reopen. Полный контракт: [Hard Month Close](month-close.md).
 
+## 8.1. Проверка цепочки миграций
+
+Воспроизводимый гейт: граф миграций плюс прогон на **изолированной временной базе**.
+Production-базу он не трогает — создаёт и удаляет только собственные `finspace_test_<uuid>`
+и никогда не выполняет `alembic downgrade`.
+
+```bash
+cd /opt/finspace
+# Полный гейт: граф + чистая база + исторические контрольные точки.
+sudo finspace-compose run --rm --no-deps -e TESTING=true backend \
+  python scripts/validate_migrations.py \
+  --expect-head 0017_categorization_history --expect-count 17
+
+# Только граф, без базы (быстро, ничего не создаёт).
+sudo finspace-compose run --rm --no-deps backend \
+  python scripts/validate_migrations.py --static-only
+
+# Что стоит в самой production-базе — только чтение.
+sudo finspace-compose run --rm --no-deps backend alembic current
+```
+
+Порядок обновления сервера от этого не меняется: [upgrade.md](upgrade.md).
+
 ## 8.2. Что занимает место
 
 Полная опись доменов, их владельцев retention и запретов —
