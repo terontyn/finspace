@@ -67,10 +67,50 @@ assert_contains "$timer_text" "WantedBy=timers.target" "the timer cannot be enab
 assert_absent "$timer_text" "OnUnitActiveSec" "the timer adds a second cadence"
 assert_absent "$timer_text" "hourly" "the timer runs more often than daily"
 
+# --- staged import reclamation --------------------------------------------------------------------
+# Optional and separate from the backup schedule: it sweeps up what a crash left in data/imports,
+# and it must never look like a backup job or touch a running container.
+reclaim_service="$repository_root/infrastructure/systemd/finspace-import-reclaim.service"
+reclaim_timer="$repository_root/infrastructure/systemd/finspace-import-reclaim.timer"
+[ -s "$reclaim_service" ] || fail "the reclamation service unit is missing"
+[ -s "$reclaim_timer" ] || fail "the reclamation timer unit is missing"
+reclaim_service_text=$(grep -v '^[[:space:]]*#' "$reclaim_service")
+reclaim_timer_text=$(grep -v '^[[:space:]]*#' "$reclaim_timer")
+
+assert_contains "$reclaim_service_text" "Type=oneshot" "the reclamation service is not one-shot"
+assert_contains "$reclaim_service_text" "WorkingDirectory=/opt/finspace" "wrong working directory"
+assert_contains "$reclaim_service_text" "scripts/import_staging_reclaim.py --apply" \
+  "the reclamation service does not invoke the reclamation command"
+assert_contains "$reclaim_service_text" "run --rm --no-deps backend" \
+  "the reclamation service does not use a throwaway backend process"
+assert_contains "$reclaim_service_text" "TimeoutStartSec=" "the reclamation service is unbounded"
+assert_contains "$reclaim_service_text" "StandardOutput=journal" "reclamation logs bypass journald"
+# It must not restart or recreate anything, and must not carry application secrets.
+for forbidden in "compose up" "compose restart" "force-recreate" "down" "n8n"; do
+  assert_absent "$reclaim_service_text" "$forbidden" \
+    "the reclamation service does something to containers: $forbidden"
+done
+for secret in JWT_SECRET_KEY POSTGRES_PASSWORD GOOGLE_TOKEN_ENCRYPTION_KEY N8N_ENCRYPTION_KEY; do
+  assert_absent "$reclaim_service_text" "$secret" "the reclamation unit names a secret"
+done
+assert_absent "$reclaim_service_text" "EnvironmentFile" \
+  "the reclamation service loads host configuration it does not need"
+
+assert_contains "$reclaim_timer_text" "Persistent=true" "a missed reclamation would never catch up"
+assert_contains "$reclaim_timer_text" "Unit=finspace-import-reclaim.service" \
+  "the reclamation timer targets the wrong unit"
+assert_contains "$reclaim_timer_text" "WantedBy=timers.target" "the reclamation timer cannot be enabled"
+assert_absent "$reclaim_timer_text" "OnUnitActiveSec" "the reclamation timer adds a second cadence"
+assert_absent "$reclaim_timer_text" "hourly" "the reclamation timer runs far more often than needed"
+# The two schedules must not collide: reclamation is weekly, the backup is daily at 01:00.
+assert_absent "$reclaim_timer_text" "01:00:00" "reclamation collides with the backup window"
+
 if command -v systemd-analyze >/dev/null 2>&1; then
   systemd-analyze verify "$service" || fail "systemd-analyze rejected the service unit"
   systemd-analyze verify "$timer" || fail "systemd-analyze rejected the timer unit"
-  printf 'systemd-units test: systemd-analyze verified both units\n'
+  systemd-analyze verify "$reclaim_service" || fail "systemd-analyze rejected the reclamation service"
+  systemd-analyze verify "$reclaim_timer" || fail "systemd-analyze rejected the reclamation timer"
+  printf 'systemd-units test: systemd-analyze verified all four units\n'
 else
   printf 'systemd-units test: SKIP systemd-analyze (not installed); units validated as text\n'
 fi

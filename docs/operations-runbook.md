@@ -399,6 +399,30 @@ Upload и validation не создают финансовые операции. 
 Никогда не загружайте macro-enabled workbook и не преобразуйте банковский логин/пароль в
 «интеграцию». Подробнее: [import.md](import.md).
 
+### Staging-файлы импорта
+
+`./data/imports` — это **не** резервная копия: файл разбирается один раз при загрузке, а
+дальше истина в PostgreSQL. Штатно он удаляется сразу при commit, cancel или ошибке
+загрузки, поэтому каталог не растёт. Остатки появляются только после аварийной остановки.
+
+Осмотр без удаления (режим по умолчанию, ничего не трогает):
+
+```bash
+cd /opt/finspace
+sudo finspace-compose run --rm --no-deps backend python scripts/import_staging_reclaim.py
+```
+
+Отчёт показывает число файлов и байт, сколько подлежит освобождению и почему остальное
+пропущено. Удаление выполняется явно:
+
+```bash
+sudo finspace-compose run --rm --no-deps backend python scripts/import_staging_reclaim.py --apply
+```
+
+Незавершённый импорт не удаляется никогда, независимо от возраста. Уборка не трогает
+`import_batches`, `import_rows`, операции и любую другую строку БД. Классы, grace-период,
+необязательный weekly-таймер и поведение при отказе: [import.md](import.md#освобождение-staging-reclamation).
+
 ### 8.1. Закрытие месяца
 
 Month Close является hard accounting close. После confirm любые операции, исторические
