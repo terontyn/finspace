@@ -226,6 +226,21 @@ if [ "$(id -u)" -eq 0 ]; then
     fail "re-running the installer failed"
   cmp -s "$wrapper" "$target" || fail "the update left a different wrapper in place"
 
+  # A host still pinning the retired wrapper path must stop the deploy rather than be installed
+  # over silently. The detection itself is covered by check-backup-env-wrapper.test.sh; what
+  # matters here is that the installer is wired to it and propagates its exit code.
+  printf 'FINSPACE_COMPOSE=/usr/local/sbin/finspace-compose\n' >"$test_root/stale-backup.env"
+  status=0
+  message=$(FINSPACE_COMPOSE_BIN="$target" FINSPACE_BACKUP_ENV="$test_root/stale-backup.env" \
+    "$installer" 2>&1) || status=$?
+  [ "$status" -eq 3 ] || fail "a stale backup.env wrapper pin did not stop the install (exit $status)"
+  assert_contains "$message" "REPAIR REQUIRED" "the installer hid the backup.env diagnostic"
+  cmp -s "$wrapper" "$target" || fail "the wrapper was not installed before the host check ran"
+
+  printf 'FINSPACE_COMPOSE=finspace-compose\n' >"$test_root/good-backup.env"
+  FINSPACE_COMPOSE_BIN="$target" FINSPACE_BACKUP_ENV="$test_root/good-backup.env" \
+    "$installer" >/dev/null 2>&1 || fail "a correct backup.env still failed the install"
+
   # The installed copy is what production actually runs.
   : >"$argv_log"
   DOCKER_ARGV_LOG="$argv_log" PATH="$bin:/usr/bin:/bin" \

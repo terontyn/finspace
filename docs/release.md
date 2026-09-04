@@ -1,0 +1,255 @@
+# Релиз Finspace: гейт release candidate и порядок выпуска
+
+Документ отвечает на один вопрос: **является ли этот конкретный commit допустимым кандидатом на
+релиз Finspace 1.0.** Что именно версия 1.0 обещает поддерживать — [supported-scope.md](supported-scope.md).
+
+## 1. Три разных понятия
+
+Их постоянно путают, поэтому они разведены явно.
+
+**Инженерные гейты** — то, что проверяется командой: тесты, статические проверки, миграции,
+performance smoke, топология, сборка, документация. Их результат воспроизводим и не зависит от
+человека.
+
+**Операционная приёмка** — то, что происходит на железе и не выводится из кода: копия на отдельном
+хосте (F003) и восстановление в чистой среде (F004). Никакая проверка репозитория не может их
+подтвердить.
+
+**Решение о релизе** — принимается, только когда пройдены **обе** группы на **одном и том же**
+кандидате. Тег `local-v1.0.0` создаётся исключительно после этого.
+
+Инженерный прогон, даже полностью зелёный, никогда не означает «можно выпускать».
+
+## 2. Гейт
+
+```bash
+cd /opt/finspace   # или локальный checkout релиза
+./scripts/release-candidate-gate.sh \
+  --candidate <точный 40-символьный commit> \
+  --expect-alembic-head 0017_categorization_history \
+  --expect-alembic-count 17 \
+  --allow-pending-operational \
+  --json-output data/acceptance/release/rc-$(date -u +%Y-%m-%dT%H%M%SZ).json
+```
+
+Полный релизный прогон — то же самое, но вместо `--allow-pending-operational` подставляются
+свидетельства:
+
+```bash
+./scripts/release-candidate-gate.sh \
+  --candidate <точный commit> \
+  --expect-alembic-head 0017_categorization_history \
+  --expect-alembic-count 17 \
+  --offhost-evidence  data/acceptance/release/f003-<дата>.json \
+  --restore-evidence  data/acceptance/release/f004-<дата>.json \
+  --checklist         data/acceptance/release/checklist-<дата>.json \
+  --json-output       data/acceptance/release/rc-<дата>.json
+```
+
+Ожидания по схеме (`--expect-alembic-head`, `--expect-alembic-count`) обязательны и не имеют
+значений по умолчанию: релизный гейт обязан заявить, **что именно было отревьюено**, а не
+унаследовать то, что сегодня оказалось в репозитории.
+
+Гейт запускается из того checkout, который выпускается, и требует рядом рабочий `.env`: он собирает
+и запускает сервисы **этого** checkout. Каждая команда контейнера идёт через
+`run --rm --no-deps`, а не через `exec`, — иначе гейт мог бы заверить код чужого запущенного проекта.
+
+На хосте нужны `git`, `python3`, `docker compose` и `npm`. Frontend-проверки выполняются именно на
+хосте: так предписывает [эксплуатационная инструкция](operations-runbook.md), а
+development-контейнер монтирует **общий** том `node_modules` — прогон внутри него зависел бы от
+того, что туда установил другой checkout, а `npm ci` этот том перезаписал бы. Если `node_modules`
+в checkout отсутствует, гейт ставит зависимости из lock-файла.
+
+### Коды возврата
+
+| Код | Значение |
+|---|---|
+| `0` | `RELEASE PASS` — инженерные гейты пройдены и операционная приёмка закрыта |
+| `1` | `FAIL` — гейт не прошёл, свидетельство невалидно или открыт дефект P0/P1 |
+| `2` | ошибка вызова: аргументы, отсутствующий checkout, не тот кандидат по формату |
+| `3` | `BLOCKED` — инженерная часть в порядке, операционная приёмка не закрыта |
+
+Код `3` — **штатный** результат на сегодня. Он специально отличается от нуля, чтобы CI и человек не
+приняли инженерный прогон за одобрение релиза.
+
+Запуск без единого свидетельства и без `--allow-pending-operational` завершается кодом `2` до
+запуска фаз: это ошибка вызова, а не приговор кандидату.
+
+### Фазы
+
+Порядок детерминирован. Первые четыре фазы — **fail-fast**: продолжать после них бессмысленно или
+небезопасно. Остальные выполняются целиком, чтобы за один прогон было видно все проблемы сразу.
+
+| # | Фаза | Что делает |
+|---|---|---|
+| 1 | `candidate-identity` | commit ровно равен `--candidate`, дерево чистое, `.env` на месте |
+| 2 | `compose-topology` | `validate_compose_topology.py all` + merged production config через `finspace-compose` |
+| 3 | `images-development` | сборка образов backend и frontend из кандидата |
+| 4 | `migration-gate` | F008: `validate_migrations.py` с пинами head/count |
+| 5 | `backend-static` | ruff check, ruff format, mypy, compileall |
+| 6 | `backend-tests` | полный backend-прогон через `test_runner.py` |
+| 7 | `performance-smoke` | F014: `performance_smoke.py` |
+| 8 | `frontend-tests` | `npm test`, `npm run typecheck`, `npm run lint` — на хосте |
+| 9 | `images-release` | production-образы: backend и **production-сборка** frontend |
+| 10 | `shell-tests` | все обнаруженные наборы `scripts/tests/*.test.sh` |
+| 11 | `docs-gate` | ссылки, якоря и связность контракта поддерживаемой области |
+| 12 | `operational-acceptance` | F003, F004 и чек-лист релиза |
+
+Наборы shell-тестов **обнаруживаются**, а не перечисляются: новый релизно-значимый набор нельзя
+забыть добавить в список, а пустой каталог считается дефектом гейта, а не успехом.
+
+Фаза 9 — доказательство того, что production-сборка frontend выполняется из точного кандидата.
+Запущенный dev-сервер таким доказательством не является. Отдельно от неё **чистая установка на
+чистый сервер не автоматизируется**: сборка образа не равна установке. Это пункт чек-листа
+оператора, а процедура — [production-install.md](production-install.md).
+
+Что гейт **никогда** не делает: не мигрирует production-базу, не заполняет её данными, не удаляет
+данные, не чистит staging импорта, не применяет категоризацию, не выполняет restore и не делает
+downgrade. F008 и F014 работают на собственных временных базах.
+
+## 3. Свидетельства операционной приёмки
+
+Свидетельства — обычные JSON-файлы, которые создаёт оператор. В Git они **не попадают**; каталог по
+умолчанию — `data/acceptance/release/`.
+
+Заготовку с полным набором полей печатает вспомогательная команда (все заполнители в ней
+намеренно невалидны — просто сохранённый шаблон приёмку не пройдёт):
+
+```bash
+python3 backend/scripts/release_evidence.py template F003     --candidate <commit>
+python3 backend/scripts/release_evidence.py template F004     --candidate <commit>
+python3 backend/scripts/release_evidence.py template checklist --candidate <commit>
+```
+
+Схема — строгий allowlist: незнакомое поле не игнорируется, а отвергает документ. Дополнительно
+каждое значение проверяется на «форму секрета». В свидетельстве допустимы только commit, ревизия
+Alembic, идентификатор backup set, отметки времени, логические значения, SHA-256 и метки
+назначения без учётных данных.
+
+### F003 — копия на отдельном хосте
+
+Поля берутся из уже существующих артефактов: `backups/sets/<SET_ID>/backup-set.json` и
+`backup-set-report.json` рядом с ним.
+
+| Поле | Откуда |
+|---|---|
+| `set_id`, `dump_sha256`, `alembic_revision`, `finspace_commit` | `backup-set.json` |
+| `local_verified`, `offhost_verified`, `offhost_verified_at`, `offhost_destination_label` | `backup-set-report.json` |
+| `remote_sha256_verified` | сверка SHA-256 на удалённой стороне (её делает `backup-offhost.sh`) |
+| `separate_failure_domain` | **утверждение оператора** |
+| `candidate`, `accepted_at` | привязка к этому кандидату |
+
+`separate_failure_domain` — единственное, что не может доказать ни один скрипт: вторая директория на
+том же диске проходит все автоматические проверки и при этом не является вторым доменом отказа.
+
+`alembic_revision` копии должна совпадать с ожидаемой ревизией кандидата. Требуется совместимость
+схемы, а не совпадение commit: копия, снятая с работающего сейчас релиза, — это ровно то, чем
+пользуются при реальном восстановлении.
+
+### F004 — восстановление в чистой среде
+
+Само учение — [disaster-recovery-drill.md](disaster-recovery-drill.md), и его собственный файл
+свидетельства (`data/acceptance/dr-restore-<id>.json`) остаётся в своём формате: второй реализации
+учения не появляется. Приёмочный документ ссылается на него полем `drill_evidence`, и если файл
+доступен, значения сверяются с ним — заявить результат, которого учение не записало, нельзя.
+
+Обязательно: `verdict` = `PASSED`, `clean_host_proven` = `true`, `isolated_test_mode` = `false`
+(репетиция на машине разработчика приёмкой не является), успешные `restore_result`,
+`data_probe_comparison`, вход оператора и просмотр данных в интерфейсе.
+
+`candidate_relation` описывает отношение учения к кандидату:
+
+- `same-commit` — учение прогоняло именно кандидата;
+- `reviewed-predecessor` — учение прогоняло более ранний commit; тогда обязательны
+  `predecessor_commit` и `predecessor_review` — письменное объяснение, почему различие не влияет на
+  восстановление.
+
+Второй вариант существует, чтобы изменение только документации не требовало повторять разрушительное
+учение. Он намеренно узкий: оператор называет прогнанный commit и объясняет решение текстом.
+
+### Чек-лист релиза
+
+Факты, которых нет в репозитории:
+
+| Поле | Смысл |
+|---|---|
+| `open_p0_p1` | число открытых дефектов P0/P1; не ноль — это `FAIL`, а не «не хватает бумаги» |
+| `clean_server_install_verified` | чистая установка по [production-install.md](production-install.md) выполнена |
+| `production_acceptance_verified` | финальная production-приёмка (раздел 5) выполнена |
+
+Гейт не изобретает эти факты и не ходит в трекер: он требует, чтобы их подтвердил человек, с отметкой
+времени.
+
+### Привязка к кандидату и свежесть
+
+Каждое свидетельство называет точный commit, который оно авторизует. Это и есть защита от того, что
+давнее успешное учение молча одобрит сегодняшний коммит. Произвольный «срок годности в днях» не
+вводится: он был бы одновременно и слабее, и произвольнее, чем явное повторное утверждение
+оператора.
+
+## 4. Свидетельство прогона
+
+`--json-output` записывает компактный документ: `version`, `candidate`, `generated_at`, ожидания по
+схеме, `engineering_status`, `operational_status`, `release_status`, список фаз с длительностями и
+краткими сводками, `blockers` и `known_limitations`. Секретов и сырого вывода команд в нём нет.
+
+Файл публикуется атомарно: сначала `.partial`, затем переименование. Провалившийся прогон не
+оставляет усечённый документ, который можно принять за успешный.
+
+## 5. Порядок выпуска 1.0
+
+1. Выбрать точный commit кандидата.
+2. Убедиться, что checkout чистый и находится ровно на нём.
+3. Прогнать инженерный гейт (`--allow-pending-operational`). Ожидается `BLOCKED`.
+4. Выполнить F003 и F004 на реальном оборудовании.
+5. Оформить свидетельства и привязать их к кандидату.
+6. Прогнать гейт повторно, уже со свидетельствами.
+7. Подтвердить `open_p0_p1 = 0`.
+8. Выполнить финальную production-приёмку (раздел 6).
+9. Создать **аннотированный** тег `local-v1.0.0` на принятом commit.
+10. Проверить, что тег указывает ровно на принятый commit, и только затем осознанно его отправить.
+
+```bash
+git tag -a local-v1.0.0 <точный commit> -m "Finspace 1.0"
+git rev-parse local-v1.0.0^{commit}   # должно совпасть с кандидатом
+git push origin local-v1.0.0
+```
+
+Существующие теги `local-v0.10` … `local-v0.15` — исторические факты и **не двигаются никогда**.
+Теги `local-v0.16`, `local-v0.17`, `local-v0.18` задним числом не создаются: пока F003 и F004
+отложены, эти линии остаются инженерно завершёнными, но не выпущенными. Следующий стабильный тег —
+`local-v1.0.0`.
+
+## 6. Финальная production-приёмка
+
+Выполняется на сервере, на точном кандидате, **без разрушительных действий**.
+
+```bash
+cd /opt/finspace
+git rev-parse HEAD                  # ровно кандидат
+./scripts/git-status-strict.sh      # пусто
+
+curl -fsS http://127.0.0.1:8000/api/v1/health
+curl -fsS http://127.0.0.1:8000/api/v1/health/ready
+curl -fsS -o /dev/null -w 'login: HTTP %{http_code}\n' http://127.0.0.1:3000/login
+sudo finspace-compose ps            # postgres и redis healthy
+
+sudo finspace-compose run --rm --no-deps backend alembic current
+systemctl is-enabled finspace-backup.timer
+systemctl is-active  finspace-backup.timer
+journalctl -u finspace-backup.service -n 50 --no-pager
+
+sudo finspace-compose run --rm --no-deps backend python scripts/import_staging_reclaim.py
+sudo /opt/finspace/scripts/data-lifecycle-report.sh
+sudo finspace-compose run --rm --no-deps -e TESTING=true backend \
+  python scripts/validate_migrations.py \
+  --expect-head 0017_categorization_history --expect-count 17
+sudo finspace-compose run --rm --no-deps -e TESTING=true backend \
+  python scripts/performance_smoke.py
+```
+
+Ожидается: `alembic current` равен отревьюенной ревизии, таймер backup включён и активен, последний
+прогон успешен, F010 в режиме осмотра не сообщает проблем, F011 даёт `status ok`, оба изолированных
+гейта — `PASS`, открытых P0/P1 нет, F003 и F004 приняты.
+
+Очистка, prune, удаление наборов копий и любые деструктивные операции в приёмку **не входят**.

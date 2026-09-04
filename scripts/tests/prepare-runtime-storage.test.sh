@@ -6,6 +6,14 @@ fail() {
   exit 1
 }
 
+# Exit 4 means "this environment cannot run the suite", which is not the same as a defect: this
+# test changes ownership and drops privileges, so it is meaningless anywhere but a Linux host with
+# root. The release gate records such a suite as skipped and names it, so it stays visible.
+skip() {
+  printf 'prepare-runtime-storage test: SKIP: %s\n' "$1"
+  exit 4
+}
+
 assert_equal() {
   expected=$1
   actual=$2
@@ -93,7 +101,7 @@ assert_runtime_directory() {
     || fail "runtime identity cannot create files in $relative_path"
 }
 
-[ "$(id -u)" -eq 0 ] || fail "this integration test must run as root"
+[ "$(id -u)" -eq 0 ] || skip "needs root: it changes ownership and drops privileges"
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_directory/../.." && pwd -P)

@@ -92,11 +92,21 @@ printf 'PRIVATE KEY PLACEHOLDER\n' >"$ssh_key"
 chmod 600 "$ssh_key"
 printf 'backup.example.invalid ssh-ed25519 AAAA\n' >"$known_hosts"
 
-# The permission refusal can only be tested where chmod is honoured.
+# The permission refusal can only be tested where chmod is honoured. One reading of one mode cannot
+# establish that: whichever value is probed, some umask produces it for free, and a filesystem that
+# ignores chmod entirely then looks capable and the refusal case fails for the wrong reason. Probe
+# both directions instead — only a filesystem that really applies chmod can do both.
 chmod_supported="false"
-if [ "$(stat -c %a "$ssh_key" 2>/dev/null)" = "600" ]; then
+chmod_probe="$test_root/chmod_probe"
+printf 'probe\n' >"$chmod_probe"
+chmod 600 "$chmod_probe" 2>/dev/null || true
+tightened=$(stat -c %a "$chmod_probe" 2>/dev/null || true)
+chmod 644 "$chmod_probe" 2>/dev/null || true
+loosened=$(stat -c %a "$chmod_probe" 2>/dev/null || true)
+if [ "$tightened" = "600" ] && [ "$loosened" = "644" ]; then
   chmod_supported="true"
 fi
+rm -f "$chmod_probe"
 
 set_id="2026-09-03T010000Z"
 dump_name="finspace_${set_id}.dump"

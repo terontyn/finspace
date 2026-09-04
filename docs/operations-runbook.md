@@ -509,6 +509,30 @@ sudo finspace-compose run --rm --no-deps -e TESTING=true backend \
 > `known defect` и не даст ситуации ухудшиться; исправление — отдельная задача, и вместе с
 > ним нужно снизить границу `TRANSACTION_PAGE_QUERIES_PER_ROW`.
 
+## 8.1.2. Гейт release candidate
+
+Один прогон отвечает на вопрос «является ли этот точный commit допустимым кандидатом на релиз».
+Он не заменяет отдельные гейты, а вызывает их: миграции, performance smoke, топологию, тесты,
+сборку production-образов, shell-наборы и документацию. Полный контракт, свидетельства F003/F004 и
+порядок выпуска — [release.md](release.md).
+
+```bash
+cd /opt/finspace
+./scripts/release-candidate-gate.sh   --candidate "$(git rev-parse HEAD)"   --expect-alembic-head 0017_categorization_history   --expect-alembic-count 17   --allow-pending-operational   --json-output "data/acceptance/release/rc-$(date -u +%Y-%m-%dT%H%M%SZ).json"
+```
+
+Коды возврата: `0` релиз принят, `1` гейт не прошёл, `2` ошибка вызова, `3` инженерная часть в
+порядке, но операционная приёмка не закрыта. **Сегодня штатный результат — `3`**: F003 и F004
+отложены до готовности homelab. Ненулевой код здесь не означает поломку.
+
+> [!IMPORTANT]
+> `--allow-pending-operational` — это инженерный прогон, а не одобрение релиза. Тег `local-v1.0.0`
+> создаётся только после `RELEASE STATUS: PASS`.
+
+Гейт ничего не меняет: production-базу он не мигрирует, не заполняет и не восстанавливает, staging
+импорта не чистит, downgrade не выполняет. F008 и F014 внутри него работают на собственных
+временных базах.
+
 ## 8.2. Что занимает место
 
 Полная опись доменов, их владельцев retention и запретов —
