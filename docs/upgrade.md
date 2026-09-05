@@ -155,6 +155,9 @@ git rev-parse HEAD
 sudo ./scripts/install-finspace-compose.sh
 sudo ./scripts/prepare-runtime-storage.sh /opt/finspace
 
+# 5.2.1 Существующие хосты: не осталась ли в backup.env ссылка на прежний wrapper.
+sudo ./scripts/check-backup-env-wrapper.sh
+
 # 5.3 Топология — до сборки.
 sudo finspace-compose config --quiet
 sudo finspace-compose config --format json |
@@ -186,6 +189,51 @@ sudo finspace-compose ps
 не меняет работающий код: нужны `build` и `up -d --force-recreate`. Просто `restart` не
 подхватит новую версию. То же верно для backend и обоих worker-процессов.
 
+### 5.2.1 Существующие хосты: ссылка на прежний wrapper в `backup.env`
+
+Хосты, установленные до того, как wrapper стал файлом из репозитория, могут хранить в
+`/etc/finspace/backup.env` абсолютный путь к прежнему расположению:
+
+```env
+FINSPACE_COMPOSE=/usr/local/sbin/finspace-compose
+```
+
+Установка нового wrapper эту строку **не исправляет**. После ретирования прежнего файла
+`finspace-backup.service` начинает падать, а остальное выглядит здоровым: ошибка видна только
+в journal, и только если туда посмотреть. Это уже происходило на production.
+
+`install-finspace-compose.sh` вызывает `check-backup-env-wrapper.sh` сам и завершается кодом
+**3**, если нужна починка, поэтому deploy под `set -e` останавливается здесь, а не объявляет
+обновление завершённым. Проверку можно запустить и отдельно — она только читает файл и
+никогда его не переписывает:
+
+```bash
+sudo ./scripts/check-backup-env-wrapper.sh
+```
+
+Починка — одна строка, её вносит оператор:
+
+```env
+FINSPACE_COMPOSE=/usr/local/bin/finspace-compose
+```
+
+Допустимо и голое имя `finspace-compose`: оно разрешается через `PATH` и потому не устаревает
+при переносе. Абсолютный путь фиксирует ровно одно место и именно поэтому ломается.
+
+После правки обновление считается завершённым только после **успешного прогона backup**:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start finspace-backup.service
+systemctl is-enabled finspace-backup.timer
+systemctl is-active  finspace-backup.timer
+journalctl -u finspace-backup.service -n 100 --no-pager
+```
+
+Ожидаются маркеры `backup_run_started` → `backup_run_created` → `backup_run_local_verified` →
+`backup_run_finished`. Отредактированный `backup.env` без успешного прогона ничего не
+доказывает.
+
 ## 6. POSTCHECK
 
 ```bash
@@ -216,7 +264,9 @@ systemctl is-active finspace-backup.timer
 - пересозданы только запланированные контейнеры; PostgreSQL, Redis и n8n не тронуты;
 - backend и frontend healthy, оба worker-процесса пишут свои циклы в логи;
 - n8n healthy, если он используется;
-- таймер backup остался `enabled` и `active`.
+- `check-backup-env-wrapper.sh` завершается успешно;
+- таймер backup остался `enabled` и `active`, и после ретирования прежнего wrapper выполнен
+  **успешный** прогон `finspace-backup.service`.
 
 ## 7. Таксономия отката
 

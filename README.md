@@ -14,6 +14,10 @@ Script Bridge без Google Cloud OAuth: пользователь вручную
 [docs/project-history-and-status.md](docs/project-history-and-status.md). Повседневные
 команды и аварийные сценарии: [docs/operations-runbook.md](docs/operations-runbook.md).
 
+Что версия 1.0 официально поддерживает, а что нет, включая известные ограничения и
+блокеры выпуска, — [docs/supported-scope.md](docs/supported-scope.md). Порядок выпуска и
+гейт release candidate — [docs/release.md](docs/release.md).
+
 ## Сервисы
 
 - Next.js UI — <http://localhost:3000>;

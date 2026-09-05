@@ -293,6 +293,17 @@ FINSPACE_BACKUP_REMOTE_LABEL=homelab-backup
 
 Настройки SSH не передаются в backend, frontend и worker-контейнеры.
 
+`FINSPACE_COMPOSE` лучше держать голым именем: оно разрешается через `PATH` и переживает
+перенос wrapper. Абсолютный путь фиксирует одно место и устаревает молча — после ретирования
+прежнего wrapper таймер продолжает срабатывать, а сам прогон падает, и видно это только в
+journal. Проверка (только чтение, файл не переписывается):
+
+```bash
+sudo /opt/finspace/scripts/check-backup-env-wrapper.sh
+```
+
+Порядок починки на уже установленном хосте — [upgrade.md](upgrade.md#521-существующие-хосты-ссылка-на-прежний-wrapper-в-backupenv).
+
 ## Порядок запуска и retention
 
 При `FINSPACE_BACKUP_OFFHOST_ENABLED=true`:
