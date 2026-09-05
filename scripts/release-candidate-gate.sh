@@ -365,13 +365,15 @@ phase_frontend_tests() {
   command -v npm >/dev/null 2>&1 || { echo "npm is required for the frontend checks"; return 1; }
   (
     cd "$project_root/frontend" || exit 1
-    # From the lockfile, so the dependency tree is the candidate's rather than yesterday's.
-    [ -d node_modules ] || npm ci || exit 1
+    # Always, never "only when node_modules is absent". An existing directory says nothing about
+    # which lockfile produced it, so reusing it would test the candidate's source against some
+    # earlier checkout's dependency tree — and a gate that names an exact commit cannot do that.
+    npm ci || exit 1
     npm test || exit 1
     npm run typecheck || exit 1
     npm run lint || exit 1
   ) || return 1
-  summarise "npm test, typecheck, lint"
+  summarise "npm ci, test, typecheck, lint"
 }
 
 phase_images_release() {
@@ -403,11 +405,23 @@ phase_shell_tests() {
   # and an empty directory is a defect in the gate rather than a pass.
   [ "$suites" -gt 0 ] || { echo "no shell test suites were discovered"; return 1; }
   [ "$failures" -eq 0 ] || return 1
-  if [ -n "$skipped" ]; then
-    summarise "$suites discovered suites, skipped in this environment:$skipped"
-  else
+  if [ -z "$skipped" ]; then
     summarise "$suites discovered suites, all passed"
+    return 0
   fi
+  # A release decision means every engineering gate actually ran. A suite this host could not
+  # execute is therefore only tolerable while the run is explicitly an engineering rehearsal; for
+  # the real decision it fails, because the honest answer is "rerun this where the suite can run"
+  # rather than a PASS covering a gate nobody executed. It is not an operational blocker either —
+  # nothing about F003 or F004 is missing.
+  if [ "$allow_pending" = true ]; then
+    summarise "$suites discovered suites, not run in this environment:$skipped"
+    return 0
+  fi
+  echo "these release-critical suites could not run in this environment:$skipped"
+  echo "a release decision requires an environment where every suite executes"
+  summarise "$suites discovered suites, could not run:$skipped"
+  return 1
 }
 
 phase_docs_gate() {

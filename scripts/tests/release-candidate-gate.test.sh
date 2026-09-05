@@ -124,7 +124,8 @@ printf 'services: {}\n' >"$project/compose.production.yml"
 printf '# Finspace test checkout\n' >"$project/README.md"
 
 # The frontend checks are host commands, so npm is stubbed on PATH rather than in a container.
-# node_modules exists here so the default run does not reinstall; a later case removes it.
+# node_modules is present throughout, because the interesting question is whether an already
+# installed tree is allowed to stand in for the candidate's lockfile. It must not be.
 mkdir -p "$test_root/bin" "$project/frontend/node_modules"
 printf '{ "name": "finspace-frontend" }\n' >"$project/frontend/package.json"
 cat >"$test_root/bin/npm" <<'STUB'
@@ -274,10 +275,17 @@ assert_contains "$log_text" "run --rm --no-deps" "container work did not use a f
 assert_missing "$log_text" "exec " "the gate entered a container it did not create"
 
 npm_text=$(cat "$npm_log")
-for command in "test" "run typecheck" "run lint"; do
+for command in "ci" "test" "run typecheck" "run lint"; do
   assert_contains "$npm_text" "$command" "the frontend checks skipped: npm $command"
 done
-assert_missing "$npm_text" "ci" "an installed dependency tree was reinstalled anyway"
+# An existing node_modules says nothing about which lockfile produced it, so it must not be
+# allowed to stand in for the candidate's dependency tree.
+[ -d "$project/frontend/node_modules" ] || fail "the fixture lost its installed dependency tree"
+assert_contains "$npm_text" "ci" "an existing node_modules suppressed the lockfile install"
+case "$npm_text" in
+  ci*) ;;
+  *) fail "the dependency install did not come first" ;;
+esac
 
 # A release gate must never mutate anything it is measuring.
 for forbidden in "--apply" "downgrade" "down -v" "restore" "prune" "DROP DATABASE"; do
@@ -350,9 +358,11 @@ status=0
 output=$(
   cd "$project" && RC_COMPOSE_LOG="$compose_log" RC_SHELL_SUITE_SKIP=1   FINSPACE_COMPOSE_CMD="sh $test_root/compose-stub.sh" FINSPACE_PYTHON="$python_command"   sh "$gate" --project-root "$project" --candidate "$candidate"     --expect-alembic-head "$head_revision" --expect-alembic-count "$head_count"     --allow-pending-operational 2>&1
 ) || status=$?
-assert_status "$status" 3 "a suite that cannot run in this environment failed the release"
+assert_status "$status" 3 "a suite that cannot run in this environment failed the engineering run"
 assert_contains "$output" "environment.test.sh" "the skipped suite was not named"
 assert_missing "$output" "all passed" "a skipped suite was counted as a pass"
+assert_contains "$output" "RELEASE STATUS: BLOCKED" "the engineering run did not report BLOCKED"
+assert_missing "$output" "RELEASE STATUS: PASS" "a skipped suite still reached a release approval"
 
 run_failing_compose() {
   status=0
@@ -387,13 +397,12 @@ run_failing_npm() {
   ) || status=$?
 }
 
-for failing in test typecheck lint; do
+for failing in ci test typecheck lint; do
   run_failing_npm "$failing"
   assert_status "$status" 1 "a failing frontend $failing did not fail the release"
 done
 
-# A checkout without an installed dependency tree must install it from the lockfile rather than
-# quietly testing whatever happens to be lying around.
+# A checkout without an installed dependency tree behaves identically: install, then check.
 rm -rf "$project/frontend/node_modules"
 run_valid --allow-pending-operational
 assert_status "$status" 3 "the frontend phase failed on a fresh checkout"
@@ -574,7 +583,39 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 assert document["release_status"] == "pass", document["release_status"]
 assert document["operational_status"] == "pass", document["operational_status"]
 assert document["blockers"] == [], document["blockers"]
+assert all(phase["status"] == "pass" for phase in document["phases"]), document["phases"]
 PY
+
+# The same complete evidence must NOT produce a release approval when a release-critical suite did
+# not actually run. "Every engineering gate passed" cannot include one nobody executed, and the
+# honest remedy is to rerun somewhere it can — so this is an engineering failure, not an F003/F004
+# blocker.
+skipped_release_json="$test_root/release-with-skip.json"
+status=0
+output=$(
+  cd "$project" && RC_COMPOSE_LOG="$compose_log" RC_NPM_LOG="$npm_log" RC_SHELL_SUITE_SKIP=1 \
+  FINSPACE_COMPOSE_CMD="sh $test_root/compose-stub.sh" FINSPACE_PYTHON="$python_command" \
+  sh "$gate" --project-root "$project" --candidate "$candidate" \
+    --expect-alembic-head "$head_revision" --expect-alembic-count "$head_count" \
+    --offhost-evidence "$offhost" --restore-evidence "$restore" --checklist "$list" \
+    --json-output "$skipped_release_json" 2>&1
+) || status=$?
+assert_status "$status" 1 "a release was approved with a shell suite that never ran"
+assert_missing "$output" "RELEASE STATUS: PASS" "a release was approved with an unexecuted suite"
+assert_contains "$output" "environment.test.sh" "the unexecuted suite was not named"
+"$python_command" - "$skipped_release_json" <<'CHECK' || fail "the skip was misattributed"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+assert document["release_status"] == "fail", document["release_status"]
+assert document["engineering_status"] == "fail", document["engineering_status"]
+# Not an operational blocker: nothing about F003 or F004 is missing here.
+assert document["operational_status"] == "pass", document["operational_status"]
+failed = [phase["name"] for phase in document["phases"] if phase["status"] == "fail"]
+assert failed == ["shell-tests"], failed
+CHECK
 
 # An open P0/P1 is an assertion that the candidate is defective, not that paperwork is missing.
 sed 's/"open_p0_p1": 0/"open_p0_p1": 1/' "$list" >"$acceptance/checklist-p0.json"
