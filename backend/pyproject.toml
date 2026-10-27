@@ -19,7 +19,7 @@ dependencies = [
   "PyJWT>=2.13,<3",
   "python-multipart>=0.0.32,<1",
   "redis>=5.2,<7",
-  "sqlalchemy>=2.0,<3",
+  "sqlalchemy[asyncio]>=2.0,<3",
   "uvicorn[standard]>=0.32,<1",
 ]
 
