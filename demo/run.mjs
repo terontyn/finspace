@@ -1,0 +1,10 @@
+import {spawn} from 'node:child_process';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const api=spawn(process.env.PYTHON || 'python',[path.join(root,'demo/api.py')],{cwd:root,stdio:'inherit'});
+const ui=spawn(process.execPath,[path.join(root,'frontend/node_modules/next/dist/bin/next'),'dev','--hostname','127.0.0.1','--port','8791'],{cwd:path.join(root,'frontend'),stdio:'inherit',env:{...process.env,INTERNAL_API_URL:'http://127.0.0.1:8790',NEXT_PUBLIC_DEMO_MODE:'true'}});
+const stop=()=>{api.kill();ui.kill();};
+process.on('SIGINT',stop);process.on('SIGTERM',stop);
+api.on('exit',()=>ui.kill());ui.on('exit',()=>api.kill());
+console.log('Open http://127.0.0.1:8791 - synthetic read-only adapter, not production API.');

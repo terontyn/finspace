@@ -133,5 +133,5 @@ application services продолжают работать из source mounts. �
 
 ```bash
 curl -fsS http://127.0.0.1:3000/login >/dev/null
-curl -fsS https://terontyn-pc.tailfcdf00.ts.net/ >/dev/null
+curl -fsS https://finspace.example.invalid/ >/dev/null
 ```

@@ -29,6 +29,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
   return (
     <html lang="ru" className={`${inter.variable} ${unbounded.variable}`}>
       <body>
+        {process.env.NEXT_PUBLIC_DEMO_MODE === "true" && <div role="status" style={{position:"fixed",bottom:0,left:0,right:0,zIndex:99999,background:"#fff0b5",color:"#30270d",padding:"8px",textAlign:"center",fontSize:"13px"}}>ДЕМО · Все финансовые данные вымышлены · API adapter только для просмотра · PostgreSQL и интеграции не подключены</div>}
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
