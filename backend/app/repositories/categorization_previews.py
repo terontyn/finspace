@@ -84,7 +84,8 @@ def candidate_filters(
     return filters
 
 
-def _candidate_statement(filters: list[Any]) -> Select[Any]:
+def _candidate_statement(filters: list[Any]) -> Select:
+    # The named projection is converted to PreviewCandidate below; it is not a one-column Select[Any].
     split_exists = (
         exists(
             select(TransactionSplit.id).where(
@@ -147,7 +148,7 @@ async def filtered_candidates(
     combine an old transaction version with new split state or turn a selected filter row into a
     synthetic ``not_found`` item.
     """
-    statement: Select[Any] = (
+    statement: Select = (
         _candidate_statement(filters)
         .order_by(FinancialTransaction.occurred_at.desc(), FinancialTransaction.id.desc())
         .limit(limit)
