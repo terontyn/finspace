@@ -1,0 +1,119 @@
+{
+  "name": "Finspace 05 - Month close reminder",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "months", "monthsInterval": 1, "triggerAtDayOfMonth": 1, "triggerAtHour": 10}]}},
+      "id": "month-schedule",
+      "name": "First day of month",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-780, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/notifications/targets?event_type=month_close",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=month-close-targets:{{ $now.toFormat('yyyy-LL') }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "targets",
+      "name": "Enabled month close targets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 0],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "items", "options": {}},
+      "id": "split-targets",
+      "name": "Split workspaces",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-340, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/month-close/{{ $now.minus({months:1}).year }}/{{ $now.minus({months:1}).month }}/prepare",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=month-close-preview:{{ $json.workspace_id }}:{{ $now.minus({months:1}).toFormat('yyyy-LL') }}"}]},
+        "options": {"timeout": 60000}
+      },
+      "id": "prepare",
+      "name": "Prepare previous month",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-100, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const c=$json; const recipients=$('Split workspaces').item.json.recipients||[]; const text=`Месяц ${c.period_month} готов к проверке.\\n\\nБлокирующих ошибок: ${(c.blocking_issues||[]).length}\\nПредупреждений: ${(c.warning_issues||[]).length}\\nБез категории: ${c.summary.uncategorized_count||0}\\nЧерновиков: ${c.summary.draft_count||0}\\nBackup: ${c.summary.backup_status}`; return recipients.map(r=>({json:{telegram_user_id:r.telegram_user_id,chat_id:r.telegram_chat_id,text}}));"
+      },
+      "id": "deliveries",
+      "name": "Prepare reminder deliveries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [140, -60]
+    },
+    {
+      "parameters": {"chatId": "={{ $json.chat_id }}", "text": "={{ $json.text }}", "additionalFields": {"appendAttribution": false}},
+      "id": "send",
+      "name": "Send review reminder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [380, -60],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/delivery-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=month-close-delivery:{{ $execution.id }}:{{ $json.message_id }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_user_id: $('Prepare reminder deliveries').item.json.telegram_user_id, telegram_chat_id: $json.chat.id, delivery_id: String($json.message_id), status: 'sent' } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "delivery",
+      "name": "Record delivery status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "error",
+      "name": "Handle error safely",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [600, 160]
+    }
+  ],
+  "connections": {
+    "First day of month": {"main": [[{"node": "Enabled month close targets", "type": "main", "index": 0}]]},
+    "Enabled month close targets": {"main": [[{"node": "Split workspaces", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Split workspaces": {"main": [[{"node": "Prepare previous month", "type": "main", "index": 0}]]},
+    "Prepare previous month": {"main": [[{"node": "Prepare reminder deliveries", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Prepare reminder deliveries": {"main": [[{"node": "Send review reminder", "type": "main", "index": 0}]]},
+    "Send review reminder": {"main": [[{"node": "Record delivery status", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Record delivery status": {"main": [[], [{"node": "Handle error safely", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "versionId": "00000000-0000-4000-8000-000000000005",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}

@@ -1,0 +1,26 @@
+[Unit]
+Description=Finspace staged import reclamation
+Documentation=file:///opt/finspace/docs/import.md
+# Docker must be up because the job runs inside the backend image, which is the only service that
+# has both the database and the data/imports mount. Nothing here depends on n8n, and nothing here
+# restarts an application container: `run --rm --no-deps` starts one throwaway process.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/finspace
+# Deliberately no EnvironmentFile: this job needs no host-only configuration, and the application
+# secrets it would otherwise inherit belong only in /opt/finspace/.env, read by Compose.
+ExecStart=/usr/local/bin/finspace-compose run --rm --no-deps backend python scripts/import_staging_reclaim.py --apply
+# Generous for a large staging directory, bounded so a stuck run cannot linger.
+TimeoutStartSec=15min
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=finspace-import-reclaim
+
+[Install]
+WantedBy=multi-user.target

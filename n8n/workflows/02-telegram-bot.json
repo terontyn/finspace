@@ -1,0 +1,189 @@
+{
+  "name": "Finspace 02 - Telegram bot polling",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "seconds", "secondsInterval": 5}]}},
+      "id": "telegram-schedule",
+      "name": "Poll every 5 seconds",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-820, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $credentials.accessToken }}/getUpdates?timeout=0&offset={{ $getWorkflowStaticData('global').offset || 0 }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "telegramApi",
+        "options": {"timeout": 30000}
+      },
+      "id": "telegram-poll",
+      "name": "Telegram getUpdates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-600, 0],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "result", "options": {}},
+      "id": "split-updates",
+      "name": "Split Telegram updates",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-380, -60]
+    },
+    {
+      "parameters": {
+        "jsCode": "const u=$json; const s=$getWorkflowStaticData('global'); s.offset=Math.max(s.offset||0,(u.update_id||0)+1); if(u.callback_query){return [{json:{path:'callback',chat_id:u.callback_query.message.chat.id,payload:{telegram_user_id:u.callback_query.from.id,telegram_chat_id:u.callback_query.message.chat.id,opaque_id:u.callback_query.data,update_id:u.update_id},idempotency:`telegram-callback:${u.update_id}`}}];} const m=u.message||{}; const text=m.text||''; if(text.toLowerCase().startsWith('/link ')){return [{json:{path:'link',chat_id:m.chat.id,payload:{code:text.slice(6).trim(),telegram_user_id:m.from.id,telegram_chat_id:m.chat.id,telegram_username:m.from.username||null},idempotency:`telegram-link:${u.update_id}`}}];} return [{json:{path:'message',chat_id:m.chat.id,payload:{telegram_user_id:m.from.id,telegram_chat_id:m.chat.id,text,update_id:u.update_id},idempotency:`telegram-message:${u.update_id}`}}];"
+      },
+      "id": "prepare-update",
+      "name": "Route update only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/{{ $json.path }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "={{ $json.idempotency }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.payload }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "backend",
+      "name": "Backend interprets update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [60, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/notifications/pending/claim",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=notification-claim:{{ $now.toFormat('yyyy-LL-dd-HH-mm-ss') }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "pending-notifications",
+      "name": "Claim pending notifications",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-600, 280],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "items", "options": {}},
+      "id": "split-pending",
+      "name": "Split pending notifications",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-360, 280]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.telegram_chat_id }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "id": "send-pending",
+      "name": "Send pending notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [-120, 280],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/delivery-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=queued-delivery:{{ $('Split pending notifications').item.json.opaque_id }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_user_id: $('Split pending notifications').item.json.telegram_user_id, telegram_chat_id: $('Split pending notifications').item.json.telegram_chat_id, delivery_id: $('Split pending notifications').item.json.opaque_id, status: 'sent' } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "pending-delivery",
+      "name": "Record queued delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [120, 280],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Route update only').item.json.chat_id }}",
+        "text": "={{ ($json.messages || []).join('\\n\\n') }}",
+        "additionalFields": {"replyMarkup": "inlineKeyboard", "inlineKeyboard": {"rows": "={{ ($json.buttons || []).map(b => ({ row: { buttons: [{ text: b.label, additionalFields: { callback_data: b.callback_data } }] } })) }}"}}
+      },
+      "id": "send-response",
+      "name": "Send safe response",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [300, -100],
+      "credentials": {"telegramApi": {"id": "finspace-telegram-bot", "name": "Finspace Telegram Bot"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/integrations/telegram/delivery-status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=telegram-delivery:{{ $execution.id }}:{{ $json.message_id || 0 }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { telegram_user_id: $('Route update only').item.json.payload.telegram_user_id, telegram_chat_id: $('Route update only').item.json.chat_id, delivery_id: String($json.message_id || $execution.id), status: 'sent' } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "delivery",
+      "name": "Record delivery status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, -100],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "error",
+      "name": "Handle error safely",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [300, 140]
+    }
+  ],
+  "connections": {
+    "Poll every 5 seconds": {"main": [[{"node": "Telegram getUpdates", "type": "main", "index": 0}, {"node": "Claim pending notifications", "type": "main", "index": 0}]]},
+    "Telegram getUpdates": {"main": [[{"node": "Split Telegram updates", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Split Telegram updates": {"main": [[{"node": "Route update only", "type": "main", "index": 0}]]},
+    "Route update only": {"main": [[{"node": "Backend interprets update", "type": "main", "index": 0}]]},
+    "Backend interprets update": {"main": [[{"node": "Send safe response", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Send safe response": {"main": [[{"node": "Record delivery status", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Record delivery status": {"main": [[], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Claim pending notifications": {"main": [[{"node": "Split pending notifications", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Split pending notifications": {"main": [[{"node": "Send pending notification", "type": "main", "index": 0}]]},
+    "Send pending notification": {"main": [[{"node": "Record queued delivery", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Record queued delivery": {"main": [[], [{"node": "Handle error safely", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "versionId": "00000000-0000-4000-8000-000000000002",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}

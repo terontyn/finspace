@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly Finspace staged import reclamation
+Documentation=file:///opt/finspace/docs/import.md
+
+[Timer]
+# HOST LOCAL TIME. Weekly, not daily: the application already unlinks a staged file inline at
+# commit and at cancel, so this job exists to sweep up what a crash left behind. That is rare, and
+# a rare job should run rarely.
+OnCalendar=Sun *-*-* 03:30:00
+# A host that was off at the scheduled time still runs it once it comes back.
+Persistent=true
+# Keeps it away from the nightly backup window.
+RandomizedDelaySec=30min
+AccuracySec=1min
+Unit=finspace-import-reclaim.service
+
+[Install]
+WantedBy=timers.target

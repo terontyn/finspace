@@ -1,0 +1,117 @@
+{
+  "name": "Finspace 01 - Recurring rules",
+  "nodes": [
+    {
+      "parameters": {"rule": {"interval": [{"field": "minutes", "minutesInterval": 5}]}},
+      "id": "recurring-schedule",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-720, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/heartbeat",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=heartbeat:{{ $now.toFormat('yyyy-LL-dd-HH-mm') }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { workflow_count: 6 } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "heartbeat",
+      "name": "Backend heartbeat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-500, 0],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/recurring-rules/due",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=recurring-due:{{ $now.toFormat('yyyy-LL-dd-HH-mm') }}"}]},
+        "options": {"timeout": 30000}
+      },
+      "id": "get-due",
+      "name": "Get due rule IDs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-280, 0],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {"fieldToSplitOut": "items", "options": {}},
+      "id": "split-items",
+      "name": "Split due items",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-60, -60]
+    },
+    {
+      "parameters": {"options": {"batchSize": 20}},
+      "id": "batch",
+      "name": "Split in Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [160, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FINSPACE_BACKEND_URL }}/api/v1/automation/recurring-rules/{{ $json.rule_id }}/execute",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [{"name": "X-Idempotency-Key", "value": "=recurring:{{ $json.rule_id }}:{{ $json.scheduled_for }}"}]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { scheduled_for: $json.scheduled_for } }}",
+        "options": {"timeout": 30000}
+      },
+      "id": "execute",
+      "name": "Execute stored rule",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, -60],
+      "credentials": {"httpHeaderAuth": {"id": "finspace-service-key", "name": "Finspace ServiceKey"}},
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {},
+      "id": "completed",
+      "name": "Completed or skipped",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [640, -100]
+    },
+    {
+      "parameters": {},
+      "id": "error",
+      "name": "Handle error safely",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [640, 120]
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {"main": [[{"node": "Backend heartbeat", "type": "main", "index": 0}]]},
+    "Backend heartbeat": {"main": [[{"node": "Get due rule IDs", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Get due rule IDs": {"main": [[{"node": "Split due items", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]},
+    "Split due items": {"main": [[{"node": "Split in Batches", "type": "main", "index": 0}]]},
+    "Split in Batches": {"main": [[{"node": "Execute stored rule", "type": "main", "index": 0}], [{"node": "Completed or skipped", "type": "main", "index": 0}]]},
+    "Execute stored rule": {"main": [[{"node": "Split in Batches", "type": "main", "index": 0}], [{"node": "Handle error safely", "type": "main", "index": 0}]]}
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true},
+  "versionId": "00000000-0000-4000-8000-000000000001",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": []
+}
