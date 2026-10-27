@@ -85,7 +85,7 @@ def candidate_filters(
 
 
 def _candidate_statement(filters: list[Any]) -> Select:
-    # The named projection is converted to PreviewCandidate below; it is not a one-column Select[Any].
+    # This multi-column projection is converted to PreviewCandidate below.
     split_exists = (
         exists(
             select(TransactionSplit.id).where(
